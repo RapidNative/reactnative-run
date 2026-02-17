@@ -53,7 +53,7 @@ export interface BundlerPlugin {
 export interface BundlerConfig {
   resolver: ResolverConfig;
   transformer: Transformer;
-  server: { packageServerUrl: string };
+  server: { packageServerUrl: string; platform?: string };
   hmr?: { enabled: boolean; reactRefresh?: boolean };
   plugins?: BundlerPlugin[];
 }

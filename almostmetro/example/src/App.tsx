@@ -15,11 +15,11 @@ function bundleInWorker(
   worker: Worker,
   files: FileMap,
   packageServerUrl: string,
-): Promise<string> {
+): Promise<Record<string, string>> {
   return new Promise((resolve, reject) => {
     worker.onmessage = (e: MessageEvent) => {
       if (e.data.type === "result") {
-        resolve(e.data.code);
+        resolve(e.data.bundles);
       } else if (e.data.type === "error") {
         reject(new Error(e.data.message));
       }
@@ -47,7 +47,7 @@ export function App() {
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const editorFSRef = useRef<EditorFS | null>(null);
-  const lastBundleRef = useRef<string>("");
+  const lastBundlesRef = useRef<Record<string, string>>({});
 
   // Initialize bundler worker
   useEffect(() => {
@@ -94,8 +94,8 @@ export function App() {
       } else if (data.type === "hmr-full-reload") {
         addLog("HMR boundary not found, reloading...", "info");
         // Use the cached full bundle from the last hmr-update
-        if (lastBundleRef.current) {
-          executeInIframe(lastBundleRef.current);
+        if (lastBundlesRef.current["web"]) {
+          executeInIframe(lastBundlesRef.current["web"]);
         }
       }
     };
@@ -116,12 +116,12 @@ export function App() {
       if (data.type === "watch-ready") {
         setHmrReady(true);
         setBundling(false);
-        lastBundleRef.current = data.code;
+        lastBundlesRef.current = data.bundles;
         addLog("Watch build ready (initial)", "info");
-        executeInIframe(data.code);
+        executeInIframe(data.bundles["web"]);
       } else if (data.type === "hmr-update") {
-        // Cache the full bundle for fallback
-        lastBundleRef.current = data.bundle;
+        // Cache the full bundles for fallback
+        lastBundlesRef.current = data.bundles;
         // Forward HMR update to iframe
         const iframe = iframeRef.current;
         if (iframe && iframe.contentWindow) {
@@ -141,9 +141,9 @@ export function App() {
           );
         }
       } else if (data.type === "watch-rebuild") {
-        lastBundleRef.current = data.code;
+        lastBundlesRef.current = data.bundles;
         addLog("Full rebuild (HMR not possible)", "info");
-        executeInIframe(data.code);
+        executeInIframe(data.bundles["web"]);
       } else if (data.type === "watch-stopped") {
         setHmrReady(false);
       } else if (data.type === "error" && watchMode) {
@@ -241,14 +241,15 @@ export function App() {
         addLog("Worker not initialized", "error");
         return;
       }
-      const bundleCode = await bundleInWorker(
+      const bundles = await bundleInWorker(
         workerRef.current,
         efs.toFileMap(),
         window.location.origin,
       );
 
+      lastBundlesRef.current = bundles;
       addLog("Bundle ready. Executing...", "info");
-      executeInIframe(bundleCode);
+      executeInIframe(bundles["web"]);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       addLog("Bundle error: " + message, "error");
@@ -289,7 +290,7 @@ export function App() {
     }
     setWatchMode(false);
     setHmrReady(false);
-    lastBundleRef.current = "";
+    lastBundlesRef.current = {};
 
     addLog("Watch mode stopped", "info");
 
@@ -342,6 +343,24 @@ export function App() {
     (iframeRef.current as HTMLIFrameElement).src = url;
   }
 
+  function downloadFile(content: string, filename: string) {
+    const blob = new Blob([content], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadWebBundle() {
+    if (lastBundlesRef.current["web"]) downloadFile(lastBundlesRef.current["web"], "bundle.web.js");
+  }
+
+  function downloadExpoBundle() {
+    if (lastBundlesRef.current["expo"]) downloadFile(lastBundlesRef.current["expo"], "bundle.expo.js");
+  }
+
   const projectNames = Object.keys(projects);
 
   return (
@@ -375,6 +394,22 @@ export function App() {
               </button>
             </>
           )}
+          <button
+            id="download-web-btn"
+            onClick={downloadWebBundle}
+            disabled={!lastBundlesRef.current["web"]}
+            title="Download web bundle"
+          >
+            Web
+          </button>
+          <button
+            id="download-expo-btn"
+            onClick={downloadExpoBundle}
+            disabled={!lastBundlesRef.current["expo"]}
+            title="Download Expo bundle"
+          >
+            Expo
+          </button>
         </div>
       </header>
 

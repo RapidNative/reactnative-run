@@ -16,12 +16,6 @@ const EXPO_SHIM = [
 const EXPO_STATUS_BAR_SHIM =
   "exports.StatusBar = function StatusBar() { return null; };";
 
-/**
- * Expo web plugin:
- * - Aliases react-native → react-native-web
- * - Shims expo (registerRootComponent) and expo-status-bar (no-op)
- * - Injects __DEV__ and global for react-native-web compatibility
- */
 function isJSX(filename: string): boolean {
   return filename.endsWith(".tsx") || filename.endsWith(".jsx");
 }
@@ -30,8 +24,8 @@ function hasReactImport(src: string): boolean {
   return /\bimport\s+React\b/.test(src) || /\bfrom\s+['"]react['"]/.test(src);
 }
 
-export const expoWebPlugin: BundlerPlugin = {
-  name: "expo-web",
+export const webPlugin: BundlerPlugin = {
+  name: "web",
   transformSource({ src, filename }) {
     if (isJSX(filename) && !hasReactImport(src)) {
       return { src: 'import React from "react";\n' + src };

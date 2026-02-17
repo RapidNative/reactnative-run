@@ -44,9 +44,9 @@ function parseSpecifier(raw: string) {
   return { pkgName, version, subpath };
 }
 
-async function bundlePkg(pkgName: string, version: string, subpath: string): Promise<string> {
+async function bundlePkg(pkgName: string, version: string, subpath: string, platform: string = "browser"): Promise<string> {
   const requireSpecifier = pkgName + subpath;
-  const cacheKey = `${pkgName}@${version}${subpath.replace(/\//g, "__")}`;
+  const cacheKey = `${pkgName}@${version}${subpath.replace(/\//g, "__")}_${platform}`;
   const cacheFile = path.join(CACHE_DIR, `${cacheKey}.js`);
 
   if (fs.existsSync(cacheFile)) {
@@ -82,7 +82,7 @@ async function bundlePkg(pkgName: string, version: string, subpath: string): Pro
       format: "iife",
       globalName: "__module",
       outfile: outFile,
-      platform: "browser",
+      platform: (platform === "node" ? "node" : "browser") as esbuild.Platform,
       target: "es2020",
       external: peerDeps,
     });
@@ -110,8 +110,12 @@ function packageServerPlugin(): Plugin {
           return;
         }
 
-        const raw = decodeURIComponent(req.url.slice("/pkg/".length));
+        const [pathname, queryString] = req.url.split("?");
+        const raw = decodeURIComponent(pathname.slice("/pkg/".length));
         if (!raw) { next(); return; }
+
+        const params = new URLSearchParams(queryString || "");
+        const platform = params.get("platform") || "browser";
 
         const parsed = parseSpecifier(raw);
         if (!parsed) {
@@ -120,7 +124,7 @@ function packageServerPlugin(): Plugin {
           return;
         }
 
-        bundlePkg(parsed.pkgName, parsed.version, parsed.subpath)
+        bundlePkg(parsed.pkgName, parsed.version, parsed.subpath, platform)
           .then((code) => {
             res.setHeader("Content-Type", "application/javascript");
             res.setHeader("Access-Control-Allow-Origin", "*");

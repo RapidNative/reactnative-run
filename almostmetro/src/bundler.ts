@@ -86,7 +86,7 @@ export class Bundler {
     return this.runTransform(filename, src);
   }
 
-  /** Bundle starting from the entry file, returning executable code */
+  /** Bundle starting from the entry file */
   async bundle(entryFile: string): Promise<string> {
     const moduleMap = await this.buildModuleMap(entryFile);
     return this.emitBundle(moduleMap, entryFile);
@@ -127,7 +127,8 @@ export class Bundler {
 
   /** Fetch a pre-bundled npm package from the package server */
   private async fetchPackage(specifier: string): Promise<string> {
-    const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
+    const platform = this.config.server.platform || "browser";
+    const url = this.config.server.packageServerUrl + "/pkg/" + specifier + "?platform=" + platform;
     const res = await fetch(url);
     if (!res.ok)
       throw new Error("Failed to fetch " + specifier + ": " + res.status);
@@ -155,9 +156,7 @@ export class Bundler {
         throw new Error("File not found: " + filePath);
       }
 
-      // Transform the file (TS -> JS, JSX -> JS, etc.)
-      const transformed = this.transformFile(filePath, source);
-
+      const transformed = this.runTransform(filePath, source);
       const rewritten = rewriteRequires(transformed, filePath, this.makeResolveTarget(filePath));
       moduleMap[filePath] = rewritten;
 
@@ -192,7 +191,7 @@ export class Bundler {
       delete npmPackages[name];
     }
 
-    // Fetch npm packages in parallel, then resolve any transitive deps (subpath requires etc.)
+    // Fetch npm packages in parallel, then resolve any transitive deps
     const skipNames = new Set([...Object.keys(aliases), ...Object.keys(shims)]);
     const knownNpm = new Set(Object.keys(npmPackages));
     let toFetch = [...knownNpm];
@@ -218,7 +217,7 @@ export class Bundler {
       }
     }
 
-    // Inject alias shim modules: require("react-native") → re-exports react-native-web
+    // Inject alias shim modules
     for (const [from, to] of Object.entries(aliases)) {
       moduleMap[from] = 'module.exports = require("' + to + '");';
     }

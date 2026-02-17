@@ -4,6 +4,9 @@ import fs from "fs";
 import os from "os";
 import { execSync } from "child_process";
 import esbuild from "esbuild";
+import * as babel from "@babel/core";
+import hermesSyntaxPlugin from "babel-plugin-syntax-hermes-parser";
+import flowStripPlugin from "@babel/plugin-transform-flow-strip-types";
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
@@ -57,10 +60,55 @@ function parseSpecifier(raw: string) {
   return { pkgName, version, subpath };
 }
 
+// Map incoming platform values to esbuild-compatible platform names
+function toEsbuildPlatform(platform: string): esbuild.Platform {
+  if (platform === "node") return "node";
+  return "browser";
+}
+
+// esbuild plugin: use Babel with Hermes parser to strip Flow types
+// (including component syntax) from .js files in node_modules
+function babelFlowPlugin(): esbuild.Plugin {
+  return {
+    name: "babel-flow-strip",
+    setup(build) {
+      build.onLoad({ filter: /\.js$/ }, async (args) => {
+        if (!args.path.includes("node_modules")) return undefined;
+        const source = fs.readFileSync(args.path, "utf-8");
+        try {
+          const result = babel.transformSync(source, {
+            filename: args.path,
+            plugins: [hermesSyntaxPlugin, flowStripPlugin],
+            configFile: false,
+            babelrc: false,
+          });
+          if (!result?.code) return undefined;
+          return { contents: result.code, loader: "jsx" };
+        } catch (e) {
+          // If Babel fails, let esbuild try the file as-is
+          return undefined;
+        }
+      });
+    },
+  };
+}
+
+// esbuild plugin: handle asset imports (.png, .jpg, etc.) as empty modules
+function assetPlugin(): esbuild.Plugin {
+  return {
+    name: "asset-stub",
+    setup(build) {
+      build.onLoad({ filter: /\.(png|jpg|jpeg|gif|svg|bmp|webp|ico)$/ }, () => {
+        return { contents: "module.exports = '';", loader: "js" };
+      });
+    },
+  };
+}
+
 // Bundle and serve an npm package
-async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string) {
+async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, platform: string = "browser") {
   const requireSpecifier = pkgName + subpath;
-  const cacheKey = `${pkgName}@${version}${subpath.replace(/\//g, "__")}`;
+  const cacheKey = `${pkgName}@${version}${subpath.replace(/\//g, "__")}_${platform}`;
   const cacheFile = path.join(CACHE_DIR, `${cacheKey}.js`);
 
   // Check disk cache
@@ -97,17 +145,27 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
     );
 
     const outFile = path.join(tmpDir, "__out.js");
+
+    // For native platform, resolve RN platform-specific extensions first
+    const resolveExtensions = platform === "native"
+      ? [".native.tsx", ".native.ts", ".native.jsx", ".native.js", ".android.tsx", ".android.ts", ".android.jsx", ".android.js", ".ios.tsx", ".ios.ts", ".ios.jsx", ".ios.js", ".tsx", ".ts", ".jsx", ".js", ".json"]
+      : undefined;
+
     await esbuild.build({
       entryPoints: [entryFile],
       bundle: true,
       format: "iife",
       globalName: "__module",
       outfile: outFile,
-      platform: "browser",
+      platform: toEsbuildPlatform(platform),
       target: "es2020",
       // Keep peer deps as require() calls so the runtime resolves them
       // to the same shared instance (e.g. react-dom shares the react instance)
       external: peerDeps,
+      loader: { ".js": "jsx" },
+      logLevel: "warning",
+      ...(resolveExtensions && { resolveExtensions }),
+      plugins: [babelFlowPlugin(), assetPlugin()],
     });
 
     const bundled = fs.readFileSync(outFile, "utf-8");
@@ -137,10 +195,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   const raw = decodeURIComponent(req.path.slice("/pkg/".length));
   if (!raw) { next(); return; }
 
+  const platform = (req.query.platform as string) || "browser";
+
   const parsed = parseSpecifier(raw);
   if (!parsed) { res.status(400).send("// Invalid package specifier\n"); return; }
 
-  handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath).catch(
+  handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath, platform).catch(
     (err) => {
       console.error("[unhandled]", err);
       if (!res.headersSent) res.status(500).send("// Internal error\n");

@@ -147,7 +147,8 @@ export class IncrementalBundler {
 
   /** Fetch a pre-bundled npm package from the package server */
   private async fetchPackage(specifier: string): Promise<string> {
-    const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
+    const platform = this.config.server.platform || "browser";
+    const url = this.config.server.packageServerUrl + "/pkg/" + specifier + "?platform=" + platform;
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error("Failed to fetch " + specifier + ": " + res.status);
@@ -180,10 +181,7 @@ export class IncrementalBundler {
       };
     }
 
-    // Transform
     const transformed = this.transformFile(filePath, source);
-
-    // Rewrite requires
     const rewritten = rewriteRequires(transformed, filePath, this.makeResolveTarget(filePath));
 
     // Extract deps from rewritten code (has absolute paths for local deps)
@@ -291,7 +289,7 @@ export class IncrementalBundler {
       );
     }
 
-    // Fallback to standard IIFE (same as Bundler.emitBundle)
+    // Fallback to standard IIFE
     const moduleEntries = Object.keys(this.moduleMap)
       .map((id) => {
         return (

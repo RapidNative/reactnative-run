@@ -6,9 +6,10 @@ import {
   reactRefreshTransformer,
 } from "almostmetro";
 import type { FileMap, BundlerConfig, ContentChange } from "almostmetro";
-import { expoWebPlugin } from "./plugins/expo-web";
+import { webPlugin } from "./plugins/web-plugin";
+import { expoPlugin } from "./plugins/expo-plugin";
 
-// --- One-shot bundle types (backward compat) ---
+// --- One-shot bundle types ---
 
 interface BundleRequest {
   type?: "bundle";
@@ -39,32 +40,68 @@ type WorkerRequest =
   | WatchUpdateRequest
   | WatchStopRequest;
 
+// --- Target config builder ---
+
+interface TargetConfig {
+  name: string;
+  config: BundlerConfig;
+}
+
+function buildTargetConfigs(packageServerUrl: string, opts?: { hmr?: boolean }): TargetConfig[] {
+  return [
+    {
+      name: "web",
+      config: {
+        resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+        transformer: opts?.hmr ? reactRefreshTransformer : typescriptTransformer,
+        server: { packageServerUrl, platform: "browser" },
+        hmr: opts?.hmr ? { enabled: true, reactRefresh: true } : undefined,
+        plugins: [webPlugin],
+      },
+    },
+    {
+      name: "expo",
+      config: {
+        resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+        transformer: typescriptTransformer,
+        server: { packageServerUrl, platform: "native" },
+        plugins: [expoPlugin],
+      },
+    },
+  ];
+}
+
 // --- Watch mode state ---
 
-let incrementalBundler: IncrementalBundler | null = null;
+let incrementalBundlers: Map<string, IncrementalBundler> | null = null;
 let watchFS: VirtualFS | null = null;
-let watchPackageServerUrl: string | null = null;
 
 async function handleBundle(data: BundleRequest): Promise<void> {
   const { files, packageServerUrl } = data;
-
-  const config: BundlerConfig = {
-    resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
-    transformer: typescriptTransformer,
-    server: { packageServerUrl },
-    plugins: [expoWebPlugin],
-  };
+  const targets = buildTargetConfigs(packageServerUrl);
 
   try {
     const vfs = new VirtualFS(files);
-    const bundler = new Bundler(vfs, config);
     const entryFile = vfs.getEntryFile();
     if (!entryFile) {
       self.postMessage({ type: "error", message: "No entry file found" });
       return;
     }
-    const code = await bundler.bundle(entryFile);
-    self.postMessage({ type: "result", code });
+
+    const results = await Promise.all(
+      targets.map(async (t) => {
+        const bundler = new Bundler(vfs, t.config);
+        const bundle = await bundler.bundle(entryFile);
+        return { name: t.name, bundle };
+      }),
+    );
+
+    const bundles: Record<string, string> = {};
+    for (const r of results) {
+      bundles[r.name] = r.bundle;
+    }
+
+    self.postMessage({ type: "result", bundles });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     self.postMessage({ type: "error", message });
@@ -73,28 +110,32 @@ async function handleBundle(data: BundleRequest): Promise<void> {
 
 async function handleWatchStart(data: WatchStartRequest): Promise<void> {
   const { files, packageServerUrl } = data;
-  watchPackageServerUrl = packageServerUrl;
-
-  const config: BundlerConfig = {
-    resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
-    transformer: reactRefreshTransformer,
-    server: { packageServerUrl },
-    hmr: { enabled: true, reactRefresh: true },
-    plugins: [expoWebPlugin],
-  };
+  const targets = buildTargetConfigs(packageServerUrl, { hmr: true });
 
   try {
     watchFS = new VirtualFS(files);
-    incrementalBundler = new IncrementalBundler(watchFS, config);
-
     const entryFile = watchFS.getEntryFile();
     if (!entryFile) {
       self.postMessage({ type: "error", message: "No entry file found" });
       return;
     }
 
-    const result = await incrementalBundler.build(entryFile);
-    self.postMessage({ type: "watch-ready", code: result.bundle });
+    incrementalBundlers = new Map();
+    const results = await Promise.all(
+      targets.map(async (t) => {
+        const bundler = new IncrementalBundler(watchFS!, t.config);
+        incrementalBundlers!.set(t.name, bundler);
+        const result = await bundler.build(entryFile);
+        return { name: t.name, result };
+      }),
+    );
+
+    const bundles: Record<string, string> = {};
+    for (const r of results) {
+      bundles[r.name] = r.result.bundle;
+    }
+
+    self.postMessage({ type: "watch-ready", bundles });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     self.postMessage({ type: "error", message });
@@ -102,7 +143,7 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
 }
 
 async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
-  if (!incrementalBundler || !watchFS) {
+  if (!incrementalBundlers || !watchFS) {
     self.postMessage({ type: "error", message: "Watch mode not started" });
     return;
   }
@@ -114,7 +155,7 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
       return;
     }
 
-    // Apply changes directly to the VirtualFS
+    // Apply changes to the shared VirtualFS once
     for (const change of changes) {
       if (change.type === "delete") {
         watchFS.delete(change.path);
@@ -123,16 +164,35 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
       }
     }
 
-    // Rebuild with the FileChange-compatible list
-    incrementalBundler.updateFS(watchFS);
     const fileChanges = changes.map((c) => ({ path: c.path, type: c.type }));
-    const result = await incrementalBundler.rebuild(fileChanges);
 
-    if (result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload) {
-      self.postMessage({ type: "watch-rebuild", code: result.bundle });
+    // Rebuild all targets in parallel
+    const results = await Promise.all(
+      Array.from(incrementalBundlers.entries()).map(async ([name, bundler]) => {
+        bundler.updateFS(watchFS!);
+        const result = await bundler.rebuild(fileChanges);
+        return { name, result };
+      }),
+    );
+
+    const bundles: Record<string, string> = {};
+    for (const r of results) {
+      bundles[r.name] = r.result.bundle;
+    }
+
+    // Find the target with HMR enabled (web)
+    const hmrResult = results.find(
+      (r) => r.result.hmrUpdate !== null,
+    );
+
+    if (!hmrResult || hmrResult.result.type === "full" || hmrResult.result.hmrUpdate?.requiresReload) {
+      self.postMessage({ type: "watch-rebuild", bundles });
     } else {
-      // Include full bundle as fallback for hmr-full-reload from iframe
-      self.postMessage({ type: "hmr-update", update: result.hmrUpdate, bundle: result.bundle });
+      self.postMessage({
+        type: "hmr-update",
+        update: hmrResult.result.hmrUpdate,
+        bundles,
+      });
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -141,9 +201,8 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
 }
 
 function handleWatchStop(): void {
-  incrementalBundler = null;
+  incrementalBundlers = null;
   watchFS = null;
-  watchPackageServerUrl = null;
   self.postMessage({ type: "watch-stopped" });
 }
 
