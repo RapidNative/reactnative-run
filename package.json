@@ -1,0 +1,12 @@
+{
+  "name": "new-es-builder",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix package-server\" \"npm run dev --prefix almostmetro\" \"npm run dev --prefix almostmetro/example\" \"npx serve docs -l 3002\"",
+    "docs": "npx serve docs -l 3002"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19",
+    "zustand": "^5"
+  }
+}

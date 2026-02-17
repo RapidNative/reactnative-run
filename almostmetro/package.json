@@ -1,0 +1,16 @@
+{
+  "name": "almostmetro",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "sucrase": "^3.35.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
