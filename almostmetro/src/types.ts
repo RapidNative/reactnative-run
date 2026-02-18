@@ -57,6 +57,7 @@ export interface BundlerConfig {
   server: { packageServerUrl: string };
   hmr?: { enabled: boolean; reactRefresh?: boolean };
   plugins?: BundlerPlugin[];
+  env?: Record<string, string>;
 }
 
 export interface FileChange {

@@ -1,7 +1,7 @@
 import { VirtualFS } from "./fs.js";
 import { Resolver } from "./resolver.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
-import { findRequires, rewriteRequires } from "./utils.js";
+import { findRequires, rewriteRequires, buildBundlePreamble } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -118,10 +118,12 @@ export class Bundler {
     }
   }
 
-  /** Resolve an npm specifier to a versioned form using package.json versions */
+  /** Resolve an npm specifier to a versioned form using package.json versions.
+   *  Priority: user's package.json > transitive dep versions from manifests > bare name */
   private resolveNpmSpecifier(
     specifier: string,
-    versions: Record<string, string>
+    versions: Record<string, string>,
+    transitiveDepsVersions?: Record<string, string>
   ): string {
     // Extract base package name: "@scope/pkg/sub" -> "@scope/pkg", "lodash/fp" -> "lodash"
     let baseName: string;
@@ -132,7 +134,7 @@ export class Bundler {
       baseName = specifier.split("/")[0];
     }
 
-    const version = versions[baseName];
+    const version = versions[baseName] || (transitiveDepsVersions && transitiveDepsVersions[baseName]);
     if (!version) return specifier;
 
     const subpath = specifier.slice(baseName.length); // e.g. "/client" or ""
@@ -140,14 +142,20 @@ export class Bundler {
   }
 
   /** Fetch a pre-bundled npm package from the package server */
-  private async fetchPackage(specifier: string): Promise<string> {
+  private async fetchPackage(specifier: string): Promise<{ code: string; externals: Record<string, string> }> {
     const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
     const res = await fetch(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
     }
-    return res.text();
+    const code = await res.text();
+    let externals: Record<string, string> = {};
+    const externalsHeader = res.headers.get("X-Externals");
+    if (externalsHeader) {
+      try { externals = JSON.parse(externalsHeader); } catch {}
+    }
+    return { code, externals };
   }
 
   /** Build the module map by walking the dependency graph */
@@ -156,6 +164,7 @@ export class Bundler {
     const visited: { [key: string]: boolean } = {};
     const npmPackages: { [key: string]: boolean } = {};
     const versions = this.getPackageVersions();
+    const transitiveDepsVersions: Record<string, string> = {};
 
     // Pre-seed with all package.json deps so they're fetched in one batch
     for (const name of Object.keys(versions)) {
@@ -221,9 +230,15 @@ export class Bundler {
 
     while (toFetch.length > 0) {
       const fetches = toFetch.map((name: string) => {
-        const versionedSpecifier = this.resolveNpmSpecifier(name, versions);
-        return this.fetchPackage(versionedSpecifier).then((code: string) => {
+        const versionedSpecifier = this.resolveNpmSpecifier(name, versions, transitiveDepsVersions);
+        return this.fetchPackage(versionedSpecifier).then(({ code, externals }) => {
           moduleMap[name] = code;
+          // Merge externals into transitive versions (don't overwrite existing entries)
+          for (const [dep, ver] of Object.entries(externals)) {
+            if (!transitiveDepsVersions[dep]) {
+              transitiveDepsVersions[dep] = ver;
+            }
+          }
         });
       });
       await Promise.all(fetches);
@@ -268,6 +283,7 @@ export class Bundler {
       .join(",\n\n");
 
     return (
+      buildBundlePreamble(this.config.env) +
       "(function(modules) {\n" +
       "  var cache = {};\n" +
       "  function require(id) {\n" +

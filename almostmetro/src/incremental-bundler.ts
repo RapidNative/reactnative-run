@@ -3,7 +3,7 @@ import { Resolver } from "./resolver.js";
 import { DependencyGraph } from "./dependency-graph.js";
 import { ModuleCache } from "./module-cache.js";
 import { emitHmrBundle } from "./hmr-runtime.js";
-import { findRequires, rewriteRequires, hashString } from "./utils.js";
+import { findRequires, rewriteRequires, hashString, buildBundlePreamble } from "./utils.js";
 import type {
   BundlerConfig,
   BundlerPlugin,
@@ -23,6 +23,7 @@ export class IncrementalBundler {
   private moduleMap: ModuleMap = {};
   private entryFile: string | null = null;
   private packageVersions: Record<string, string> = {};
+  private transitiveDepsVersions: Record<string, string> = {};
 
   constructor(fs: VirtualFS, config: BundlerConfig) {
     this.fs = fs;
@@ -141,7 +142,8 @@ export class IncrementalBundler {
     }
   }
 
-  /** Resolve an npm specifier to a versioned form */
+  /** Resolve an npm specifier to a versioned form.
+   *  Priority: user's package.json > transitive dep versions from manifests > bare name */
   private resolveNpmSpecifier(
     specifier: string,
     versions: Record<string, string>,
@@ -153,21 +155,27 @@ export class IncrementalBundler {
     } else {
       baseName = specifier.split("/")[0];
     }
-    const version = versions[baseName];
+    const version = versions[baseName] || this.transitiveDepsVersions[baseName];
     if (!version) return specifier;
     const subpath = specifier.slice(baseName.length);
     return baseName + "@" + version + subpath;
   }
 
   /** Fetch a pre-bundled npm package from the package server */
-  private async fetchPackage(specifier: string): Promise<string> {
+  private async fetchPackage(specifier: string): Promise<{ code: string; externals: Record<string, string> }> {
     const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
     const res = await fetch(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
     }
-    return res.text();
+    const code = await res.text();
+    let externals: Record<string, string> = {};
+    const externalsHeader = res.headers.get("X-Externals");
+    if (externalsHeader) {
+      try { externals = JSON.parse(externalsHeader); } catch {}
+    }
+    return { code, externals };
   }
 
   /**
@@ -291,9 +299,15 @@ export class IncrementalBundler {
       );
       for (let i = 0; i < toFetch.length; i++) {
         const { name, specifier } = toFetch[i];
-        const code = results[i];
+        const { code, externals } = results[i];
         this.cache.setNpmPackage(specifier, code);
         this.moduleMap[name] = code;
+        // Merge externals into transitive versions (don't overwrite existing entries)
+        for (const [dep, ver] of Object.entries(externals)) {
+          if (!this.transitiveDepsVersions[dep]) {
+            this.transitiveDepsVersions[dep] = ver;
+          }
+        }
       }
     }
   }
@@ -309,6 +323,7 @@ export class IncrementalBundler {
         this.entryFile!,
         this.graph.getReverseDepsMap(),
         reactRefresh,
+        this.config.env,
       );
     }
 
@@ -325,6 +340,7 @@ export class IncrementalBundler {
       .join(",\n\n");
 
     return (
+      buildBundlePreamble(this.config.env) +
       "(function(modules) {\n" +
       "  var cache = {};\n" +
       "  function require(id) {\n" +
@@ -429,8 +445,9 @@ export class IncrementalBundler {
       const depsChanged =
         JSON.stringify(newVersions) !== JSON.stringify(oldVersions);
       if (depsChanged) {
-        // Full rebuild: invalidate all npm caches
+        // Full rebuild: invalidate all npm caches and transitive version map
         this.cache.invalidateNpmPackages();
+        this.transitiveDepsVersions = {};
         this.packageVersions = newVersions;
         return this.build(this.entryFile);
       }

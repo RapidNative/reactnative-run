@@ -91,14 +91,19 @@ The bundler walks the dependency graph starting from the entry file:
 
 When the bundler encounters `require("lodash")`, it fetches from the package server:
 
-1. Server receives `GET /pkg/lodash`
-2. Creates temp directory, runs `npm install lodash`
-3. Reads the installed package's `peerDependencies`
-4. Bundles with esbuild (IIFE format, browser platform), marking peers as external
-5. Wraps output to expose `module.exports`
-6. Caches to disk for subsequent requests
+1. Server receives `GET /pkg/lodash@4.17.21`
+2. Creates temp directory, runs `npm install lodash@4.17.21`
+3. Reads the installed package's `dependencies` + `peerDependencies` -- all are externalized
+4. Bundles with esbuild (IIFE format, browser platform) with a selective external plugin
+5. Wraps output with `module.exports = __module`
+6. Returns the bundle with an `X-Externals` header containing `{bareName: installedVersion}` for all externalized deps
+7. Caches both the `.js` bundle and `.externals.json` manifest to disk
 
-Peer dependency externalization is critical for packages like `react-dom` which must share the same `react` instance as user code. The externalized `require("react")` call gets resolved by our bundle runtime to the same cached module.
+Dependency externalization is critical for two reasons:
+- **Shared instances**: packages like `react-dom` must share the same `react` instance as user code
+- **Shared transitive deps**: packages like `@react-navigation/core` used by multiple navigation packages are loaded once
+
+The `X-Externals` header enables **version pinning** for transitive dependencies. When the bundler discovers a transitive dep (e.g. `memoize-one` from `react-native-web`), it uses the version from the externals manifest instead of fetching `@latest`. This prevents version mismatches.
 
 ### 7. Execution
 
@@ -112,24 +117,32 @@ The bundled code runs in a sandboxed iframe:
 ```
 almostmetro/
   src/                    # Library source (TypeScript)
-    types.ts              # FileMap, ModuleMap, Transformer, BundlerConfig
+    types.ts              # FileMap, ModuleMap, Transformer, BundlerConfig, BundlerPlugin
     fs.ts                 # VirtualFS class
     resolver.ts           # Module resolution
-    bundler.ts            # Bundler class (graph walk + transform + emit)
+    bundler.ts            # One-shot Bundler class
+    incremental-bundler.ts # IncrementalBundler with HMR support
     transforms/
       typescript.ts       # Default sucrase-based transformer
     index.ts              # Public exports
-  dist/                   # Compiled library (tsc output)
+  dist/                   # Compiled library (tsc output) - example app imports from here
   example/                # Vite React demo
-    user_projects/        # Sample project source files
-    src/                  # React app source
+    user_projects/        # Sample project source files (e.g. expo-real/)
+    src/
+      App.tsx             # Editor/preview UI
+      bundler.worker.ts   # Web worker orchestrator (creates per-target bundler instances)
+      plugins/            # Target-specific plugins
+        web-plugin.ts     # Aliases, shims, globals for web target
+        expo-web.ts       # React import injection + react-native alias for Expo target
     scripts/              # Build scripts (projects.json generation)
     public/               # Static assets (generated projects.json)
 
 package-server/
   src/index.ts            # Express server
-  cache/                  # Bundled npm packages (gitignored)
+  cache/                  # Bundled npm packages + externals manifests (gitignored)
 ```
+
+> **Note:** After editing `almostmetro/src/`, run `npm run build` (tsc) in the `almostmetro/` directory. The example app imports from `dist/index.js`, not source directly.
 
 ## Design Decisions
 
@@ -139,4 +152,8 @@ package-server/
 
 **On-demand package bundling** - Rather than pre-bundling a fixed set of packages, the package server bundles npm packages the first time they're requested. This means any npm package works without configuration, at the cost of a cold-start delay on first use. Subsequent requests are instant (disk cache).
 
-**IIFE format for npm packages** - Packages are bundled as IIFE (Immediately Invoked Function Expression) with esbuild. The IIFE assigns to a `__module` variable, which our wrapper converts to `module.exports`. This approach avoids polluting the global scope and works within our CommonJS factory wrapper.
+**IIFE format for npm packages** - Packages are bundled as IIFE (Immediately Invoked Function Expression) with esbuild. The IIFE assigns to a `__module` variable, which our wrapper converts to `module.exports = __module`. The wrapper is kept simple because both Sucrase and esbuild consumers generate their own interop helpers. This approach avoids polluting the global scope and works within our CommonJS factory wrapper.
+
+**Multi-target architecture** - Each target (web, expo) gets its own `Bundler`/`IncrementalBundler` instance with its own config, plugins, cache, and module map. The web worker orchestrator creates per-target instances, runs them in parallel, and merges results. Plugins are target-specific (e.g. web-plugin aliases, expo-plugin React import injection + react-native-web alias).
+
+**Full dependency externalization** - The package server externalizes ALL `dependencies` + `peerDependencies` (not just peer deps). This ensures shared transitive deps are loaded once at runtime. Version pinning via the `X-Externals` response header prevents version mismatches for transitive dependencies.

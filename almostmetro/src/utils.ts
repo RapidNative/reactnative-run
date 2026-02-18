@@ -39,6 +39,30 @@ export function rewriteRequires(
   );
 }
 
+const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
+
+/**
+ * Build the bundle preamble (Metro-style). Defines `process` global so npm
+ * packages that check `process.env.NODE_ENV` work in the browser.
+ * Optionally injects public env vars (EXPO_PUBLIC_*, NEXT_PUBLIC_*).
+ */
+export function buildBundlePreamble(env?: Record<string, string>): string {
+  let preamble =
+    "var process = globalThis.process || {};\n" +
+    "process.env = process.env || {};\n" +
+    'process.env.NODE_ENV = process.env.NODE_ENV || "development";\n';
+
+  if (env) {
+    for (const [key, value] of Object.entries(env)) {
+      if (PUBLIC_ENV_PREFIXES.some((p) => key.startsWith(p))) {
+        preamble += "process.env." + key + " = " + JSON.stringify(value) + ";\n";
+      }
+    }
+  }
+
+  return preamble;
+}
+
 /** Fast djb2 hash for cache invalidation */
 export function hashString(str: string): string {
   let hash = 5381;

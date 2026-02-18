@@ -15,6 +15,7 @@ fs.mkdirSync(CACHE_DIR, { recursive: true });
 // CORS for browser access
 app.use((req: Request, res: Response, next: NextFunction) => {
   res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Expose-Headers", "X-Externals");
   next();
 });
 
@@ -64,8 +65,12 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
   const cacheFile = path.join(CACHE_DIR, `${cacheKey}.js`);
 
   // Check disk cache
+  const externalsFile = path.join(CACHE_DIR, `${cacheKey}.externals.json`);
   if (fs.existsSync(cacheFile)) {
     console.log(`[cache hit] ${requireSpecifier}@${version}`);
+    if (fs.existsSync(externalsFile)) {
+      res.header("X-Externals", fs.readFileSync(externalsFile, "utf-8"));
+    }
     res.type("application/javascript").sendFile(cacheFile);
     return;
   }
@@ -81,14 +86,19 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
       timeout: 60000,
     });
 
-    // Read package metadata for peer deps and to detect RN/Expo packages.
+    // Read package metadata to detect RN/Expo packages and collect externals.
+    // We externalize ALL dependencies (not just peerDependencies) so that
+    // shared transitive deps (e.g. @react-navigation/core) are loaded once
+    // at runtime rather than inlined into every bundle that uses them.
     const installedPkgJson = path.join(tmpDir, "node_modules", pkgName, "package.json");
-    let peerDeps: string[] = [];
+    let externals: string[] = [];
     let isReactNative = false;
     let keywords: string[] = [];
     if (fs.existsSync(installedPkgJson)) {
       const meta = JSON.parse(fs.readFileSync(installedPkgJson, "utf-8"));
-      peerDeps = Object.keys(meta.peerDependencies || {});
+      const deps = Object.keys(meta.dependencies || {});
+      const peerDeps = Object.keys(meta.peerDependencies || {});
+      externals = [...new Set([...deps, ...peerDeps])];
       keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
       isReactNative =
         pkgName.startsWith("@expo/") ||
@@ -99,24 +109,87 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
     if (isReactNative) {
       // Always externalize react-native for RN/Expo packages -- the runtime
       // resolves it to react-native-web. Many packages use it without listing
-      // it as a peer dep.
+      // it as a dep.
       for (const dep of ["react-native", "react", "react-dom"]) {
-        if (!peerDeps.includes(dep)) peerDeps.push(dep);
+        if (!externals.includes(dep)) externals.push(dep);
       }
     }
 
-    // Externalize @react-navigation/core so all packages share the same
-    // ThemeContext (and other React contexts) at runtime.
     // Don't externalize a package from itself (would create circular require).
-    if (requireSpecifier !== "@react-navigation/core" && !peerDeps.includes("@react-navigation/core")) {
-      peerDeps.push("@react-navigation/core");
-    }
+    externals = externals.filter((dep) => dep !== requireSpecifier && !requireSpecifier.startsWith(dep + "/"));
 
     const entryFile = path.join(tmpDir, "__entry.js");
     fs.writeFileSync(
       entryFile,
       `module.exports = require("${requireSpecifier}");\n`
     );
+
+    // Externalize bare package imports (e.g. "react") so shared deps are
+    // loaded once. For subpath imports (e.g. "css-in-js-utils/lib/foo"),
+    // generally inline them since they're internal implementation details.
+    // Exception: react/react-dom/react-native subpaths are always externalized
+    // because inlining them embeds version-sensitive code from the temp dir.
+    const externalSet = new Set(externals);
+    // Track which deps were actually externalized and their installed versions.
+    // This map is sent as the X-Externals response header so the bundler can
+    // fetch transitive deps at pinned versions instead of @latest.
+    const externalizedMap: Record<string, string> = {};
+
+    function getInstalledVersion(pkg: string): string | null {
+      try {
+        const depPkgJson = path.join(tmpDir, "node_modules", pkg, "package.json");
+        const depMeta = JSON.parse(fs.readFileSync(depPkgJson, "utf-8"));
+        return depMeta.version;
+      } catch {
+        return null;
+      }
+    }
+
+    // Packages whose subpath imports must also be externalized to avoid
+    // inlining version-sensitive code from the temp dir (e.g. react-dom/client
+    // contains a version check against require("react").version).
+    const alwaysExternalSubpaths = new Set(["react", "react-dom", "react-native"]);
+
+    const selectiveExternalPlugin: esbuild.Plugin = {
+      name: "selective-external",
+      setup(build) {
+        build.onResolve({ filter: /^[^./]/ }, (args) => {
+          let pkg: string;
+          if (args.path.startsWith("@")) {
+            const parts = args.path.split("/");
+            pkg = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
+          } else {
+            pkg = args.path.split("/")[0];
+          }
+          if (!externalSet.has(pkg)) return null;
+
+          // Track installed version for the base package
+          if (!externalizedMap[pkg]) {
+            const version = getInstalledVersion(pkg);
+            if (version) externalizedMap[pkg] = version;
+          }
+
+          // Bare import: always externalize
+          if (args.path === pkg) {
+            return { path: pkg, external: true };
+          }
+
+          // Subpath import: for version-sensitive packages (react, react-dom,
+          // react-native), always externalize to avoid inlining mismatched
+          // versions. For other packages, try to resolve locally and inline.
+          if (alwaysExternalSubpaths.has(pkg)) {
+            return { path: args.path, external: true };
+          }
+
+          try {
+            require.resolve(args.path, { paths: [args.resolveDir] });
+            return null;
+          } catch {
+            return { path: args.path, external: true };
+          }
+        });
+      },
+    };
 
     const outFile = path.join(tmpDir, "__out.js");
     await esbuild.build({
@@ -145,17 +218,18 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
           "__DEV__": "false",
         },
       }),
-      // Keep peer deps as require() calls so the runtime resolves them
-      // to the same shared instance (e.g. react-dom shares the react instance)
-      external: peerDeps,
+      plugins: [selectiveExternalPlugin],
     });
 
     const bundled = fs.readFileSync(outFile, "utf-8");
-    const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Peers: ${peerDeps.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { if (__module.default != null && typeof __module.default !== "object") { module.exports = __module.default; Object.keys(__module).forEach(function(k) { if (k !== "default") module.exports[k] = __module[k]; }); } else { module.exports = Object.assign({}, __module.default, __module); delete module.exports.default; } }\n`;
+    const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
 
     fs.writeFileSync(cacheFile, wrapped);
-    console.log(`[cached] ${requireSpecifier}@${version}`);
+    const externalsJson = JSON.stringify(externalizedMap);
+    fs.writeFileSync(externalsFile, externalsJson);
+    console.log(`[cached] ${requireSpecifier}@${version} (externals: ${Object.keys(externalizedMap).length})`);
 
+    res.header("X-Externals", externalsJson);
     res.type("application/javascript").send(wrapped);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

@@ -24,65 +24,98 @@ GET /pkg/<package>[@<version>][/<subpath>]
 When a package is requested for the first time:
 
 1. **Parse** the URL into package name, version, and optional subpath
-2. **Check disk cache** - if cached, serve immediately
+2. **Check disk cache** -- if cached, serve immediately (with externals header)
 3. **Create temp directory** and run `npm init -y && npm install <package>@<version>`
-4. **Read peer dependencies** from the installed package's `package.json`
-5. **Create entry file**: `module.exports = require("<package><subpath>");`
-6. **Bundle with esbuild**:
-   - Format: IIFE (assigns to `__module`)
-   - Platform: browser
-   - Target: ES2020
-   - External: peer dependencies (prevents duplicate instances)
-7. **Wrap output** to expose `module.exports`
-8. **Cache to disk** and serve
+4. **Read package metadata** from the installed package's `package.json` to collect all `dependencies` + `peerDependencies` as externals
+5. **Detect React Native/Expo packages** by checking the package name and keywords
+6. **Create entry file**: `module.exports = require("<package><subpath>");`
+7. **Bundle with esbuild** using the selective external plugin (see below)
+8. **Wrap output** with `module.exports = __module`
+9. **Cache to disk** (both the `.js` bundle and `.externals.json` manifest)
+10. **Return response** with `X-Externals` header
 
-### Peer Dependency Handling
+## Dependency Externalization
 
-Peer dependencies are marked as `external` during esbuild bundling. This means they remain as `require()` calls in the output rather than being inlined.
+All `dependencies` and `peerDependencies` of a package are externalized during esbuild bundling. This means they remain as `require()` calls in the output rather than being inlined. This ensures shared transitive deps (e.g. `@react-navigation/core` used by multiple navigation packages) are loaded once at runtime.
 
-This is critical for packages like `react-dom` which declares `react` as a peer dependency. Without externalization, `react-dom` would bundle its own copy of React, causing the "multiple copies of React" error when hooks are used.
+### Selective External Plugin
 
-The bundled output's `require()` calls are resolved by almostmetro's bundle runtime, which shares a single module cache across all modules. This ensures `react-dom` and user code both get the same React instance.
+Not all imports are externalized equally:
+
+- **Bare imports** (e.g. `require("react")`) -- always externalized if the package is in the externals set
+- **Subpath imports of react/react-dom/react-native** (e.g. `require("react-dom/client")`) -- always externalized to avoid inlining version-sensitive code from the temp dir
+- **Other subpath imports** (e.g. `require("css-in-js-utils/lib/foo")`) -- try to resolve locally first; only externalize if resolution fails. This prevents interop issues with CJS subpath modules.
+
+### Version Pinning via X-Externals Header
+
+When the package server bundles a package, it tracks the installed versions of all externalized dependencies. This information is returned as the `X-Externals` response header:
+
+```
+X-Externals: {"react":"19.1.0","react-dom":"19.1.0","memoize-one":"4.1.0"}
+```
+
+The almostmetro bundler reads this header and uses the pinned versions when fetching transitive dependencies, instead of defaulting to `@latest`. This prevents version mismatches where a transitive dep gets a different version than what the parent package was built against.
+
+**Version resolution priority in the bundler:**
+1. User's `package.json` version (explicit user constraint always wins)
+2. Transitive dep version from `X-Externals` manifest (pinned by parent)
+3. Bare name / latest (fallback)
+
+### React Native / Expo Package Handling
+
+Packages are detected as React Native/Expo when:
+- Package name starts with `@expo/`
+- Package name contains `react-native`
+- Package keywords include `react-native` or `expo`
+
+For these packages, esbuild gets additional config:
+- **Resolve extensions**: `.web.tsx`, `.web.ts`, `.web.js` prioritized (for web-specific implementations)
+- **Loaders**: `.js` treated as JSX, fonts/images as data URLs
+- **Banner**: Injects `process.env` and React global
+- **Defines**: `__DEV__` set to `false`
+- **Extra externals**: `react-native`, `react`, `react-dom` always externalized (many RN packages use these without listing them as deps)
 
 ## Response Format
 
 The server returns `application/javascript` content. The output structure:
 
 ```javascript
-// Bundled: react-dom/client@latest
-// Peers: react
+// Bundled: react-dom/client@19.1.0
+// Externals: react
 var __module = (() => {
-  // ... esbuild IIFE bundle (peer deps remain as require() calls) ...
+  // ... esbuild IIFE bundle (externalized deps remain as require() calls) ...
 })();
-module.exports = typeof __module !== "undefined" ? (__module.default || __module) : {};
+if (typeof __module !== "undefined") { module.exports = __module; }
 ```
 
-The `module.exports` assignment at the end makes the output compatible with almostmetro's CommonJS module wrapper. When this code runs inside `function(module, exports, require) { ... }`, it properly sets `module.exports` to the package's public API.
+The IIFE wrapper is deliberately simple (`module.exports = __module`). Both Sucrase (user code transformer) and esbuild (package bundler) generate interop helpers (`_interopRequireDefault` / `__toESM`) that correctly handle all export types -- ESM namespace objects, CJS objects, and CJS function exports. A more complex wrapper that tries to unwrap `.default` breaks CJS modules that export functions directly.
 
 ## Caching
 
-Bundled packages are cached to `package-server/cache/` as `.js` files:
+Bundled packages are cached to `package-server/cache/` with two files per package:
 
 ```
 cache/
-  lodash@latest.js
-  lodash@4.17.21.js
-  react@latest.js
-  react-dom@latest__client.js    # subpath "/" replaced with "__"
+  lodash@4.17.21.js              # the bundled JavaScript
+  lodash@4.17.21.externals.json  # {"dep": "1.0.0", ...} externals manifest
+  react-dom@19.1.0__client.js    # subpath "/" replaced with "__"
+  react-dom@19.1.0__client.externals.json
 ```
 
-To force a rebuild, delete the specific cache file and re-request.
+Cache hits also send the `X-Externals` header (read from the `.externals.json` file).
+
+To force a rebuild, delete both the `.js` and `.externals.json` files and re-request.
 
 To clear all cached packages:
 ```bash
-rm -rf package-server/cache/*.js
+rm -f package-server/cache/*.js package-server/cache/*.json
 ```
 
 ## Configuration
 
 The server runs on port 3001 by default. The port is defined in `package-server/src/index.ts`.
 
-CORS is enabled for all origins (`Access-Control-Allow-Origin: *`) so the browser-based bundler can fetch packages from any origin.
+CORS is enabled for all origins (`Access-Control-Allow-Origin: *`) with `X-Externals` exposed via `Access-Control-Expose-Headers`.
 
 ## Running
 
@@ -108,6 +141,10 @@ const config: BundlerConfig = {
 When the bundler encounters an npm `require()` (i.e. not starting with `.` or `/`), it fetches the pre-bundled package:
 
 ```
-require("lodash") -> GET http://localhost:3001/pkg/lodash
-require("react-dom/client") -> GET http://localhost:3001/pkg/react-dom/client
+require("lodash") -> GET http://localhost:3001/pkg/lodash@4.17.21
+require("react-dom/client") -> GET http://localhost:3001/pkg/react-dom@19.1.0/client
 ```
+
+The bundler resolves versions from the user's `package.json` first, then from transitive dependency manifests (`X-Externals`), before falling back to bare names.
+
+In the Vite example app, `localhost:5173/pkg/*` is proxied to `localhost:3001/pkg/*` -- they hit the same server.

@@ -112,6 +112,9 @@ async function handleBundle(data: BundleRequest): Promise<void> {
     transformer: typescriptTransformer,
     server: { packageServerUrl },
     plugins: [expoWebPlugin],
+    env: {
+      EXPO_PUBLIC_TEST: "hello",
+    },
   };
 
   try {
@@ -142,6 +145,9 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
     server: { packageServerUrl },
     hmr: { enabled: true, reactRefresh: true },
     plugins: [expoWebPlugin],
+    env: {
+      EXPO_PUBLIC_TEST: "hello",
+    },
   };
 
   try {

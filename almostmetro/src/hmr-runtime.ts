@@ -1,3 +1,5 @@
+import { buildBundlePreamble } from "./utils.js";
+
 /**
  * HMR-capable bundle runtime template.
  *
@@ -203,6 +205,7 @@ export function emitHmrBundle(
   entryFile: string,
   reverseDepsMap: Record<string, string[]>,
   reactRefresh: boolean,
+  env?: Record<string, string>,
 ): string {
   const moduleEntries = Object.keys(moduleMap)
     .map((id) => {
@@ -216,6 +219,7 @@ export function emitHmrBundle(
     .join(",\n\n");
 
   return (
+    buildBundlePreamble(env) +
     HMR_RUNTIME_TEMPLATE +
     "({\n" +
     moduleEntries +
