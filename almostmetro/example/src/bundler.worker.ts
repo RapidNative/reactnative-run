@@ -115,6 +115,7 @@ async function handleBundle(data: BundleRequest): Promise<void> {
     env: {
       EXPO_PUBLIC_TEST: "hello",
     },
+    routerShim: true,
   };
 
   try {
@@ -148,6 +149,7 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
     env: {
       EXPO_PUBLIC_TEST: "hello",
     },
+    routerShim: true,
   };
 
   try {

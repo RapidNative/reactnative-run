@@ -324,6 +324,12 @@ export function App() {
     const iframe = iframeRef.current;
     if (!iframe) return;
 
+    // Preserve the router shim hash from the old iframe (if any)
+    let preservedHash = "";
+    try {
+      preservedHash = (iframe.contentWindow as any)?.__ROUTER_SHIM_HASH__ || "";
+    } catch (_) {}
+
     const container = iframe.parentNode as HTMLElement;
     const newFrame = document.createElement("iframe");
     newFrame.id = "preview-frame";
@@ -331,6 +337,11 @@ export function App() {
     newFrame.sandbox.add("allow-same-origin");
     container.replaceChild(newFrame, iframe);
     iframeRef.current = newFrame as HTMLIFrameElement;
+
+    // Restore the preserved route so the shim picks it up before modules execute
+    const hashScript = preservedHash
+      ? "<script>window.__ROUTER_SHIM_HASH__ = " + JSON.stringify(preservedHash) + ";</" + "script>\n"
+      : "";
 
     const html =
       "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
@@ -351,6 +362,7 @@ export function App() {
       "};\n" +
       "</" +
       "script>\n" +
+      hashScript +
       "<script>\n" +
       bundleCode +
       "\n</" +

@@ -283,7 +283,7 @@ export class Bundler {
       .join(",\n\n");
 
     return (
-      buildBundlePreamble(this.config.env) +
+      buildBundlePreamble(this.config.env, this.config.routerShim) +
       "(function(modules) {\n" +
       "  var cache = {};\n" +
       "  function require(id) {\n" +

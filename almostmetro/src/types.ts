@@ -58,6 +58,7 @@ export interface BundlerConfig {
   hmr?: { enabled: boolean; reactRefresh?: boolean };
   plugins?: BundlerPlugin[];
   env?: Record<string, string>;
+  routerShim?: boolean;
 }
 
 export interface FileChange {

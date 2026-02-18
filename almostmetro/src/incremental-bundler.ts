@@ -324,6 +324,7 @@ export class IncrementalBundler {
         this.graph.getReverseDepsMap(),
         reactRefresh,
         this.config.env,
+        this.config.routerShim,
       );
     }
 
@@ -340,7 +341,7 @@ export class IncrementalBundler {
       .join(",\n\n");
 
     return (
-      buildBundlePreamble(this.config.env) +
+      buildBundlePreamble(this.config.env, this.config.routerShim) +
       "(function(modules) {\n" +
       "  var cache = {};\n" +
       "  function require(id) {\n" +

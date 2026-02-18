@@ -206,6 +206,7 @@ export function emitHmrBundle(
   reverseDepsMap: Record<string, string[]>,
   reactRefresh: boolean,
   env?: Record<string, string>,
+  routerShim?: boolean,
 ): string {
   const moduleEntries = Object.keys(moduleMap)
     .map((id) => {
@@ -219,7 +220,7 @@ export function emitHmrBundle(
     .join(",\n\n");
 
   return (
-    buildBundlePreamble(env) +
+    buildBundlePreamble(env, routerShim) +
     HMR_RUNTIME_TEMPLATE +
     "({\n" +
     moduleEntries +
