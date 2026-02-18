@@ -87,7 +87,53 @@ The bundler walks the dependency graph starting from the entry file:
 });
 ```
 
-### 6. npm Package Bundling
+### 6. Bundle Preamble & Environment Variables
+
+Every emitted bundle is prefixed with a **preamble** that sets up the `process` global, so npm packages that check `process.env.NODE_ENV` work in the browser:
+
+```javascript
+var process = globalThis.process || {};
+process.env = process.env || {};
+process.env.NODE_ENV = process.env.NODE_ENV || "development";
+```
+
+#### Env Injection
+
+The bundler supports injecting environment variables into the preamble via the `env` option on `BundlerConfig`:
+
+```typescript
+const config: BundlerConfig = {
+  // ...
+  env: {
+    EXPO_PUBLIC_API_URL: "https://api.example.com",
+    NEXT_PUBLIC_SITE_NAME: "My App",
+    SECRET_KEY: "abc123", // filtered out -- not public
+  },
+};
+```
+
+For security, only env vars with **public prefixes** are injected into the bundle:
+
+- `EXPO_PUBLIC_*`
+- `NEXT_PUBLIC_*`
+
+This prevents accidentally leaking server-side secrets into client-side bundles. `NODE_ENV` is always included (handled separately by the base preamble).
+
+The generated preamble with env vars looks like:
+
+```javascript
+var process = globalThis.process || {};
+process.env = process.env || {};
+process.env.NODE_ENV = process.env.NODE_ENV || "development";
+process.env.EXPO_PUBLIC_API_URL = "https://api.example.com";
+process.env.NEXT_PUBLIC_SITE_NAME = "My App";
+```
+
+User code can then access these values via `process.env.EXPO_PUBLIC_API_URL`, just like in a standard React Native or Next.js app.
+
+The preamble is built by `buildBundlePreamble(env?)` in `utils.ts`, called from both `Bundler.emitBundle()` and `IncrementalBundler.emitBundle()` (including HMR bundles).
+
+### 7. npm Package Bundling
 
 When the bundler encounters `require("lodash")`, it fetches from the package server:
 
@@ -105,7 +151,7 @@ Dependency externalization is critical for two reasons:
 
 The `X-Externals` header enables **version pinning** for transitive dependencies. When the bundler discovers a transitive dep (e.g. `memoize-one` from `react-native-web`), it uses the version from the externals manifest instead of fetching `@latest`. This prevents version mismatches.
 
-### 7. Execution
+### 8. Execution
 
 The bundled code runs in a sandboxed iframe:
 - Console methods are intercepted and forwarded to the parent via `postMessage`
