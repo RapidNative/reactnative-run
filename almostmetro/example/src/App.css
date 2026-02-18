@@ -98,6 +98,7 @@ header h1 {
   flex-direction: column;
   border-right: 1px solid #313244;
   min-height: 0;
+  min-width: 0;
 }
 
 .file-tabs {

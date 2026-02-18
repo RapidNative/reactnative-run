@@ -48,6 +48,7 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const editorFSRef = useRef<EditorFS | null>(null);
   const lastBundleRef = useRef<string>("");
+  const [hasBundle, setHasBundle] = useState(false);
 
   // Initialize bundler worker
   useEffect(() => {
@@ -117,11 +118,13 @@ export function App() {
         setHmrReady(true);
         setBundling(false);
         lastBundleRef.current = data.code;
+        setHasBundle(true);
         addLog("Watch build ready (initial)", "info");
         executeInIframe(data.code);
       } else if (data.type === "hmr-update") {
         // Cache the full bundle for fallback
         lastBundleRef.current = data.bundle;
+        setHasBundle(true);
         // Forward HMR update to iframe
         const iframe = iframeRef.current;
         if (iframe && iframe.contentWindow) {
@@ -142,6 +145,7 @@ export function App() {
         }
       } else if (data.type === "watch-rebuild") {
         lastBundleRef.current = data.code;
+        setHasBundle(true);
         addLog("Full rebuild (HMR not possible)", "info");
         executeInIframe(data.code);
       } else if (data.type === "watch-stopped") {
@@ -247,6 +251,8 @@ export function App() {
         window.location.origin,
       );
 
+      lastBundleRef.current = bundleCode;
+      setHasBundle(true);
       addLog("Bundle ready. Executing...", "info");
       executeInIframe(bundleCode);
     } catch (err: unknown) {
@@ -290,6 +296,7 @@ export function App() {
     setWatchMode(false);
     setHmrReady(false);
     lastBundleRef.current = "";
+    setHasBundle(false);
 
     addLog("Watch mode stopped", "info");
 
@@ -299,6 +306,18 @@ export function App() {
       new URL("./bundler.worker.ts", import.meta.url),
       { type: "module" },
     );
+  }
+
+  function downloadBundle() {
+    const code = lastBundleRef.current;
+    if (!code) return;
+    const blob = new Blob([code], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = currentProject + "-bundle.js";
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   function executeInIframe(bundleCode: string) {
@@ -374,6 +393,11 @@ export function App() {
                 Watch
               </button>
             </>
+          )}
+          {hasBundle && (
+            <button onClick={downloadBundle} title="Download bundle">
+              Download
+            </button>
           )}
         </div>
       </header>

@@ -1,12 +1,21 @@
 const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+// Matches lines that are single-line comments or JSDoc/block comment continuations
+const COMMENT_LINE_RE = /^\s*(?:\/\/|\/?\*)/;
 
 /** Extract all require('...') call targets from source */
 export function findRequires(source: string): string[] {
+  if (!source) return [];
   const requires: string[] = [];
-  const re = new RegExp(REQUIRE_RE.source, REQUIRE_RE.flags);
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(source)) !== null) {
-    requires.push(match[1]);
+  const lines = source.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Skip comment lines to avoid picking up require() in JSDoc examples
+    if (COMMENT_LINE_RE.test(line)) continue;
+    const re = new RegExp(REQUIRE_RE.source, REQUIRE_RE.flags);
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(line)) !== null) {
+      requires.push(match[1]);
+    }
   }
   return requires;
 }

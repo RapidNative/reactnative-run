@@ -12,8 +12,22 @@ export class Bundler {
   constructor(fs: VirtualFS, config: BundlerConfig) {
     this.fs = fs;
     this.config = config;
-    this.resolver = new Resolver(fs, config.resolver);
+    const paths = Bundler.readTsconfigPaths(fs);
+    this.resolver = new Resolver(fs, { ...config.resolver, ...(paths && { paths }) });
     this.plugins = config.plugins ?? [];
+  }
+
+  /** Read tsconfig.json "compilerOptions.paths" from the VirtualFS */
+  private static readTsconfigPaths(fs: VirtualFS): Record<string, string[]> | null {
+    const raw = fs.read("/tsconfig.json");
+    if (!raw) return null;
+    try {
+      const tsconfig = JSON.parse(raw);
+      const paths = tsconfig?.compilerOptions?.paths;
+      return paths && typeof paths === "object" ? paths : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Run the full pre-transform -> Sucrase -> post-transform pipeline */
@@ -129,8 +143,10 @@ export class Bundler {
   private async fetchPackage(specifier: string): Promise<string> {
     const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
     const res = await fetch(url);
-    if (!res.ok)
-      throw new Error("Failed to fetch " + specifier + ": " + res.status);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
+    }
     return res.text();
   }
 
@@ -149,6 +165,12 @@ export class Bundler {
     const walk = async (filePath: string): Promise<void> => {
       if (visited[filePath]) return;
       visited[filePath] = true;
+
+      // Asset files get a stub module that exports the filename
+      if (this.resolver.isAssetFile(filePath)) {
+        moduleMap[filePath] = "module.exports = " + JSON.stringify(filePath) + ";";
+        return;
+      }
 
       const source = this.fs.read(filePath);
       if (!source) {

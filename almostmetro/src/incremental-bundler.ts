@@ -27,8 +27,22 @@ export class IncrementalBundler {
   constructor(fs: VirtualFS, config: BundlerConfig) {
     this.fs = fs;
     this.config = config;
-    this.resolver = new Resolver(fs, config.resolver);
+    const paths = IncrementalBundler.readTsconfigPaths(fs);
+    this.resolver = new Resolver(fs, { ...config.resolver, ...(paths && { paths }) });
     this.plugins = config.plugins ?? [];
+  }
+
+  /** Read tsconfig.json "compilerOptions.paths" from the VirtualFS */
+  private static readTsconfigPaths(fs: VirtualFS): Record<string, string[]> | null {
+    const raw = fs.read("/tsconfig.json");
+    if (!raw) return null;
+    try {
+      const tsconfig = JSON.parse(raw);
+      const paths = tsconfig?.compilerOptions?.paths;
+      return paths && typeof paths === "object" ? paths : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Run the full pre-transform -> Sucrase -> post-transform pipeline */
@@ -150,7 +164,8 @@ export class IncrementalBundler {
     const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
     const res = await fetch(url);
     if (!res.ok) {
-      throw new Error("Failed to fetch " + specifier + ": " + res.status);
+      const body = await res.text().catch(() => "");
+      throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
     }
     return res.text();
   }
@@ -163,6 +178,12 @@ export class IncrementalBundler {
     localDeps: string[];
     npmDeps: string[];
   } {
+    // Asset files get a stub module that exports the filename
+    if (this.resolver.isAssetFile(filePath)) {
+      this.moduleMap[filePath] = "module.exports = " + JSON.stringify(filePath) + ";";
+      return { localDeps: [], npmDeps: [] };
+    }
+
     const source = this.fs.read(filePath);
     if (!source) {
       throw new Error("File not found: " + filePath);
@@ -572,6 +593,7 @@ export class IncrementalBundler {
   /** Update the virtual filesystem */
   updateFS(fs: VirtualFS): void {
     this.fs = fs;
-    this.resolver = new Resolver(fs, this.config.resolver);
+    const paths = IncrementalBundler.readTsconfigPaths(fs);
+    this.resolver = new Resolver(fs, { ...this.config.resolver, ...(paths && { paths }) });
   }
 }

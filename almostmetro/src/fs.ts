@@ -33,11 +33,48 @@ export class VirtualFS {
 
   getEntryFile(): string | null {
     // Try common entry points
-    const candidates = ["/index.js", "/index.ts", "/index.tsx", "/index.jsx"];
+    const candidates = [
+      "/index.js",
+      "/index.ts",
+      "/index.tsx",
+      "/index.jsx",
+      "/App.js",
+      "/App.ts",
+      "/App.tsx",
+      "/App.jsx",
+    ];
     for (const c of candidates) {
       if (this.exists(c)) return c;
     }
+
+    // Check package.json "main" field for local entry
+    const pkgJson = this.read("/package.json");
+    if (pkgJson) {
+      try {
+        const pkg = JSON.parse(pkgJson);
+        if (typeof pkg.main === "string" && (pkg.main.startsWith(".") || pkg.main.startsWith("/"))) {
+          const base = pkg.main.replace(/^\.\//, "/").replace(/^([^/])/, "/$1");
+          if (this.exists(base)) return base;
+          for (const ext of [".js", ".ts", ".tsx", ".jsx"]) {
+            if (this.exists(base + ext)) return base + ext;
+          }
+        }
+      } catch {}
+    }
+
     return null;
+  }
+
+  /** Read the "main" field from package.json, if present */
+  getPackageMain(): string | null {
+    const pkgJson = this.read("/package.json");
+    if (!pkgJson) return null;
+    try {
+      const pkg = JSON.parse(pkgJson);
+      return typeof pkg.main === "string" ? pkg.main : null;
+    } catch {
+      return null;
+    }
   }
 
   toFileMap(): FileMap {

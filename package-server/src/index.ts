@@ -60,7 +60,7 @@ function parseSpecifier(raw: string) {
 // Bundle and serve an npm package
 async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string) {
   const requireSpecifier = pkgName + subpath;
-  const cacheKey = `${pkgName}@${version}${subpath.replace(/\//g, "__")}`;
+  const cacheKey = `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
   const cacheFile = path.join(CACHE_DIR, `${cacheKey}.js`);
 
   // Check disk cache
@@ -81,13 +81,28 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
       timeout: 60000,
     });
 
-    // Read peer dependencies so we can mark them as external.
-    // This prevents duplicate copies (e.g. react-dom bundling its own react).
+    // Read package metadata for peer deps and to detect RN/Expo packages.
     const installedPkgJson = path.join(tmpDir, "node_modules", pkgName, "package.json");
     let peerDeps: string[] = [];
+    let isReactNative = false;
     if (fs.existsSync(installedPkgJson)) {
       const meta = JSON.parse(fs.readFileSync(installedPkgJson, "utf-8"));
       peerDeps = Object.keys(meta.peerDependencies || {});
+      const keywords: string[] = Array.isArray(meta.keywords) ? meta.keywords : [];
+      isReactNative =
+        pkgName.startsWith("@expo/") ||
+        pkgName.includes("react-native") ||
+        keywords.some((k: string) => k === "react-native" || k === "expo");
+    }
+
+    if (isReactNative) {
+      // Always externalize react-native for RN/Expo packages -- the runtime
+      // resolves it to react-native-web. Many packages use it without listing
+      // it as a peer dep.
+      for (const dep of ["react-native", "react", "react-dom"]) {
+        if (!peerDeps.includes(dep)) peerDeps.push(dep);
+      }
+      console.log(`[rn-mode] ${requireSpecifier}@${version}`);
     }
 
     const entryFile = path.join(tmpDir, "__entry.js");
@@ -105,13 +120,31 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
       outfile: outFile,
       platform: "browser",
       target: "es2020",
+      // For RN/Expo packages: prioritize .web.* extensions, handle JSX in .js,
+      // and inline font/image assets as data URLs.
+      ...(isReactNative && {
+        resolveExtensions: [
+          ".web.tsx", ".web.ts", ".web.js",
+          ".tsx", ".ts", ".js", ".json",
+        ],
+        loader: {
+          ".js": "jsx",
+          ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl",
+        },
+        banner: {
+          js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');",
+        },
+        define: {
+          "__DEV__": "false",
+        },
+      }),
       // Keep peer deps as require() calls so the runtime resolves them
       // to the same shared instance (e.g. react-dom shares the react instance)
       external: peerDeps,
     });
 
     const bundled = fs.readFileSync(outFile, "utf-8");
-    const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Peers: ${peerDeps.join(", ") || "none"}\n${bundled}\nmodule.exports = typeof __module !== "undefined" ? (__module.default || __module) : {};\n`;
+    const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Peers: ${peerDeps.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { if (__module.default != null && typeof __module.default !== "object") { module.exports = __module.default; Object.keys(__module).forEach(function(k) { if (k !== "default") module.exports[k] = __module[k]; }); } else { module.exports = Object.assign({}, __module.default, __module); delete module.exports.default; } }\n`;
 
     fs.writeFileSync(cacheFile, wrapped);
     console.log(`[cached] ${requireSpecifier}@${version}`);

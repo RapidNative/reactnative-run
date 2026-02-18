@@ -39,6 +39,45 @@ type WorkerRequest =
   | WatchUpdateRequest
   | WatchStopRequest;
 
+// --- Expo Router synthetic entry ---
+
+function buildExpoRouterEntry(vfs: VirtualFS): string {
+  const lines: string[] = ['import { registerRootComponent } from "expo";'];
+
+  // Find the default index screen to render directly (expo-router is shimmed)
+  const tabIndexFile = ["/app/(tabs)/index.tsx", "/app/(tabs)/index.ts", "/app/(tabs)/index.jsx", "/app/(tabs)/index.js"]
+    .find(f => vfs.exists(f));
+  const appIndexFile = ["/app/index.tsx", "/app/index.ts", "/app/index.jsx", "/app/index.js"]
+    .find(f => vfs.exists(f));
+
+  if (tabIndexFile) {
+    lines.push('import HomeScreen from "./app/(tabs)/index";');
+    lines.push("registerRootComponent(HomeScreen);");
+  } else if (appIndexFile) {
+    lines.push('import HomeScreen from "./app/index";');
+    lines.push("registerRootComponent(HomeScreen);");
+  } else {
+    lines.push('import RootLayout from "./app/_layout";');
+    lines.push("registerRootComponent(RootLayout);");
+  }
+
+  return lines.join("\n");
+}
+
+function ensureEntryFile(vfs: VirtualFS): string | null {
+  const entry = vfs.getEntryFile();
+  if (entry) return entry;
+
+  // If package.json main points to expo-router/entry, generate a synthetic entry
+  const main = vfs.getPackageMain();
+  if (main === "expo-router/entry") {
+    vfs.write("/index.tsx", buildExpoRouterEntry(vfs));
+    return "/index.tsx";
+  }
+
+  return null;
+}
+
 // --- Watch mode state ---
 
 let incrementalBundler: IncrementalBundler | null = null;
@@ -57,8 +96,8 @@ async function handleBundle(data: BundleRequest): Promise<void> {
 
   try {
     const vfs = new VirtualFS(files);
+    const entryFile = ensureEntryFile(vfs);
     const bundler = new Bundler(vfs, config);
-    const entryFile = vfs.getEntryFile();
     if (!entryFile) {
       self.postMessage({ type: "error", message: "No entry file found" });
       return;
@@ -66,7 +105,9 @@ async function handleBundle(data: BundleRequest): Promise<void> {
     const code = await bundler.bundle(entryFile);
     self.postMessage({ type: "result", code });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error
+      ? err.stack || err.message
+      : String(err);
     self.postMessage({ type: "error", message });
   }
 }
@@ -85,9 +126,8 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
 
   try {
     watchFS = new VirtualFS(files);
+    const entryFile = ensureEntryFile(watchFS);
     incrementalBundler = new IncrementalBundler(watchFS, config);
-
-    const entryFile = watchFS.getEntryFile();
     if (!entryFile) {
       self.postMessage({ type: "error", message: "No entry file found" });
       return;
@@ -96,7 +136,9 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
     const result = await incrementalBundler.build(entryFile);
     self.postMessage({ type: "watch-ready", code: result.bundle });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error
+      ? err.stack || err.message
+      : String(err);
     self.postMessage({ type: "error", message });
   }
 }
@@ -135,7 +177,9 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
       self.postMessage({ type: "hmr-update", update: result.hmrUpdate, bundle: result.bundle });
     }
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error
+      ? err.stack || err.message
+      : String(err);
     self.postMessage({ type: "error", message });
   }
 }

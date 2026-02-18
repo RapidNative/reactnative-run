@@ -21,6 +21,7 @@ export interface Transformer {
 
 export interface ResolverConfig {
   sourceExts: string[]; // e.g. ['js', 'ts', 'tsx', 'jsx']
+  paths?: Record<string, string[]>; // tsconfig "paths", e.g. { "@/*": ["./*"] }
 }
 
 export interface BundlerPlugin {

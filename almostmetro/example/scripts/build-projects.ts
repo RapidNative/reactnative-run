@@ -14,6 +14,15 @@ interface Projects {
   [projectName: string]: ProjectFiles;
 }
 
+const IGNORED_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico",
+  ".mp4", ".mov", ".avi", ".webm", ".mkv",
+  ".mp3", ".wav", ".ogg", ".aac",
+  ".woff", ".woff2", ".ttf", ".eot", ".otf",
+  ".zip", ".tar", ".gz", ".exe", ".bin", ".dll", ".so", ".dylib",
+  ".pdf", ".doc", ".docx",
+]);
+
 function readFilesRecursively(dir: string, base: string = ""): ProjectFiles {
   const result: ProjectFiles = {};
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -22,9 +31,13 @@ function readFilesRecursively(dir: string, base: string = ""): ProjectFiles {
     const rel = base + "/" + entry.name;
     const full = path.join(dir, entry.name);
 
+    if (entry.name === "node_modules") continue;
+
     if (entry.isDirectory()) {
       Object.assign(result, readFilesRecursively(full, rel));
     } else {
+      const ext = path.extname(entry.name).toLowerCase();
+      if (IGNORED_EXTENSIONS.has(ext)) continue;
       result[rel] = fs.readFileSync(full, "utf-8");
     }
   }

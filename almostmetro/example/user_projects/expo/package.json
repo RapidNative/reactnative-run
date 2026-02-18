@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "expo": "~54.0.33",
+    "expo-linear-gradient": "~14.1.5",
     "expo-status-bar": "~3.0.9",
     "react": "^19",
     "react-dom": "^19",
