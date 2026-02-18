@@ -328,11 +328,12 @@ export function App() {
     const newFrame = document.createElement("iframe");
     newFrame.id = "preview-frame";
     newFrame.sandbox.add("allow-scripts");
+    newFrame.sandbox.add("allow-same-origin");
     container.replaceChild(newFrame, iframe);
     iframeRef.current = newFrame as HTMLIFrameElement;
 
     const html =
-      "<!DOCTYPE html><html><head><meta charset='UTF-8'></head><body><div id='root'></div><script>\n" +
+      "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
       "['log','warn','error','info'].forEach(function(method) {\n" +
       "  var orig = console[method];\n" +
       "  console[method] = function() {\n" +
@@ -356,9 +357,10 @@ export function App() {
       "script>\n" +
       "</body></html>";
 
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    (iframeRef.current as HTMLIFrameElement).src = url;
+    const doc = (iframeRef.current as HTMLIFrameElement).contentDocument!;
+    doc.open();
+    doc.write(html);
+    doc.close();
   }
 
   const projectNames = Object.keys(projects);
@@ -461,7 +463,7 @@ export function App() {
           <iframe
             ref={iframeRef}
             id="preview-frame"
-            sandbox="allow-scripts"
+            sandbox="allow-scripts allow-same-origin"
           />
         </div>
 

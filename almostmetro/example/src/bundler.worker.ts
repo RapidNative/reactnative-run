@@ -42,26 +42,46 @@ type WorkerRequest =
 // --- Expo Router synthetic entry ---
 
 function buildExpoRouterEntry(vfs: VirtualFS): string {
-  const lines: string[] = ['import { registerRootComponent } from "expo";'];
+  const routeExts = new Set(["tsx", "ts", "jsx", "js"]);
+  const routeFiles: string[] = [];
 
-  // Find the default index screen to render directly (expo-router is shimmed)
-  const tabIndexFile = ["/app/(tabs)/index.tsx", "/app/(tabs)/index.ts", "/app/(tabs)/index.jsx", "/app/(tabs)/index.js"]
-    .find(f => vfs.exists(f));
-  const appIndexFile = ["/app/index.tsx", "/app/index.ts", "/app/index.jsx", "/app/index.js"]
-    .find(f => vfs.exists(f));
-
-  if (tabIndexFile) {
-    lines.push('import HomeScreen from "./app/(tabs)/index";');
-    lines.push("registerRootComponent(HomeScreen);");
-  } else if (appIndexFile) {
-    lines.push('import HomeScreen from "./app/index";');
-    lines.push("registerRootComponent(HomeScreen);");
-  } else {
-    lines.push('import RootLayout from "./app/_layout";');
-    lines.push("registerRootComponent(RootLayout);");
+  for (const filePath of vfs.list()) {
+    if (!filePath.startsWith("/app/")) continue;
+    const ext = filePath.split(".").pop() || "";
+    if (!routeExts.has(ext)) continue;
+    routeFiles.push(filePath);
   }
 
-  return lines.join("\n");
+  // Build module map entries: context key -> require path
+  // Context keys are relative to /app/ with "./" prefix, e.g. "./(tabs)/index.tsx"
+  // Require paths are relative to project root with "./" prefix, e.g. "./app/(tabs)/index"
+  const moduleEntries = routeFiles.map((filePath) => {
+    const contextKey = "./" + filePath.slice("/app/".length);
+    const requirePath = "." + filePath.replace(/\.[^.]+$/, "");
+    return { contextKey, requirePath };
+  });
+
+  const moduleMapLines = moduleEntries
+    .map((e) => `  "${e.contextKey}": require("${e.requirePath}"),`)
+    .join("\n");
+
+  return `import { registerRootComponent } from "expo";
+import { ExpoRoot } from "expo-router";
+import React from "react";
+
+const modules = {
+${moduleMapLines}
+};
+
+function ctx(id) { return modules[id]; }
+ctx.keys = function() { return Object.keys(modules); };
+
+function App() {
+  return React.createElement(ExpoRoot, { context: ctx });
+}
+
+registerRootComponent(App);
+`;
 }
 
 function ensureEntryFile(vfs: VirtualFS): string | null {
@@ -88,7 +108,7 @@ async function handleBundle(data: BundleRequest): Promise<void> {
   const { files, packageServerUrl } = data;
 
   const config: BundlerConfig = {
-    resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+    resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
     transformer: typescriptTransformer,
     server: { packageServerUrl },
     plugins: [expoWebPlugin],
@@ -117,7 +137,7 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
   watchPackageServerUrl = packageServerUrl;
 
   const config: BundlerConfig = {
-    resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+    resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
     transformer: reactRefreshTransformer,
     server: { packageServerUrl },
     hmr: { enabled: true, reactRefresh: true },

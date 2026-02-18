@@ -85,10 +85,11 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
     const installedPkgJson = path.join(tmpDir, "node_modules", pkgName, "package.json");
     let peerDeps: string[] = [];
     let isReactNative = false;
+    let keywords: string[] = [];
     if (fs.existsSync(installedPkgJson)) {
       const meta = JSON.parse(fs.readFileSync(installedPkgJson, "utf-8"));
       peerDeps = Object.keys(meta.peerDependencies || {});
-      const keywords: string[] = Array.isArray(meta.keywords) ? meta.keywords : [];
+      keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
       isReactNative =
         pkgName.startsWith("@expo/") ||
         pkgName.includes("react-native") ||
@@ -102,7 +103,13 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
       for (const dep of ["react-native", "react", "react-dom"]) {
         if (!peerDeps.includes(dep)) peerDeps.push(dep);
       }
-      console.log(`[rn-mode] ${requireSpecifier}@${version}`);
+    }
+
+    // Externalize @react-navigation/core so all packages share the same
+    // ThemeContext (and other React contexts) at runtime.
+    // Don't externalize a package from itself (would create circular require).
+    if (requireSpecifier !== "@react-navigation/core" && !peerDeps.includes("@react-navigation/core")) {
+      peerDeps.push("@react-navigation/core");
     }
 
     const entryFile = path.join(tmpDir, "__entry.js");
