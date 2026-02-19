@@ -211,6 +211,35 @@ header h1 {
   color: #89b4fa;
 }
 
+/* ===== Rich error display ===== */
+.error-entry {
+  border-left: 3px solid #f38ba8;
+  padding: 4px 8px;
+  margin: 2px 0;
+  background: rgba(243, 139, 168, 0.08);
+}
+
+.error-message {
+  color: #f38ba8;
+  font-weight: 600;
+}
+
+.error-location {
+  color: #fab387;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.error-stack {
+  margin-top: 4px;
+}
+
+.stack-frame {
+  color: #6c7086;
+  font-size: 11px;
+  padding-left: 12px;
+}
+
 /* ===== Mobile responsive ===== */
 @media (max-width: 768px) {
   .mobile-tabs {
