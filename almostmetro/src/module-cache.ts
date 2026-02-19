@@ -1,3 +1,5 @@
+import type { RawSourceMap } from "./source-map.js";
+
 export interface CachedModule {
   sourceHash: string;
   transformedCode: string;
@@ -5,6 +7,7 @@ export interface CachedModule {
   rawDeps: string[];
   resolvedLocalDeps: string[];
   npmDeps: string[];
+  sourceMap?: RawSourceMap;
 }
 
 export class ModuleCache {

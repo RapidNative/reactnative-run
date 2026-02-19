@@ -9,6 +9,7 @@ export {
   reactRefreshTransformer,
   createReactRefreshTransformer,
 } from "./transforms/react-refresh.js";
+export type { RawSourceMap } from "./source-map.js";
 export type {
   FileMap,
   ModuleMap,

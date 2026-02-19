@@ -1,5 +1,12 @@
 import { VirtualFS } from "./fs.js";
 import { Resolver } from "./resolver.js";
+import type { RawSourceMap } from "./source-map.js";
+import {
+  buildCombinedSourceMap,
+  countNewlines,
+  inlineSourceMap,
+  shiftSourceMapOrigLines,
+} from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
 import { findRequires, rewriteRequires, buildBundlePreamble } from "./utils.js";
 
@@ -31,7 +38,12 @@ export class Bundler {
   }
 
   /** Run the full pre-transform -> Sucrase -> post-transform pipeline */
-  private runTransform(filename: string, src: string): string {
+  private runTransform(
+    filename: string,
+    src: string,
+  ): { code: string; sourceMap?: RawSourceMap } {
+    const originalLines = countNewlines(src);
+
     // Pre-transform hooks
     for (const plugin of this.plugins) {
       if (plugin.transformSource) {
@@ -40,10 +52,15 @@ export class Bundler {
       }
     }
 
-    // Core transform (Sucrase)
-    let code = this.config.transformer.transform({ src, filename }).code;
+    const preTransformAddedLines = countNewlines(src) - originalLines;
 
-    // Post-transform hooks
+    // Core transform (Sucrase)
+    const transformResult = this.config.transformer.transform({ src, filename });
+    let code = transformResult.code;
+    let sourceMap = transformResult.sourceMap;
+
+    // Post-transform hooks -- track line additions for source map offset
+    const linesBeforePost = countNewlines(code);
     for (const plugin of this.plugins) {
       if (plugin.transformOutput) {
         const result = plugin.transformOutput({ code, filename });
@@ -51,7 +68,23 @@ export class Bundler {
       }
     }
 
-    return code;
+    // Adjust source map for plugin modifications
+    if (sourceMap) {
+      // Post-transform: shift generated lines for prepended output lines
+      const postAddedLines = countNewlines(code) - linesBeforePost;
+      if (postAddedLines > 0) {
+        sourceMap = {
+          ...sourceMap,
+          mappings: ";".repeat(postAddedLines) + sourceMap.mappings,
+        };
+      }
+      // Pre-transform: shift origLine back so mappings point to original source
+      if (preTransformAddedLines > 0) {
+        sourceMap = shiftSourceMapOrigLines(sourceMap, -preTransformAddedLines);
+      }
+    }
+
+    return { code, sourceMap };
   }
 
   /** Build a resolve callback that consults plugins then falls back to default resolution */
@@ -97,13 +130,13 @@ export class Bundler {
 
   /** Transform a single file using the configured transformer */
   transformFile(filename: string, src: string): string {
-    return this.runTransform(filename, src);
+    return this.runTransform(filename, src).code;
   }
 
   /** Bundle starting from the entry file, returning executable code */
   async bundle(entryFile: string): Promise<string> {
-    const moduleMap = await this.buildModuleMap(entryFile);
-    return this.emitBundle(moduleMap, entryFile);
+    const { moduleMap, sourceMapMap } = await this.buildModuleMap(entryFile);
+    return this.emitBundle(moduleMap, sourceMapMap, entryFile);
   }
 
   /** Read dependency versions from the project's package.json */
@@ -159,8 +192,11 @@ export class Bundler {
   }
 
   /** Build the module map by walking the dependency graph */
-  private async buildModuleMap(entryFile: string): Promise<ModuleMap> {
+  private async buildModuleMap(
+    entryFile: string,
+  ): Promise<{ moduleMap: ModuleMap; sourceMapMap: Record<string, RawSourceMap> }> {
     const moduleMap: ModuleMap = {};
+    const sourceMapMap: Record<string, RawSourceMap> = {};
     const visited: { [key: string]: boolean } = {};
     const npmPackages: { [key: string]: boolean } = {};
     const versions = this.getPackageVersions();
@@ -187,7 +223,8 @@ export class Bundler {
       }
 
       // Transform the file (TS -> JS, JSX -> JS, etc.)
-      const transformed = this.transformFile(filePath, source);
+      const { code: transformed, sourceMap } = this.runTransform(filePath, source);
+      if (sourceMap) sourceMapMap[filePath] = sourceMap;
 
       const rewritten = rewriteRequires(transformed, filePath, this.makeResolveTarget(filePath));
       moduleMap[filePath] = rewritten;
@@ -265,25 +302,17 @@ export class Bundler {
       moduleMap[name] = code;
     }
 
-    return moduleMap;
+    return { moduleMap, sourceMapMap };
   }
 
   /** Emit the final bundle string */
-  private emitBundle(moduleMap: ModuleMap, entryFile: string): string {
-    const moduleEntries = Object.keys(moduleMap)
-      .map((id: string) => {
-        const source = moduleMap[id];
-        return (
-          JSON.stringify(id) +
-          ": function(module, exports, require) {\n" +
-          source +
-          "\n}"
-        );
-      })
-      .join(",\n\n");
-
-    return (
-      buildBundlePreamble(this.config.env, this.config.routerShim) +
+  private emitBundle(
+    moduleMap: ModuleMap,
+    sourceMapMap: Record<string, RawSourceMap>,
+    entryFile: string,
+  ): string {
+    const preamble = buildBundlePreamble(this.config.env, this.config.routerShim);
+    const runtimeStr =
       "(function(modules) {\n" +
       "  var cache = {};\n" +
       "  function require(id) {\n" +
@@ -296,9 +325,58 @@ export class Bundler {
       "  require(" +
       JSON.stringify(entryFile) +
       ");\n" +
-      "})({\n" +
-      moduleEntries +
-      "\n});\n"
-    );
+      "})({\n";
+
+    const headerStr = preamble + runtimeStr;
+    const ids = Object.keys(moduleMap);
+
+    const moduleEntries = ids
+      .map((id: string) => {
+        return (
+          JSON.stringify(id) +
+          ": function(module, exports, require) {\n" +
+          moduleMap[id] +
+          "\n}"
+        );
+      })
+      .join(",\n\n");
+
+    let bundle = headerStr + moduleEntries + "\n});\n";
+
+    // Build combined source map
+    let lineOffset = countNewlines(headerStr);
+    const inputs: {
+      sourceFile: string;
+      sourceContent: string;
+      map: RawSourceMap;
+      generatedLineOffset: number;
+    }[] = [];
+
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      if (i > 0) lineOffset += 2; // ",\n\n"
+      lineOffset += 1; // wrapper function line
+
+      if (sourceMapMap[id]) {
+        const sourceContent = this.fs.read(id);
+        if (sourceContent) {
+          inputs.push({
+            sourceFile: id,
+            sourceContent,
+            map: sourceMapMap[id],
+            generatedLineOffset: lineOffset,
+          });
+        }
+      }
+
+      lineOffset += countNewlines(moduleMap[id]);
+      lineOffset += 1; // "\n}"
+    }
+
+    if (inputs.length > 0) {
+      bundle += inlineSourceMap(buildCombinedSourceMap(inputs)) + "\n";
+    }
+
+    return bundle;
   }
 }

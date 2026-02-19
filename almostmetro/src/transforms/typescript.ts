@@ -1,4 +1,5 @@
 import { transform } from "sucrase";
+import type { RawSourceMap } from "../source-map.js";
 import { Transformer } from "../types.js";
 
 export const typescriptTransformer: Transformer = {
@@ -7,6 +8,14 @@ export const typescriptTransformer: Transformer = {
     const transforms: ("typescript" | "imports" | "jsx")[] = ["imports"];
     if (ext === ".ts" || ext === ".tsx") transforms.unshift("typescript");
     if (ext === ".tsx" || ext === ".jsx") transforms.push("jsx");
-    return transform(src, { transforms });
+    const result = transform(src, {
+      transforms,
+      filePath: filename,
+      sourceMapOptions: { compiledFilename: filename },
+    });
+    return {
+      code: result.code,
+      sourceMap: result.sourceMap as RawSourceMap | undefined,
+    };
   },
 };

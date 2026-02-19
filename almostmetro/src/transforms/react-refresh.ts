@@ -1,3 +1,4 @@
+import { countNewlines } from "../source-map.js";
 import { Transformer } from "../types.js";
 import { typescriptTransformer } from "./typescript.js";
 
@@ -87,7 +88,17 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
         '  module.hot.accept();\n' +
         '}\n';
 
-      return { code: preamble + result.code + postamble };
+      // Offset source map to account for preamble lines
+      let sourceMap = result.sourceMap;
+      if (sourceMap) {
+        const preambleLines = countNewlines(preamble);
+        sourceMap = {
+          ...sourceMap,
+          mappings: ";".repeat(preambleLines) + sourceMap.mappings,
+        };
+      }
+
+      return { code: preamble + result.code + postamble, sourceMap };
     },
   };
 }

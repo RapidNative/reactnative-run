@@ -1,3 +1,5 @@
+import type { RawSourceMap } from "./source-map.js";
+
 export interface FileMap {
   [path: string]: string;
 }
@@ -8,6 +10,7 @@ export interface ModuleMap {
 
 export interface TransformResult {
   code: string;
+  sourceMap?: RawSourceMap;
 }
 
 export interface TransformParams {

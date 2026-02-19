@@ -83,7 +83,7 @@ const PreviewFrame = forwardRef<PreviewFrameHandle, PreviewFrameProps>(
 
 // --- Build the HTML document that wraps the bundle ---
 
-function buildBundleHtml(bundleCode: string): string {
+function buildBundleHtml(jsBlobUrl: string): string {
   return (
     "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
     "['log','warn','error','info'].forEach(function(method) {\n" +
@@ -103,9 +103,7 @@ function buildBundleHtml(bundleCode: string): string {
     "};\n" +
     "</" +
     "script>\n" +
-    "<script>\n" +
-    bundleCode +
-    "\n</" +
+    '<script src="' + jsBlobUrl + '"></' +
     "script>\n" +
     "</body></html>"
   );
@@ -133,9 +131,10 @@ export function App() {
   const lastBundleRef = useRef<string>("");
   const [hasBundle, setHasBundle] = useState(false);
 
-  // Blob URL for preview iframes (built once, loaded by all frames)
+  // Blob URLs for preview iframes (built once, loaded by all frames)
   const [blobUrl, setBlobUrl] = useState("");
   const prevBlobUrlRef = useRef("");
+  const prevJsBlobUrlRef = useRef("");
 
   // Preview frame refs
   const frame1Ref = useRef<PreviewFrameHandle>(null);
@@ -147,8 +146,12 @@ export function App() {
   }
 
   function updateBundle(bundleCode: string) {
+    if (prevJsBlobUrlRef.current) URL.revokeObjectURL(prevJsBlobUrlRef.current);
     if (prevBlobUrlRef.current) URL.revokeObjectURL(prevBlobUrlRef.current);
-    const html = buildBundleHtml(bundleCode);
+    const jsBlob = new Blob([bundleCode], { type: "application/javascript" });
+    const jsUrl = URL.createObjectURL(jsBlob);
+    prevJsBlobUrlRef.current = jsUrl;
+    const html = buildBundleHtml(jsUrl);
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     prevBlobUrlRef.current = url;
@@ -393,7 +396,11 @@ export function App() {
     lastBundleRef.current = "";
     setHasBundle(false);
 
-    // Revoke blob URL
+    // Revoke blob URLs
+    if (prevJsBlobUrlRef.current) {
+      URL.revokeObjectURL(prevJsBlobUrlRef.current);
+      prevJsBlobUrlRef.current = "";
+    }
     if (prevBlobUrlRef.current) {
       URL.revokeObjectURL(prevBlobUrlRef.current);
       prevBlobUrlRef.current = "";

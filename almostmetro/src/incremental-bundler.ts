@@ -2,7 +2,14 @@ import { VirtualFS } from "./fs.js";
 import { Resolver } from "./resolver.js";
 import { DependencyGraph } from "./dependency-graph.js";
 import { ModuleCache } from "./module-cache.js";
-import { emitHmrBundle } from "./hmr-runtime.js";
+import { emitHmrBundle, HMR_RUNTIME_TEMPLATE } from "./hmr-runtime.js";
+import type { RawSourceMap } from "./source-map.js";
+import {
+  buildCombinedSourceMap,
+  countNewlines,
+  inlineSourceMap,
+  shiftSourceMapOrigLines,
+} from "./source-map.js";
 import { findRequires, rewriteRequires, hashString, buildBundlePreamble } from "./utils.js";
 import type {
   BundlerConfig,
@@ -21,6 +28,7 @@ export class IncrementalBundler {
   readonly graph: DependencyGraph = new DependencyGraph();
   readonly cache: ModuleCache = new ModuleCache();
   private moduleMap: ModuleMap = {};
+  private sourceMapMap: Record<string, RawSourceMap> = {};
   private entryFile: string | null = null;
   private packageVersions: Record<string, string> = {};
   private transitiveDepsVersions: Record<string, string> = {};
@@ -47,7 +55,12 @@ export class IncrementalBundler {
   }
 
   /** Run the full pre-transform -> Sucrase -> post-transform pipeline */
-  private runTransform(filename: string, src: string): string {
+  private runTransform(
+    filename: string,
+    src: string,
+  ): { code: string; sourceMap?: RawSourceMap } {
+    const originalLines = countNewlines(src);
+
     // Pre-transform hooks
     for (const plugin of this.plugins) {
       if (plugin.transformSource) {
@@ -56,10 +69,15 @@ export class IncrementalBundler {
       }
     }
 
-    // Core transform (Sucrase)
-    let code = this.config.transformer.transform({ src, filename }).code;
+    const preTransformAddedLines = countNewlines(src) - originalLines;
 
-    // Post-transform hooks
+    // Core transform (Sucrase)
+    const transformResult = this.config.transformer.transform({ src, filename });
+    let code = transformResult.code;
+    let sourceMap = transformResult.sourceMap;
+
+    // Post-transform hooks -- track line additions for source map offset
+    const linesBeforePost = countNewlines(code);
     for (const plugin of this.plugins) {
       if (plugin.transformOutput) {
         const result = plugin.transformOutput({ code, filename });
@@ -67,7 +85,23 @@ export class IncrementalBundler {
       }
     }
 
-    return code;
+    // Adjust source map for plugin modifications
+    if (sourceMap) {
+      // Post-transform: shift generated lines for prepended output lines
+      const postAddedLines = countNewlines(code) - linesBeforePost;
+      if (postAddedLines > 0) {
+        sourceMap = {
+          ...sourceMap,
+          mappings: ";".repeat(postAddedLines) + sourceMap.mappings,
+        };
+      }
+      // Pre-transform: shift origLine back so mappings point to original source
+      if (preTransformAddedLines > 0) {
+        sourceMap = shiftSourceMapOrigLines(sourceMap, -preTransformAddedLines);
+      }
+    }
+
+    return { code, sourceMap };
   }
 
   /** Build a resolve callback that consults plugins then falls back to default resolution */
@@ -127,7 +161,7 @@ export class IncrementalBundler {
 
   /** Transform a single file using the configured transformer */
   private transformFile(filename: string, src: string): string {
-    return this.runTransform(filename, src);
+    return this.runTransform(filename, src).code;
   }
 
   /** Read dependency versions from the project's package.json */
@@ -203,6 +237,7 @@ export class IncrementalBundler {
     if (this.cache.isValid(filePath, sourceHash)) {
       const cached = this.cache.getModule(filePath)!;
       this.moduleMap[filePath] = cached.rewrittenCode;
+      if (cached.sourceMap) this.sourceMapMap[filePath] = cached.sourceMap;
       return {
         localDeps: cached.resolvedLocalDeps,
         npmDeps: cached.npmDeps,
@@ -210,7 +245,8 @@ export class IncrementalBundler {
     }
 
     // Transform
-    const transformed = this.transformFile(filePath, source);
+    const { code: transformed, sourceMap } = this.runTransform(filePath, source);
+    if (sourceMap) this.sourceMapMap[filePath] = sourceMap;
 
     // Rewrite requires
     const rewritten = rewriteRequires(transformed, filePath, this.makeResolveTarget(filePath));
@@ -238,6 +274,7 @@ export class IncrementalBundler {
       rawDeps,
       resolvedLocalDeps: localDeps,
       npmDeps,
+      sourceMap,
     });
 
     // Update graph
@@ -317,8 +354,11 @@ export class IncrementalBundler {
     const hmrEnabled = this.config.hmr?.enabled ?? false;
     const reactRefresh = this.config.hmr?.reactRefresh ?? false;
 
+    let bundle: string;
+    let headerStr: string;
+
     if (hmrEnabled) {
-      return emitHmrBundle(
+      bundle = emitHmrBundle(
         this.moduleMap,
         this.entryFile!,
         this.graph.getReverseDepsMap(),
@@ -326,38 +366,91 @@ export class IncrementalBundler {
         this.config.env,
         this.config.routerShim,
       );
+      headerStr =
+        buildBundlePreamble(this.config.env, this.config.routerShim) +
+        HMR_RUNTIME_TEMPLATE +
+        "({\n";
+    } else {
+      // Fallback to standard IIFE (same as Bundler.emitBundle)
+      const preamble = buildBundlePreamble(this.config.env, this.config.routerShim);
+      const runtimeStr =
+        "(function(modules) {\n" +
+        "  var cache = {};\n" +
+        "  function require(id) {\n" +
+        "    if (cache[id]) return cache[id].exports;\n" +
+        "    if (!modules[id]) throw new Error('Module not found: ' + id);\n" +
+        "    var module = cache[id] = { exports: {} };\n" +
+        "    modules[id].call(module.exports, module, module.exports, require);\n" +
+        "    return module.exports;\n" +
+        "  }\n" +
+        "  require(" +
+        JSON.stringify(this.entryFile) +
+        ");\n" +
+        "})({\n";
+
+      headerStr = preamble + runtimeStr;
+
+      const moduleEntries = Object.keys(this.moduleMap)
+        .map((id) => {
+          return (
+            JSON.stringify(id) +
+            ": function(module, exports, require) {\n" +
+            this.moduleMap[id] +
+            "\n}"
+          );
+        })
+        .join(",\n\n");
+
+      bundle = headerStr + moduleEntries + "\n});\n";
     }
 
-    // Fallback to standard IIFE (same as Bundler.emitBundle)
-    const moduleEntries = Object.keys(this.moduleMap)
-      .map((id) => {
-        return (
-          JSON.stringify(id) +
-          ": function(module, exports, require) {\n" +
-          this.moduleMap[id] +
-          "\n}"
-        );
-      })
-      .join(",\n\n");
+    // Build and append combined source map
+    const inputs = this.buildSourceMapInputs(countNewlines(headerStr));
+    if (inputs.length > 0) {
+      bundle += inlineSourceMap(buildCombinedSourceMap(inputs)) + "\n";
+    }
 
-    return (
-      buildBundlePreamble(this.config.env, this.config.routerShim) +
-      "(function(modules) {\n" +
-      "  var cache = {};\n" +
-      "  function require(id) {\n" +
-      "    if (cache[id]) return cache[id].exports;\n" +
-      "    if (!modules[id]) throw new Error('Module not found: ' + id);\n" +
-      "    var module = cache[id] = { exports: {} };\n" +
-      "    modules[id].call(module.exports, module, module.exports, require);\n" +
-      "    return module.exports;\n" +
-      "  }\n" +
-      "  require(" +
-      JSON.stringify(this.entryFile) +
-      ");\n" +
-      "})({\n" +
-      moduleEntries +
-      "\n});\n"
-    );
+    return bundle;
+  }
+
+  /** Compute source map inputs with correct line offsets for each module */
+  private buildSourceMapInputs(headerLineCount: number): {
+    sourceFile: string;
+    sourceContent: string;
+    map: RawSourceMap;
+    generatedLineOffset: number;
+  }[] {
+    let lineOffset = headerLineCount;
+    const inputs: {
+      sourceFile: string;
+      sourceContent: string;
+      map: RawSourceMap;
+      generatedLineOffset: number;
+    }[] = [];
+    const ids = Object.keys(this.moduleMap);
+
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      if (i > 0) lineOffset += 2; // ",\n\n"
+      lineOffset += 1; // wrapper function line
+
+      if (this.sourceMapMap[id]) {
+        const sourceContent = this.fs.read(id);
+        if (sourceContent) {
+          inputs.push({
+            sourceFile: id,
+            sourceContent,
+            map: this.sourceMapMap[id],
+            generatedLineOffset: lineOffset,
+          });
+        }
+      }
+
+      lineOffset += countNewlines(this.moduleMap[id]);
+      lineOffset += 1; // "\n}"
+    }
+
+    return inputs;
   }
 
   /** Initial full build */
@@ -366,6 +459,7 @@ export class IncrementalBundler {
 
     this.entryFile = entryFile;
     this.moduleMap = {};
+    this.sourceMapMap = {};
     this.packageVersions = this.getPackageVersions();
 
     const npmPackagesNeeded = new Set<string>();
@@ -485,6 +579,7 @@ export class IncrementalBundler {
         this.graph.removeModule(change.path);
         this.cache.invalidateModule(change.path);
         delete this.moduleMap[change.path];
+        delete this.sourceMapMap[change.path];
         removedModules.push(change.path);
 
         // Dependents need reprocessing (their require target is gone)
@@ -563,6 +658,7 @@ export class IncrementalBundler {
       this.graph.removeModule(orphan);
       this.cache.invalidateModule(orphan);
       delete this.moduleMap[orphan];
+      delete this.sourceMapMap[orphan];
       removedModules.push(orphan);
     }
 
@@ -585,9 +681,31 @@ export class IncrementalBundler {
         };
       } else {
         const updatedModules: Record<string, string> = {};
+        // new Function('module','exports','require', code) wraps with:
+        //   function anonymous(module,exports,require\n) {\n<code>\n}
+        // That's 2 extra lines before code starts
+        const NEW_FUNCTION_LINES = 2;
         for (const id of rebuiltModules) {
           if (this.moduleMap[id] !== undefined) {
-            updatedModules[id] = this.moduleMap[id];
+            let code = this.moduleMap[id];
+            // Append per-module inline source map for HMR
+            const sm = this.sourceMapMap[id];
+            if (sm) {
+              const sourceContent = this.fs.read(id);
+              if (sourceContent) {
+                code +=
+                  "\n" +
+                  inlineSourceMap({
+                    version: 3,
+                    sources: [id],
+                    sourcesContent: [sourceContent],
+                    names: sm.names || [],
+                    mappings: ";".repeat(NEW_FUNCTION_LINES) + sm.mappings,
+                  });
+              }
+            }
+            code += "\n//# sourceURL=" + id;
+            updatedModules[id] = code;
           }
         }
         hmrUpdate = {
