@@ -71,29 +71,27 @@ export function buildBundlePreamble(env?: Record<string, string>, routerShim?: b
 /**
  * Build a self-contained IIFE that virtualizes the History API.
  *
- * The iframe is loaded via doc.write() (same-origin), so location.pathname
- * already returns '/' (the parent's path). Location properties are
- * [LegacyUnforgeable] (non-configurable own properties on window.location)
- * and CANNOT be overridden with Object.defineProperty. That's fine -- the
- * real pathname '/' is correct for Expo Router's initial route match.
+ * The iframe is loaded via a blob URL with the initial route encoded in the
+ * hash fragment (e.g. blob:origin/uuid#/explore). Location properties are
+ * [LegacyUnforgeable] so we can't override them, but we CAN call the real
+ * replaceState to change the blob URL's pathname from the UUID to the
+ * virtual path. After that, location.pathname returns the correct value
+ * for Expo Router's initial route match.
  *
- * The shim only intercepts history.pushState / replaceState / go / back /
- * forward so that navigation stays virtual (no real URL changes that would
- * bleed to the parent's address bar). The current virtual route is stored
- * in window.__ROUTER_SHIM_HASH__ for the parent to read and restore
- * across iframe rebuilds.
+ * All subsequent pushState/replaceState calls are intercepted so no further
+ * real URL changes occur. The current virtual route is stored in
+ * window.__ROUTER_SHIM_HASH__ for the parent to read across iframe rebuilds.
  */
 export function buildRouterShim(): string {
   return `(function() {
-  var saved = window.__ROUTER_SHIM_HASH__ || '';
-  var rawRoute = saved ? saved.slice(1) : '/';
+  var rawHash = location.hash.slice(1) || '/';
 
-  var hashIdx = rawRoute.indexOf('#');
+  var hashIdx = rawHash.indexOf('#');
   var virtualHash = '';
-  var pathAndSearch = rawRoute;
+  var pathAndSearch = rawHash;
   if (hashIdx > 0) {
-    virtualHash = rawRoute.slice(hashIdx);
-    pathAndSearch = rawRoute.slice(0, hashIdx);
+    virtualHash = rawHash.slice(hashIdx);
+    pathAndSearch = rawHash.slice(0, hashIdx);
   }
 
   var searchIdx = pathAndSearch.indexOf('?');
@@ -102,6 +100,37 @@ export function buildRouterShim(): string {
 
   if (virtualPathname.charAt(0) !== '/') virtualPathname = '/' + virtualPathname;
 
+  var virtualOrigin = location.origin || 'http://localhost';
+  var virtualHref = virtualOrigin + virtualPathname + virtualSearch + virtualHash;
+
+  // Override document.URL (configurable, unlike location.*)
+  try {
+    Object.defineProperty(Document.prototype, 'URL', {
+      get: function() { return virtualHref; },
+      configurable: true
+    });
+  } catch(e) {}
+
+  // Wrap URL constructor so new URL(location.href) returns the virtual URL
+  // instead of parsing the blob UUID as a pathname.
+  var OrigURL = URL;
+  var _URL = function(url, base) {
+    var u = String(url);
+    if (u.indexOf('blob:') === 0) u = virtualHref;
+    if (arguments.length > 1) return new OrigURL(u, base);
+    return new OrigURL(u);
+  };
+  _URL.prototype = OrigURL.prototype;
+  _URL.createObjectURL = OrigURL.createObjectURL;
+  _URL.revokeObjectURL = OrigURL.revokeObjectURL;
+  _URL.canParse = OrigURL.canParse;
+  window.URL = _URL;
+
+  // Save real replaceState before overriding
+  var _realReplaceState = history.replaceState;
+  // Base blob URL without hash, for constructing absolute URLs in sync()
+  var _blobBase = location.href.split('#')[0];
+
   var stack = [{ state: null, pathname: virtualPathname, search: virtualSearch, hash: virtualHash }];
   var stackIndex = 0;
 
@@ -109,15 +138,28 @@ export function buildRouterShim(): string {
 
   function sync() {
     var e = currentEntry();
-    window.__ROUTER_SHIM_HASH__ = '#' + e.pathname + e.search + e.hash;
+    virtualPathname = e.pathname;
+    virtualSearch = e.search;
+    virtualHash = e.hash;
+    virtualHref = virtualOrigin + virtualPathname + virtualSearch + virtualHash;
+    var routeHash = '#' + e.pathname + e.search;
+    window.__ROUTER_SHIM_HASH__ = routeHash;
+    // Update the real blob URL hash, but only if it actually changed.
+    var newUrl = _blobBase + routeHash;
+    if (newUrl !== location.href) {
+      try { _realReplaceState.call(history, e.state, '', newUrl); } catch(e) {}
+    }
   }
 
   function parseUrl(url) {
+    var s = String(url);
+    if (s.indexOf('blob:') === 0) {
+      try { var inner = new OrigURL(s.slice(5)); s = inner.pathname + inner.search + inner.hash; } catch(e) {}
+    }
     try {
-      var u = new URL(url, location.origin);
+      var u = new OrigURL(s, virtualOrigin);
       return { pathname: u.pathname, search: u.search, hash: u.hash };
     } catch(e) {}
-    var s = String(url);
     var pathname = s, search = '', hash = '';
     var hi = pathname.indexOf('#');
     if (hi >= 0) { hash = pathname.slice(hi); pathname = pathname.slice(0, hi); }
@@ -131,8 +173,9 @@ export function buildRouterShim(): string {
   history.pushState = function(state, title, url) {
     if (url != null) {
       var p = parseUrl(url);
+      // Ignore hash: it's our own route hash echoed back from location.hash
       stack = stack.slice(0, stackIndex + 1);
-      stack.push({ state: state, pathname: p.pathname, search: p.search, hash: p.hash });
+      stack.push({ state: state, pathname: p.pathname, search: p.search, hash: '' });
       stackIndex = stack.length - 1;
       sync();
     }
@@ -141,7 +184,7 @@ export function buildRouterShim(): string {
   history.replaceState = function(state, title, url) {
     if (url != null) {
       var p = parseUrl(url);
-      stack[stackIndex] = { state: state, pathname: p.pathname, search: p.search, hash: p.hash };
+      stack[stackIndex] = { state: state, pathname: p.pathname, search: p.search, hash: '' };
       sync();
     }
   };

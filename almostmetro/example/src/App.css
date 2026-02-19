@@ -161,10 +161,19 @@ header h1 {
   border-bottom: 1px solid #313244;
 }
 
-#preview-frame {
+.preview-frames {
+  flex: 1;
+  display: flex;
+  gap: 1px;
+  background: #313244;
+  min-height: 0;
+}
+
+.preview-iframe {
   flex: 1;
   border: none;
   background: #fff;
+  min-width: 0;
 }
 
 .console-panel {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import type { FileMap } from "almostmetro";
 import { EditorFS } from "./editor-fs";
 
@@ -29,6 +29,90 @@ function bundleInWorker(
   });
 }
 
+// --- PreviewFrame: reusable blob-URL iframe wrapper ---
+
+interface PreviewFrameHandle {
+  postMessage: (data: any) => void;
+  getRouteHash: () => string;
+}
+
+interface PreviewFrameProps {
+  blobUrl: string;
+  route: string; // e.g. "#/" or "#/explore"
+}
+
+const PreviewFrame = forwardRef<PreviewFrameHandle, PreviewFrameProps>(
+  function PreviewFrame({ blobUrl, route }, ref) {
+    const iframeRef = useRef<HTMLIFrameElement>(null);
+
+    useImperativeHandle(ref, () => ({
+      postMessage(data: any) {
+        iframeRef.current?.contentWindow?.postMessage(data, "*");
+      },
+      getRouteHash(): string {
+        try {
+          return (iframeRef.current?.contentWindow as any)?.__ROUTER_SHIM_HASH__ || "";
+        } catch {
+          return "";
+        }
+      },
+    }));
+
+    useEffect(() => {
+      const iframe = iframeRef.current;
+      if (!blobUrl || !iframe) return;
+
+      // Preserve current route from the running iframe (if any)
+      let preservedHash = "";
+      try {
+        preservedHash = (iframe.contentWindow as any)?.__ROUTER_SHIM_HASH__ || "";
+      } catch (_) {}
+
+      iframe.src = blobUrl + (preservedHash || route);
+    }, [blobUrl]);
+
+    return (
+      <iframe
+        ref={iframeRef}
+        className="preview-iframe"
+        sandbox="allow-scripts allow-same-origin"
+      />
+    );
+  },
+);
+
+// --- Build the HTML document that wraps the bundle ---
+
+function buildBundleHtml(bundleCode: string): string {
+  return (
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
+    "['log','warn','error','info'].forEach(function(method) {\n" +
+    "  var orig = console[method];\n" +
+    "  console[method] = function() {\n" +
+    "    var args = Array.prototype.slice.call(arguments);\n" +
+    "    var text = args.map(function(a) {\n" +
+    "      if (typeof a === 'object') try { return JSON.stringify(a); } catch(e) { return String(a); }\n" +
+    "      return String(a);\n" +
+    "    }).join(' ');\n" +
+    "    window.parent.postMessage({ type: 'console', method: method, text: text }, '*');\n" +
+    "    if (orig) orig.apply(console, arguments);\n" +
+    "  };\n" +
+    "});\n" +
+    "window.onerror = function(msg, url, line, col, err) {\n" +
+    "  window.parent.postMessage({ type: 'console', method: 'error', text: msg + ' (line ' + line + ')' }, '*');\n" +
+    "};\n" +
+    "</" +
+    "script>\n" +
+    "<script>\n" +
+    bundleCode +
+    "\n</" +
+    "script>\n" +
+    "</body></html>"
+  );
+}
+
+// --- Main App ---
+
 type MobileTab = "editor" | "preview" | "console";
 
 export function App() {
@@ -42,13 +126,34 @@ export function App() {
   const [mobileTab, setMobileTab] = useState<MobileTab>("editor");
   const [watchMode, setWatchMode] = useState(false);
   const [hmrReady, setHmrReady] = useState(false);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const editorFSRef = useRef<EditorFS | null>(null);
   const lastBundleRef = useRef<string>("");
   const [hasBundle, setHasBundle] = useState(false);
+
+  // Blob URL for preview iframes (built once, loaded by all frames)
+  const [blobUrl, setBlobUrl] = useState("");
+  const prevBlobUrlRef = useRef("");
+
+  // Preview frame refs
+  const frame1Ref = useRef<PreviewFrameHandle>(null);
+  const frame2Ref = useRef<PreviewFrameHandle>(null);
+
+  function broadcastToFrames(data: any) {
+    frame1Ref.current?.postMessage(data);
+    frame2Ref.current?.postMessage(data);
+  }
+
+  function updateBundle(bundleCode: string) {
+    if (prevBlobUrlRef.current) URL.revokeObjectURL(prevBlobUrlRef.current);
+    const html = buildBundleHtml(bundleCode);
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    prevBlobUrlRef.current = url;
+    setBlobUrl(url);
+  }
 
   // Initialize bundler worker
   useEffect(() => {
@@ -81,7 +186,7 @@ export function App() {
       });
   }, []);
 
-  // Listen for messages from iframe
+  // Listen for messages from iframes
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       const data = e.data;
@@ -94,9 +199,8 @@ export function App() {
         ]);
       } else if (data.type === "hmr-full-reload") {
         addLog("HMR boundary not found, reloading...", "info");
-        // Use the cached full bundle from the last hmr-update
         if (lastBundleRef.current) {
-          executeInIframe(lastBundleRef.current);
+          updateBundle(lastBundleRef.current);
         }
       }
     };
@@ -120,34 +224,28 @@ export function App() {
         lastBundleRef.current = data.code;
         setHasBundle(true);
         addLog("Watch build ready (initial)", "info");
-        executeInIframe(data.code);
+        updateBundle(data.code);
       } else if (data.type === "hmr-update") {
         // Cache the full bundle for fallback
         lastBundleRef.current = data.bundle;
         setHasBundle(true);
-        // Forward HMR update to iframe
-        const iframe = iframeRef.current;
-        if (iframe && iframe.contentWindow) {
-          iframe.contentWindow.postMessage(
-            {
-              type: "hmr-update",
-              updatedModules: data.update.updatedModules,
-              removedModules: data.update.removedModules,
-            },
-            "*",
-          );
-          addLog(
-            "HMR: updated " +
-              Object.keys(data.update.updatedModules).length +
-              " module(s)",
-            "info",
-          );
-        }
+        // Broadcast HMR update to all preview frames
+        broadcastToFrames({
+          type: "hmr-update",
+          updatedModules: data.update.updatedModules,
+          removedModules: data.update.removedModules,
+        });
+        addLog(
+          "HMR: updated " +
+            Object.keys(data.update.updatedModules).length +
+            " module(s)",
+          "info",
+        );
       } else if (data.type === "watch-rebuild") {
         lastBundleRef.current = data.code;
         setHasBundle(true);
         addLog("Full rebuild (HMR not possible)", "info");
-        executeInIframe(data.code);
+        updateBundle(data.code);
       } else if (data.type === "watch-stopped") {
         setHmrReady(false);
       } else if (data.type === "error" && watchMode) {
@@ -203,15 +301,12 @@ export function App() {
   }
 
   function switchTab(name: string) {
-    // EditorFS already has the latest content for the old file
-    // (written on every keystroke), so just read the new one
     setActiveFile(name);
     setEditorValue(editorFSRef.current?.read(name) || "");
   }
 
   function handleEditorChange(value: string) {
     setEditorValue(value);
-    // Write immediately to EditorFS -- it debounces the worker sync
     editorFSRef.current?.write(activeFile, value);
   }
 
@@ -254,7 +349,7 @@ export function App() {
       lastBundleRef.current = bundleCode;
       setHasBundle(true);
       addLog("Bundle ready. Executing...", "info");
-      executeInIframe(bundleCode);
+      updateBundle(bundleCode);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       addLog("Bundle error: " + message, "error");
@@ -298,6 +393,13 @@ export function App() {
     lastBundleRef.current = "";
     setHasBundle(false);
 
+    // Revoke blob URL
+    if (prevBlobUrlRef.current) {
+      URL.revokeObjectURL(prevBlobUrlRef.current);
+      prevBlobUrlRef.current = "";
+    }
+    setBlobUrl("");
+
     addLog("Watch mode stopped", "info");
 
     // Re-create worker to reset its state and onmessage handler
@@ -318,61 +420,6 @@ export function App() {
     a.download = currentProject + "-bundle.js";
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  function executeInIframe(bundleCode: string) {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-
-    // Preserve the router shim hash from the old iframe (if any)
-    let preservedHash = "";
-    try {
-      preservedHash = (iframe.contentWindow as any)?.__ROUTER_SHIM_HASH__ || "";
-    } catch (_) {}
-
-    const container = iframe.parentNode as HTMLElement;
-    const newFrame = document.createElement("iframe");
-    newFrame.id = "preview-frame";
-    newFrame.sandbox.add("allow-scripts");
-    newFrame.sandbox.add("allow-same-origin");
-    container.replaceChild(newFrame, iframe);
-    iframeRef.current = newFrame as HTMLIFrameElement;
-
-    // Restore the preserved route so the shim picks it up before modules execute
-    const hashScript = preservedHash
-      ? "<script>window.__ROUTER_SHIM_HASH__ = " + JSON.stringify(preservedHash) + ";</" + "script>\n"
-      : "";
-
-    const html =
-      "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
-      "['log','warn','error','info'].forEach(function(method) {\n" +
-      "  var orig = console[method];\n" +
-      "  console[method] = function() {\n" +
-      "    var args = Array.prototype.slice.call(arguments);\n" +
-      "    var text = args.map(function(a) {\n" +
-      "      if (typeof a === 'object') try { return JSON.stringify(a); } catch(e) { return String(a); }\n" +
-      "      return String(a);\n" +
-      "    }).join(' ');\n" +
-      "    window.parent.postMessage({ type: 'console', method: method, text: text }, '*');\n" +
-      "    if (orig) orig.apply(console, arguments);\n" +
-      "  };\n" +
-      "});\n" +
-      "window.onerror = function(msg, url, line, col, err) {\n" +
-      "  window.parent.postMessage({ type: 'console', method: 'error', text: msg + ' (line ' + line + ')' }, '*');\n" +
-      "};\n" +
-      "</" +
-      "script>\n" +
-      hashScript +
-      "<script>\n" +
-      bundleCode +
-      "\n</" +
-      "script>\n" +
-      "</body></html>";
-
-    const doc = (iframeRef.current as HTMLIFrameElement).contentDocument!;
-    doc.open();
-    doc.write(html);
-    doc.close();
   }
 
   const projectNames = Object.keys(projects);
@@ -472,11 +519,10 @@ export function App() {
               </span>
             )}
           </div>
-          <iframe
-            ref={iframeRef}
-            id="preview-frame"
-            sandbox="allow-scripts allow-same-origin"
-          />
+          <div className="preview-frames">
+            <PreviewFrame ref={frame1Ref} blobUrl={blobUrl} route="#/" />
+            <PreviewFrame ref={frame2Ref} blobUrl={blobUrl} route="#/explore" />
+          </div>
         </div>
 
         <div className={`console-panel mobile-panel ${mobileTab === "console" ? "mobile-active" : ""}`}>
