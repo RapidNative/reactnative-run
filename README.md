@@ -1,6 +1,6 @@
 # almostmetro
 
-A browser-based JavaScript/TypeScript bundler inspired by Metro. It provides a virtual filesystem, a CommonJS module bundler with a pluggable transformer pipeline, and an npm package server that bundles packages on-demand.
+A browser-based JavaScript/TypeScript bundler inspired by Metro. It provides a virtual filesystem, a CommonJS module bundler with a pluggable transformer pipeline, and **almostesm** -- an npm package server that bundles packages on-demand.
 
 ## Architecture
 
@@ -9,30 +9,31 @@ The project has three components:
 | Component | Path | Description |
 |---|---|---|
 | **almostmetro** (library) | `almostmetro/` | Virtual FS, resolver, bundler, transformer pipeline |
-| **package-server** | `package-server/` | Express server that installs and bundles npm packages on-demand |
+| **almostesm** | `almostesm/` | Express server that installs and bundles npm packages on-demand |
 | **example** | `almostmetro/example/` | Vite + React app demonstrating the library |
 
 ```
-new-es-builder/
-  almostmetro/           # Library (published as "almostmetro")
+almostmetro/               # Library (published as "almostmetro")
+  src/
+    types.ts               # Core interfaces
+    fs.ts                  # VirtualFS class
+    resolver.ts            # Module resolution with configurable extensions
+    bundler.ts             # Bundler class - graph walking, transforms, emit
+    transforms/
+      typescript.ts        # Default TS/JSX transformer (sucrase)
+    plugins/
+      data-bx-path.ts      # JSX data-bx-path attribute injection plugin
+    index.ts               # Public exports
+  dist/                    # Compiled output (tsc)
+  example/                 # Vite React demo app
+    user_projects/         # Sample projects (basic, typescript, react)
     src/
-      types.ts           # Core interfaces
-      fs.ts              # VirtualFS class
-      resolver.ts        # Module resolution with configurable extensions
-      bundler.ts         # Bundler class - graph walking, transforms, emit
-      transforms/
-        typescript.ts    # Default TS/JSX transformer (sucrase)
-      index.ts           # Public exports
-    dist/                # Compiled output (tsc)
-    example/             # Vite React demo app
-      user_projects/     # Sample projects (basic, typescript, react)
-      src/
-        App.tsx          # Editor UI using almostmetro
-      scripts/
-        build-projects.ts
-  package-server/        # npm package bundling service
-    src/index.ts
-    cache/               # Cached bundled packages
+      App.tsx              # Editor UI using almostmetro
+    scripts/
+      build-projects.ts
+almostesm/                 # npm package bundling service
+  src/index.ts
+  cache/                   # Cached bundled packages
 ```
 
 ## Quick Start
@@ -42,17 +43,17 @@ new-es-builder/
 npm install
 npm install --prefix almostmetro
 npm install --prefix almostmetro/example
-npm install --prefix package-server
+npm install --prefix almostesm
 
 # Build the library
 npm run build --prefix almostmetro
 
-# Start all three services (library watch + package server + vite dev)
+# Start all three services (library watch + almostesm + vite dev)
 npm run dev
 ```
 
 This starts:
-- **Package server** at `http://localhost:3001`
+- **almostesm** at `http://localhost:3001`
 - **Library** in watch mode (recompiles on changes)
 - **Vite dev server** at `http://localhost:5173`
 
@@ -83,9 +84,9 @@ const code = await bundler.bundle("/index.ts");
 // 4. Execute (e.g. in an iframe, eval, etc.)
 ```
 
-## Package Server (unpkg-style URLs)
+## almostesm (unpkg-style URLs)
 
-The package server bundles npm packages on-demand for browser consumption:
+almostesm bundles npm packages on-demand for browser consumption:
 
 ```
 GET /pkg/lodash              -> lodash@latest
@@ -110,5 +111,5 @@ Switch between projects in the example app using the dropdown or URL params:
 - [Architecture](docs/architecture.md) - System design and data flow
 - [Library API](docs/api.md) - VirtualFS, Bundler, Resolver, types
 - [Transformer System](docs/transformers.md) - How transforms work, writing custom transformers
-- [Package Server](docs/package-server.md) - npm package bundling service
+- [almostesm](docs/almostesm.md) - npm package bundling service
 - [Example App](docs/example.md) - The Vite React demo application

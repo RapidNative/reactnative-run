@@ -5,7 +5,7 @@
 almostmetro is a browser-based bundler that mirrors the architecture of Metro (React Native's bundler) in a simplified form. The system has three runtime components that work together:
 
 ```
-Browser (example app)          Package Server (:3001)
+Browser (example app)          almostesm (:3001)
 +------------------------+     +---------------------+
 | VirtualFS              |     | GET /pkg/:specifier  |
 |   FileMap of sources   |     |   npm install        |
@@ -67,7 +67,7 @@ The bundler walks the dependency graph starting from the entry file:
 
 1. **Walk** - recursively follow `require()` calls, transforming each file
 2. **Collect npm packages** - track any require targets that are npm packages
-3. **Fetch packages** - download pre-bundled npm packages from the package server in parallel
+3. **Fetch packages** - download pre-bundled npm packages from almostesm in parallel
 4. **Emit** - produce a single self-executing bundle:
 
 ```javascript
@@ -135,7 +135,7 @@ The preamble is built by `buildBundlePreamble(env?)` in `utils.ts`, called from 
 
 ### 7. npm Package Bundling
 
-When the bundler encounters `require("lodash")`, it fetches from the package server:
+When the bundler encounters `require("lodash")`, it fetches from almostesm:
 
 1. Server receives `GET /pkg/lodash@4.17.21`
 2. Creates temp directory, runs `npm install lodash@4.17.21`
@@ -170,6 +170,8 @@ almostmetro/
     incremental-bundler.ts # IncrementalBundler with HMR support
     transforms/
       typescript.ts       # Default sucrase-based transformer
+    plugins/
+      data-bx-path.ts     # JSX data-bx-path attribute injection plugin
     index.ts              # Public exports
   dist/                   # Compiled library (tsc output) - example app imports from here
   example/                # Vite React demo
@@ -183,7 +185,7 @@ almostmetro/
     scripts/              # Build scripts (projects.json generation)
     public/               # Static assets (generated projects.json)
 
-package-server/
+almostesm/
   src/index.ts            # Express server
   cache/                  # Bundled npm packages + externals manifests (gitignored)
 ```
@@ -196,10 +198,10 @@ package-server/
 
 **Sucrase over Babel/SWC** - Sucrase is chosen as the default transformer because it's fast and works in the browser (pure JS, no WASM). It handles the common case (TypeScript + JSX + import/export) with minimal overhead. The transformer interface allows swapping it for any other tool.
 
-**On-demand package bundling** - Rather than pre-bundling a fixed set of packages, the package server bundles npm packages the first time they're requested. This means any npm package works without configuration, at the cost of a cold-start delay on first use. Subsequent requests are instant (disk cache).
+**On-demand package bundling** - Rather than pre-bundling a fixed set of packages, almostesm bundles npm packages the first time they're requested. This means any npm package works without configuration, at the cost of a cold-start delay on first use. Subsequent requests are instant (disk cache).
 
 **IIFE format for npm packages** - Packages are bundled as IIFE (Immediately Invoked Function Expression) with esbuild. The IIFE assigns to a `__module` variable, which our wrapper converts to `module.exports = __module`. The wrapper is kept simple because both Sucrase and esbuild consumers generate their own interop helpers. This approach avoids polluting the global scope and works within our CommonJS factory wrapper.
 
 **Multi-target architecture** - Each target (web, expo) gets its own `Bundler`/`IncrementalBundler` instance with its own config, plugins, cache, and module map. The web worker orchestrator creates per-target instances, runs them in parallel, and merges results. Plugins are target-specific (e.g. web-plugin aliases, expo-plugin React import injection + react-native-web alias).
 
-**Full dependency externalization** - The package server externalizes ALL `dependencies` + `peerDependencies` (not just peer deps). This ensures shared transitive deps are loaded once at runtime. Version pinning via the `X-Externals` response header prevents version mismatches for transitive dependencies.
+**Full dependency externalization** - almostesm externalizes ALL `dependencies` + `peerDependencies` (not just peer deps). This ensures shared transitive deps are loaded once at runtime. Version pinning via the `X-Externals` response header prevents version mismatches for transitive dependencies.

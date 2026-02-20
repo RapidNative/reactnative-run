@@ -1,6 +1,6 @@
-# Package Server
+# almostesm
 
-The package server is an Express service that bundles npm packages on-demand for browser consumption. It follows an unpkg-style URL scheme and caches results to disk.
+almostesm is an Express service that bundles npm packages on-demand for browser consumption. It follows an unpkg-style URL scheme and caches results to disk.
 
 ## URL Format
 
@@ -48,7 +48,7 @@ Not all imports are externalized equally:
 
 ### Version Pinning via X-Externals Header
 
-When the package server bundles a package, it tracks the installed versions of all externalized dependencies. This information is returned as the `X-Externals` response header:
+When almostesm bundles a package, it tracks the installed versions of all externalized dependencies. This information is returned as the `X-Externals` response header:
 
 ```
 X-Externals: {"react":"19.1.0","react-dom":"19.1.0","memoize-one":"4.1.0"}
@@ -92,7 +92,7 @@ The IIFE wrapper is deliberately simple (`module.exports = __module`). Both Sucr
 
 ## Caching
 
-Bundled packages are cached to `package-server/cache/` with two files per package:
+Bundled packages are cached to `almostesm/cache/` with two files per package:
 
 ```
 cache/
@@ -108,12 +108,12 @@ To force a rebuild, delete both the `.js` and `.externals.json` files and re-req
 
 To clear all cached packages:
 ```bash
-rm -f package-server/cache/*.js package-server/cache/*.json
+rm -f almostesm/cache/*.js almostesm/cache/*.json
 ```
 
 ## Configuration
 
-The server runs on port 3001 by default. The port is defined in `package-server/src/index.ts`.
+The server runs on port 3001 by default. The port is defined in `almostesm/src/index.ts`.
 
 CORS is enabled for all origins (`Access-Control-Allow-Origin: *`) with `X-Externals` exposed via `Access-Control-Expose-Headers`.
 
@@ -121,15 +121,15 @@ CORS is enabled for all origins (`Access-Control-Allow-Origin: *`) with `X-Exter
 
 ```bash
 # Development (with auto-reload)
-npm run dev --prefix package-server
+npm run dev --prefix almostesm
 
 # Production
-npm start --prefix package-server
+npm start --prefix almostesm
 ```
 
 ## Integration with almostmetro
 
-The bundler connects to the package server via the `server.packageServerUrl` config:
+The bundler connects to almostesm via the `server.packageServerUrl` config:
 
 ```typescript
 const config: BundlerConfig = {

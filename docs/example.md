@@ -8,7 +8,7 @@ The example app is a Vite + React application that demonstrates almostmetro in a
 # From the repo root (starts all services)
 npm run dev
 
-# Or standalone (requires package-server running separately)
+# Or standalone (requires almostesm running separately)
 cd almostmetro/example
 npm run dev
 ```
@@ -119,7 +119,7 @@ Switching projects resets the editor, console, and file state.
 - Must have an entry file: `index.js`, `index.ts`, `index.tsx`, or `index.jsx`
 - Must have a `package.json` (can be empty: `{ "dependencies": {} }`)
 - File paths are relative to the project root and prefixed with `/` in the file map
-- npm dependencies listed in `package.json` are fetched from the package server at runtime
+- npm dependencies listed in `package.json` are fetched from almostesm at runtime
 
 ## Sample Projects
 

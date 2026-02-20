@@ -93,7 +93,7 @@ The bundle process:
 1. Walks the dependency graph from the entry file
 2. Transforms each file using `config.transformer`
 3. Rewrites relative `require()` calls to absolute paths
-4. Fetches any npm packages from the package server
+4. Fetches any npm packages from almostesm
 5. Emits a self-executing CommonJS bundle
 
 #### `transformFile(filename: string, src: string): string`
