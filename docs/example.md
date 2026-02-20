@@ -20,9 +20,14 @@ The app runs at `http://localhost:5173` (or next available port).
 - **Multi-file editor** with tab switching
 - **Project selector** dropdown (URL-synced via `?project=` param)
 - **Live bundling** using almostmetro library
-- **Sandboxed execution** in an iframe
+- **Watch mode with HMR** -- edit code and see changes instantly without page reload
+- **React Refresh** -- preserves component state across HMR updates
+- **Sandboxed execution** in dual preview iframes
 - **Console capture** with color-coded log/warn/error/info output
+- **Source-mapped error display** -- runtime errors show original file:line, not bundle positions
+- **Rich error view** with resolved stack traces
 - **TypeScript and JSX support** via the default transformer
+- **data-bx-path injection** for click-to-source functionality
 
 ## Project Structure
 
@@ -31,8 +36,13 @@ example/
   index.html              # Vite entry point
   src/
     main.tsx              # React root
-    App.tsx               # Main app component
-    App.css               # Catppuccin dark theme styles
+    App.tsx               # Main app (editor, preview iframes, console, HTML blob builder)
+    App.css               # Catppuccin dark theme styles (incl. rich error display)
+    bundler.worker.ts     # Web worker orchestrator (creates per-target bundler instances)
+    editor-fs.ts          # EditorFS with change tracking for watch mode
+    plugins/
+      web-plugin.ts       # Aliases, shims, globals for web target
+      expo-web.ts         # React import injection + react-native alias for Expo
   scripts/
     build-projects.ts     # Generates projects.json from user_projects/
   user_projects/          # Sample projects
@@ -70,25 +80,78 @@ The editor is a `<textarea>` with tab key support (inserts 2 spaces). File tabs 
 
 ### 3. Bundling
 
-When the user clicks **Run**:
+Bundling happens in a **web worker** (`bundler.worker.ts`) to avoid blocking the UI. The worker creates `Bundler` or `IncrementalBundler` instances with target-specific plugins.
+
+**One-shot mode** (Run button):
 
 1. Current editor content is saved to the file map
-2. A `VirtualFS` is created from the files
-3. A `Bundler` is created with the `typescriptTransformer` config
-4. `bundler.bundle(entryFile)` produces the bundle string
-5. The bundle is executed in a fresh iframe
+2. Worker receives the full `FileMap` and creates a `Bundler` with `typescriptTransformer`
+3. `bundler.bundle(entryFile)` walks the dependency graph, transforms files, fetches npm packages, and emits a bundle with inline source map
+4. The bundle is sent back to the main thread and executed in a fresh iframe
+
+**Watch mode** (Watch button):
+
+1. Worker creates an `IncrementalBundler` with `reactRefreshTransformer` and does an initial full build
+2. `EditorFS` tracks file changes and debounces `watch-update` messages to the worker
+3. On each change, `IncrementalBundler.rebuild()` only re-transforms changed files
+4. If HMR is possible, the worker sends an `hmr-update` with per-module code; otherwise it sends a full `watch-rebuild`
+5. The main thread broadcasts updates to all preview iframes
 
 ### 4. Iframe Execution
 
-The bundle runs in a sandboxed iframe (`allow-scripts` only). Before the bundle code, the iframe HTML includes a script that:
+The bundle runs in sandboxed iframes (`allow-scripts allow-same-origin`). Two blob URLs are created:
 
-- Overrides `console.log/warn/error/info` to forward messages to the parent via `postMessage`
-- Sets up `window.onerror` to capture uncaught errors
-- Includes a `<div id="root">` element for React apps to mount to
+1. **JS Blob** -- the bundle code (preamble + runtime + modules + inline source map) as `application/javascript`
+2. **HTML Blob** -- an HTML document that loads the JS blob via `<script src>` and includes console interception, a source map resolver, and error handlers
 
-The parent window listens for `postMessage` events and renders them in the console panel.
+The HTML blob structure:
 
-### 5. Project Switching
+```
+┌─ <!DOCTYPE html> ─────────────────────────────────────────┐
+│ <div id="root"></div>                                      │
+│                                                            │
+│ <script>                                                   │
+│   1. Console interception                                  │
+│      Overrides console.log/warn/error/info to forward      │
+│      messages to parent via postMessage                     │
+│                                                            │
+│   2. Source map resolver (ES5)                              │
+│      - Mini VLQ decoder + decodeMappings                   │
+│      - window.__SM API (init, add, resolve)                │
+│      - HMR listener: extracts per-module source maps       │
+│      - Stack trace parser (Chrome format)                  │
+│      - window.onerror + unhandledrejection handlers        │
+│        -> resolves via __SM, sends structured error        │
+│           { type: 'runtime-error', message, file, line,    │
+│             column, stack: [{fn,file,line,column}] }       │
+│ </script>                                                  │
+│                                                            │
+│ <script>window.__SM.init(jsBlobUrl, sourceMapData)</script>│
+│                                                            │
+│ <script src="blob:...js-blob-url"></script>                │
+└────────────────────────────────────────────────────────────┘
+```
+
+The parent window listens for `postMessage` events:
+- `type: "console"` -- rendered as a plain log entry in the console panel
+- `type: "runtime-error"` -- rendered as a rich error entry with message (red), file:line location (orange), and resolved stack frames (dimmed)
+- `type: "hmr-full-reload"` -- triggers a full iframe reload when no HMR accept boundary was found
+
+### 5. Watch Mode & HMR
+
+Watch mode enables Hot Module Replacement:
+
+1. **Start**: Click "Watch" -- creates an `IncrementalBundler` with React Refresh, does an initial build, and loads the bundle in iframes
+2. **Edit**: Type in the editor -- `EditorFS` detects the change and sends a debounced `watch-update` to the worker
+3. **Rebuild**: The worker calls `IncrementalBundler.rebuild()` which re-transforms only changed files
+4. **HMR update**: The worker sends `{ type: 'hmr-update', update: { updatedModules, removedModules }, bundle }` back to the main thread
+5. **Broadcast**: The main thread forwards the update to all preview iframes via `postMessage`
+6. **Patch**: The iframe's HMR runtime replaces module factories, re-executes accept boundaries, and calls `performReactRefresh()`
+7. **Source maps**: The iframe's HMR listener extracts per-module inline source maps from the updated code and registers them with `__SM.add()`
+
+If no accept boundary is found, the iframe sends `hmr-full-reload` to the parent, which creates a new HTML blob from the full bundle fallback.
+
+### 6. Project Switching
 
 The project selector syncs with the URL via `?project=` query param:
 

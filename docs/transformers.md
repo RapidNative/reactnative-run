@@ -4,14 +4,25 @@ almostmetro uses a pluggable transformer pipeline inspired by Metro's transforme
 
 ## How It Works
 
-During bundling, when the `Bundler` encounters a file, it calls:
+During bundling, each file passes through a three-stage pipeline. The `Transformer` is the core stage, but plugins can hook in before and after:
+
+```
+   BundlerPlugin.transformSource()   ← pre-transform hooks (raw JSX/TS)
+              │
+   Transformer.transform()          ← core transform (e.g. Sucrase)
+              │
+   BundlerPlugin.transformOutput()   ← post-transform hooks (CJS output)
+```
+
+The core transform call looks like:
 
 ```typescript
 const transformed = this.config.transformer.transform({
   src: fileContents,
   filename: "/path/to/file.tsx"
 });
-// transformed.code is now CJS-compatible JavaScript
+// transformed.code is CJS-compatible JavaScript
+// transformed.sourceMap is an optional RawSourceMap
 ```
 
 The transformer is responsible for converting the source into plain JavaScript with CommonJS module syntax (`require`/`module.exports`). This is the format the bundle runtime expects.
@@ -25,7 +36,8 @@ interface TransformParams {
 }
 
 interface TransformResult {
-  code: string;      // Transformed JavaScript
+  code: string;              // Transformed JavaScript
+  sourceMap?: RawSourceMap;  // Optional source map for error mapping
 }
 
 interface Transformer {
@@ -147,6 +159,48 @@ const config = {
   server: { packageServerUrl: "http://localhost:3001" },
 };
 ```
+
+## Built-in: reactRefreshTransformer
+
+Extends `typescriptTransformer` with React Refresh support for HMR. Used in watch mode.
+
+```typescript
+import { reactRefreshTransformer } from "almostmetro";
+
+const config = {
+  resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+  transformer: reactRefreshTransformer,
+  server: { packageServerUrl: "http://localhost:3001" },
+  hmr: { enabled: true, reactRefresh: true },
+};
+```
+
+For each `.tsx`/`.jsx` file, it:
+1. Applies the same transforms as `typescriptTransformer`
+2. Wraps each component with `$RefreshReg$` and `$RefreshSig$` calls
+3. Appends a `module.hot.accept()` postamble so the module is an HMR accept boundary
+
+You can also create a custom React Refresh transformer with different base transforms:
+
+```typescript
+import { createReactRefreshTransformer } from "almostmetro";
+
+const myRefreshTransformer = createReactRefreshTransformer(myBaseTransformer);
+```
+
+## Plugin Hooks vs Transformers
+
+Plugins and transformers serve different purposes:
+
+| | Transformer | Plugin hooks |
+|---|---|---|
+| **When** | Core transform stage | Before (`transformSource`) or after (`transformOutput`) |
+| **Input** | Raw source | Raw source (pre) or CJS output (post) |
+| **Scope** | Every file | Per-plugin, can filter by filename |
+| **Source maps** | Returns `sourceMap` | Source map offsets adjusted automatically |
+| **Example** | Sucrase (TS/JSX -> CJS) | data-bx-path (inject JSX attributes) |
+
+The plugin pipeline runs in array order. Pre-transform plugins see the original source with JSX intact, making them ideal for JSX-level transformations like attribute injection.
 
 ## Important: Output Must Be CommonJS
 
