@@ -4,9 +4,12 @@ import {
   VirtualFS,
   typescriptTransformer,
   reactRefreshTransformer,
+  createDataBxPathPlugin,
 } from "almostmetro";
 import type { FileMap, BundlerConfig, ContentChange } from "almostmetro";
 import { expoWebPlugin } from "./plugins/expo-web";
+
+const dataBxPathPlugin = createDataBxPathPlugin();
 
 // --- One-shot bundle types (backward compat) ---
 
@@ -111,7 +114,7 @@ async function handleBundle(data: BundleRequest): Promise<void> {
     resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
     transformer: typescriptTransformer,
     server: { packageServerUrl },
-    plugins: [expoWebPlugin],
+    plugins: [dataBxPathPlugin, expoWebPlugin],
     env: {
       EXPO_PUBLIC_TEST: "hello",
     },
@@ -145,7 +148,7 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
     transformer: reactRefreshTransformer,
     server: { packageServerUrl },
     hmr: { enabled: true, reactRefresh: true },
-    plugins: [expoWebPlugin],
+    plugins: [dataBxPathPlugin, expoWebPlugin],
     env: {
       EXPO_PUBLIC_TEST: "hello",
     },
