@@ -166,6 +166,18 @@ exports.vars = function vars(obj) {
   result.__cssVars = obj;
   return result;
 };
+
+exports.cssInterop = function cssInterop(Component) {
+  return Component;
+};
+
+exports.remapProps = function remapProps(Component) {
+  return Component;
+};
+
+exports.createStyleSheet = function createStyleSheet(styles) {
+  return RN.StyleSheet.create(styles);
+};
 `;
 
 /**
