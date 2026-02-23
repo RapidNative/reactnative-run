@@ -63,9 +63,9 @@ export class Resolver {
     return "/" + resolved.join("/");
   }
 
-  /** Check if a path is an asset file (image, font, etc.) */
+  /** Check if a path is an asset file (image, font, css, etc.) */
   isAssetFile(filePath: string): boolean {
-    return /\.(png|jpe?g|gif|svg|webp|bmp|ico|ttf|otf|woff2?|mp[34]|wav|aac|pdf)$/i.test(filePath);
+    return /\.(png|jpe?g|gif|svg|webp|bmp|ico|ttf|otf|woff2?|mp[34]|wav|aac|pdf|css)$/i.test(filePath);
   }
 
   /** Try to find the actual file path (with extension, or index file) */
