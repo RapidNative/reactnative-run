@@ -110,9 +110,51 @@ function extractInlineSourceMap(
 
 // --- Build the HTML document that wraps the bundle ---
 
+function extractTailwindConfig(tailwindConfigContent: string): string {
+  try {
+    // Find module.exports = {...}
+    let configString = "";
+    const moduleExportsIndex = tailwindConfigContent.indexOf("module.exports");
+    if (moduleExportsIndex !== -1) {
+      const braceIndex = tailwindConfigContent.indexOf("{", moduleExportsIndex);
+      if (braceIndex !== -1) {
+        let depth = 0;
+        let inString = false;
+        let stringChar = "";
+        for (let i = braceIndex; i < tailwindConfigContent.length; i++) {
+          const char = tailwindConfigContent[i];
+          const prevChar = i > 0 ? tailwindConfigContent[i - 1] : "";
+          if ((char === '"' || char === "'" || char === "`") && prevChar !== "\\") {
+            if (!inString) { inString = true; stringChar = char; }
+            else if (char === stringChar) { inString = false; stringChar = ""; }
+            continue;
+          }
+          if (inString) continue;
+          if (char === "{") depth++;
+          else if (char === "}") { depth--; if (depth === 0) { configString = tailwindConfigContent.substring(braceIndex, i + 1); break; } }
+        }
+      }
+    }
+    if (!configString) return "";
+    // Clean up require() and process.env
+    const cleaned = configString
+      .replace(/require\([^)]*\)/g, "[]")
+      .replace(/process\.env\.[A-Z_]+/g, '"class"')
+      .replace(/:\s*undefined/g, ": null");
+    // eslint-disable-next-line no-eval
+    const configObj = eval("(" + cleaned + ")");
+    const extend = configObj?.theme?.extend;
+    if (!extend) return "";
+    return "tailwind.config={darkMode:'class',theme:{extend:" + JSON.stringify(extend) + "}};";
+  } catch {
+    return "";
+  }
+}
+
 function buildBundleHtml(
   jsBlobUrl: string,
   sourceMap: { sources: string[]; mappings: string } | null,
+  tailwindConfigScript?: string,
 ): string {
   // Script 1: Console interception (forwards console.* to parent)
   const consoleScript =
@@ -313,7 +355,10 @@ function buildBundleHtml(
   }
 
   return (
-    "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'>" +
+    "<script src='https://cdn.tailwindcss.com'></" + "script>" +
+    (tailwindConfigScript ? "<script>" + tailwindConfigScript + "</" + "script>" : "") +
+    "<style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
     consoleScript +
     smResolverScript +
     "</" +
@@ -347,6 +392,7 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const editorFSRef = useRef<EditorFS | null>(null);
   const lastBundleRef = useRef<string>("");
+  const tailwindConfigRef = useRef<string>("");
   const [hasBundle, setHasBundle] = useState(false);
 
   // Blob URLs for preview iframes (built once, loaded by all frames)
@@ -370,7 +416,7 @@ export function App() {
     const jsUrl = URL.createObjectURL(jsBlob);
     prevJsBlobUrlRef.current = jsUrl;
     const sm = extractInlineSourceMap(bundleCode);
-    const html = buildBundleHtml(jsUrl, sm);
+    const html = buildBundleHtml(jsUrl, sm, tailwindConfigRef.current);
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     prevBlobUrlRef.current = url;
@@ -404,6 +450,11 @@ export function App() {
           const entry = findEntryFile(projectFiles);
           setActiveFile(entry);
           setEditorValue(projectFiles[entry] || "");
+          // Extract tailwind config from project files
+          const twConfig = projectFiles["/tailwind.config.js"] || projectFiles["/tailwind.config.ts"];
+          if (twConfig) {
+            tailwindConfigRef.current = extractTailwindConfig(twConfig);
+          }
         }
       });
   }, []);

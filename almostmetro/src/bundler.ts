@@ -202,11 +202,6 @@ export class Bundler {
     const versions = this.getPackageVersions();
     const transitiveDepsVersions: Record<string, string> = {};
 
-    // Pre-seed with all package.json deps so they're fetched in one batch
-    for (const name of Object.keys(versions)) {
-      npmPackages[name] = true;
-    }
-
     const walk = async (filePath: string): Promise<void> => {
       if (visited[filePath]) return;
       visited[filePath] = true;

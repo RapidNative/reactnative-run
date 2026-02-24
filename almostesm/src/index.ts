@@ -80,7 +80,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
   try {
     execSync("npm init -y", { cwd: tmpDir, stdio: "ignore" });
-    execSync(`npm install ${pkgName}@${version}`, {
+    execSync(`npm install ${pkgName}@${version} --legacy-peer-deps`, {
       cwd: tmpDir,
       stdio: "ignore",
       timeout: 60000,
@@ -150,6 +150,18 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
     // contains a version check against require("react").version).
     const alwaysExternalSubpaths = new Set(["react", "react-dom", "react-native"]);
 
+    // Filter out native platform files (.android.*, .ios.*, .windows.*)
+    // so esbuild only bundles .web.* or plain .js/.ts files for the browser.
+    const filterNativePlatformsPlugin: esbuild.Plugin = {
+      name: "filter-native-platforms",
+      setup(build) {
+        build.onLoad(
+          { filter: /\.(android|ios|windows)\.[jt]sx?$/ },
+          () => ({ contents: "", loader: "js" })
+        );
+      },
+    };
+
     const selectiveExternalPlugin: esbuild.Plugin = {
       name: "selective-external",
       setup(build) {
@@ -218,7 +230,10 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
           "__DEV__": "false",
         },
       }),
-      plugins: [selectiveExternalPlugin],
+      plugins: [
+        ...(isReactNative ? [filterNativePlatformsPlugin] : []),
+        selectiveExternalPlugin,
+      ],
     });
 
     const bundled = fs.readFileSync(outFile, "utf-8");

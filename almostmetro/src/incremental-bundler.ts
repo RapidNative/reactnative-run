@@ -464,11 +464,6 @@ export class IncrementalBundler {
 
     const npmPackagesNeeded = new Set<string>();
 
-    // Pre-seed with all package.json deps so they're fetched in one batch
-    for (const name of Object.keys(this.packageVersions)) {
-      npmPackagesNeeded.add(name);
-    }
-
     this.walkDeps(entryFile, npmPackagesNeeded);
 
     // Process module aliases: swap sources for targets in the fetch list
