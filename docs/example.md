@@ -13,7 +13,7 @@ cd almostmetro/example
 npm run dev
 ```
 
-The app runs at `http://localhost:5173` (or next available port).
+The app runs at `http://localhost:5201` (or next available port).
 
 ## Features
 
@@ -156,9 +156,9 @@ If no accept boundary is found, the iframe sends `hmr-full-reload` to the parent
 The project selector syncs with the URL via `?project=` query param:
 
 ```
-http://localhost:5173/                    -> basic (default)
-http://localhost:5173/?project=typescript -> typescript
-http://localhost:5173/?project=react      -> react
+http://localhost:5201/                    -> basic (default)
+http://localhost:5201/?project=typescript -> typescript
+http://localhost:5201/?project=react      -> react
 ```
 
 Switching projects resets the editor, console, and file state.
@@ -175,7 +175,7 @@ Switching projects resets the editor, console, and file state.
 
 2. Restart the dev server (or run `npm run build:projects`) to regenerate `projects.json`
 
-3. Access via `http://localhost:5173/?project=myproject`
+3. Access via `http://localhost:5201/?project=myproject`
 
 ### Project Requirements
 

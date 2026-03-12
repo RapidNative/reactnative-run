@@ -59,9 +59,9 @@ npm run dev
 ```
 
 This starts:
-- **almostesm** at `http://localhost:3001`
+- **almostesm** at `http://localhost:5200`
 - **Library** in watch mode (recompiles on changes)
-- **Vite dev server** at `http://localhost:5173`
+- **Vite dev server** at `http://localhost:5201`
 
 ## Library API
 
@@ -84,7 +84,7 @@ const vfs = new VirtualFS(files);
 const config: BundlerConfig = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
   transformer: typescriptTransformer,
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
   plugins: [createDataBxPathPlugin()],  // optional plugins
 };
 
@@ -126,9 +126,9 @@ Peer dependencies are automatically externalized to prevent duplicate instances 
 
 Switch between projects in the example app using the dropdown or URL params:
 
-- `http://localhost:5173/` - basic JS project with lodash
-- `http://localhost:5173/?project=typescript` - TypeScript project
-- `http://localhost:5173/?project=react` - React app with components and hooks
+- `http://localhost:5201/` - basic JS project with lodash
+- `http://localhost:5201/?project=typescript` - TypeScript project
+- `http://localhost:5201/?project=react` - React app with components and hooks
 
 ## Documentation
 

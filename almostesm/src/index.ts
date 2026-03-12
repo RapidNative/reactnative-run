@@ -7,7 +7,7 @@ import esbuild from "esbuild";
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
-const PORT = 3005;
+const PORT = 5200;
 
 // Ensure cache dir exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });

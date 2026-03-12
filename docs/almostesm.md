@@ -113,7 +113,7 @@ rm -f almostesm/cache/*.js almostesm/cache/*.json
 
 ## Configuration
 
-The server runs on port 3001 by default. The port is defined in `almostesm/src/index.ts`.
+The server runs on port 5200 by default. The port is defined in `almostesm/src/index.ts`.
 
 CORS is enabled for all origins (`Access-Control-Allow-Origin: *`) with `X-Externals` exposed via `Access-Control-Expose-Headers`.
 
@@ -134,17 +134,17 @@ The bundler connects to almostesm via the `server.packageServerUrl` config:
 ```typescript
 const config: BundlerConfig = {
   // ...
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
 };
 ```
 
 When the bundler encounters an npm `require()` (i.e. not starting with `.` or `/`), it fetches the pre-bundled package:
 
 ```
-require("lodash") -> GET http://localhost:3001/pkg/lodash@4.17.21
-require("react-dom/client") -> GET http://localhost:3001/pkg/react-dom@19.1.0/client
+require("lodash") -> GET http://localhost:5200/pkg/lodash@4.17.21
+require("react-dom/client") -> GET http://localhost:5200/pkg/react-dom@19.1.0/client
 ```
 
 The bundler resolves versions from the user's `package.json` first, then from transitive dependency manifests (`X-Externals`), before falling back to bare names.
 
-In the Vite example app, `localhost:5173/pkg/*` is proxied to `localhost:3001/pkg/*` -- they hit the same server.
+In the Vite example app, `localhost:5201/pkg/*` is proxied to `localhost:5200/pkg/*` -- they hit the same server.

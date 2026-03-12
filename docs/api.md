@@ -73,7 +73,7 @@ import type { BundlerConfig } from "almostmetro";
 const config: BundlerConfig = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
   transformer: typescriptTransformer,
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
 };
 
 const bundler = new Bundler(vfs, config);
@@ -116,7 +116,7 @@ import type { BundlerConfig } from "almostmetro";
 const config: BundlerConfig = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
   transformer: reactRefreshTransformer,
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
   hmr: { enabled: true, reactRefresh: true },
   plugins: [myPlugin],
 };

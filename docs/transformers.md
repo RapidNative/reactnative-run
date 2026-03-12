@@ -55,7 +55,7 @@ import { typescriptTransformer } from "almostmetro";
 const config = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
   transformer: typescriptTransformer,
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
 };
 ```
 
@@ -156,7 +156,7 @@ When using a routing transformer, remember to add the corresponding extensions t
 const config = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx", "svelte", "vue"] },
   transformer: routingTransformer,
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
 };
 ```
 
@@ -170,7 +170,7 @@ import { reactRefreshTransformer } from "almostmetro";
 const config = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
   transformer: reactRefreshTransformer,
-  server: { packageServerUrl: "http://localhost:3001" },
+  server: { packageServerUrl: "http://localhost:5200" },
   hmr: { enabled: true, reactRefresh: true },
 };
 ```

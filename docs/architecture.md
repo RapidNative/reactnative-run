@@ -5,7 +5,7 @@
 almostmetro is a browser-based bundler that mirrors the architecture of Metro (React Native's bundler) in a simplified form. The system has three runtime components that work together:
 
 ```
-Browser (example app)          almostesm (:3001)
+Browser (example app)          almostesm (:5200)
 +------------------------+     +---------------------+
 | VirtualFS              |     | GET /pkg/:specifier  |
 |   FileMap of sources   |     |   npm install        |
@@ -236,7 +236,7 @@ The complete bundle string (preamble + runtime + modules + source map) is stored
 ```javascript
 const jsBlob = new Blob([bundleCode], { type: "application/javascript" });
 const jsBlobUrl = URL.createObjectURL(jsBlob);
-// e.g. "blob:http://localhost:5173/abc123-def456"
+// e.g. "blob:http://localhost:5201/abc123-def456"
 ```
 
 #### HTML Blob
@@ -286,14 +286,14 @@ An HTML document is built around the JS blob URL. This HTML is also stored as a 
 
   <!-- Script 3 (conditional): Initialize source map for the bundle -->
   <script>
-    window.__SM.init("blob:http://localhost:5173/abc123", {
+    window.__SM.init("blob:http://localhost:5201/abc123", {
       sources: ["/index.tsx", "/App.tsx", ...],
       mappings: ";;AAAA,..."
     });
   </script>
 
   <!-- Script 4: The bundle itself (loaded via src, not inline) -->
-  <script src="blob:http://localhost:5173/abc123-def456"></script>
+  <script src="blob:http://localhost:5201/abc123-def456"></script>
 </body>
 </html>
 ```
