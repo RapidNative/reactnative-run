@@ -44,7 +44,12 @@ type WorkerRequest =
 
 // --- Expo Router synthetic entry ---
 
-function buildExpoRouterEntry(vfs: VirtualFS): string {
+/**
+ * Build the route context module that maps route files to their require paths.
+ * This is a plain .js file so React Refresh does NOT add module.hot.accept(),
+ * allowing HMR updates to bubble up to the entry's App component.
+ */
+function buildExpoRouteContext(vfs: VirtualFS): string {
   const routeExts = new Set(["tsx", "ts", "jsx", "js"]);
   const routeFiles: string[] = [];
 
@@ -68,22 +73,36 @@ function buildExpoRouterEntry(vfs: VirtualFS): string {
     .map((e) => `  "${e.contextKey}": require("${e.requirePath}"),`)
     .join("\n");
 
+  return `var modules = {
+${moduleMapLines}
+};
+function ctx(id) { return modules[id]; }
+ctx.keys = function() { return Object.keys(modules); };
+
+module.exports = ctx;
+`;
+}
+
+/**
+ * Build the synthetic entry that imports the route context and renders ExpoRoot.
+ * This is a .tsx file so React Refresh instruments App with module.hot.accept(),
+ * making it an HMR accept boundary for route context changes.
+ */
+function buildExpoRouterEntry(): string {
   return `import { registerRootComponent } from "expo";
 import { ExpoRoot } from "expo-router";
 import React from "react";
 
-const modules = {
-${moduleMapLines}
-};
-
-function ctx(id) { return modules[id]; }
-ctx.keys = function() { return Object.keys(modules); };
+const ctx = require("./__expo_ctx");
 
 function App() {
   return React.createElement(ExpoRoot, { context: ctx });
 }
 
-registerRootComponent(App);
+if (!window.__EXPO_ROOT_REGISTERED) {
+  registerRootComponent(App);
+  window.__EXPO_ROOT_REGISTERED = true;
+}
 `;
 }
 
@@ -94,7 +113,8 @@ function ensureEntryFile(vfs: VirtualFS): string | null {
   // If package.json main points to expo-router/entry, generate a synthetic entry
   const main = vfs.getPackageMain();
   if (main === "expo-router/entry") {
-    vfs.write("/index.tsx", buildExpoRouterEntry(vfs));
+    vfs.write("/__expo_ctx.js", buildExpoRouteContext(vfs));
+    vfs.write("/index.tsx", buildExpoRouterEntry());
     return "/index.tsx";
   }
 
@@ -193,6 +213,26 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
         watchFS.delete(change.path);
       } else {
         watchFS.write(change.path, change.content!);
+      }
+    }
+
+    // If any route files under /app/ were added or removed, regenerate the
+    // route context module so the new routes are included in the module map.
+    // We regenerate /__expo_ctx.js (not the entry) so HMR can propagate the
+    // change up to the entry's App component without requiring a full reload.
+    const main = watchFS.getPackageMain();
+    if (main === "expo-router/entry") {
+      const routeExts = new Set(["tsx", "ts", "jsx", "js"]);
+      const hasRouteChange = changes.some((c) => {
+        if (!c.path.startsWith("/app/")) return false;
+        const ext = c.path.split(".").pop() || "";
+        if (!routeExts.has(ext)) return false;
+        return c.type === "create" || c.type === "delete";
+      });
+      if (hasRouteChange) {
+        const newCtx = buildExpoRouteContext(watchFS);
+        watchFS.write("/__expo_ctx.js", newCtx);
+        changes.push({ path: "/__expo_ctx.js", type: "update", content: newCtx });
       }
     }
 

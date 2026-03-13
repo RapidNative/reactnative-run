@@ -707,6 +707,7 @@ export class IncrementalBundler {
           updatedModules,
           removedModules,
           requiresReload: false,
+          reverseDepsMap: this.graph.getReverseDepsMap(),
         };
       }
     }

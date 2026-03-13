@@ -85,7 +85,14 @@ export const HMR_RUNTIME_TEMPLATE = `(function(modules, reverseDeps, entryId, re
     return boundaries.length > 0 ? boundaries : null;
   }
 
-  function applyUpdate(updatedModules, removedModules) {
+  function applyUpdate(updatedModules, removedModules, newReverseDeps) {
+    // Merge updated reverse deps so boundary walk sees new modules
+    if (newReverseDeps) {
+      for (var key in newReverseDeps) {
+        reverseDeps[key] = newReverseDeps[key];
+      }
+    }
+
     // Phase 1: Check boundaries FIRST, before any state mutation.
     // The dispose phase used to reset accepted=false here, which wiped
     // out the accept registrations before the boundary walk could see them.
@@ -138,11 +145,14 @@ export const HMR_RUNTIME_TEMPLATE = `(function(modules, reverseDeps, entryId, re
       delete hotState[rmId];
     }
 
-    // Phase 5: Re-execute modules (clears cache, runs factory again).
-    // The factory's postamble will call module.hot.accept() again,
-    // re-registering the boundary for the next update.
+    // Phase 5: Re-execute modules. Clear ALL caches first so that nested
+    // require() calls during re-execution pick up the new factories rather
+    // than stale cached exports (e.g. entry requiring a dependency that
+    // hasn't been re-executed yet in this loop).
     modulesToReExecute.forEach(function(execId) {
       delete cache[execId];
+    });
+    modulesToReExecute.forEach(function(execId) {
       try {
         require(execId);
       } catch(err) {
@@ -175,7 +185,7 @@ export const HMR_RUNTIME_TEMPLATE = `(function(modules, reverseDeps, entryId, re
   window.addEventListener('message', function(e) {
     var data = e.data;
     if (data && data.type === 'hmr-update') {
-      applyUpdate(data.updatedModules || {}, data.removedModules || []);
+      applyUpdate(data.updatedModules || {}, data.removedModules || [], data.reverseDepsMap);
     }
   });
 

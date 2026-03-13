@@ -523,6 +523,7 @@ export function App() {
           type: "hmr-update",
           updatedModules: data.update.updatedModules,
           removedModules: data.update.removedModules,
+          reverseDepsMap: data.update.reverseDepsMap,
         });
         addLog(
           "HMR: updated " +
@@ -717,6 +718,98 @@ export function App() {
 
   const projectNames = Object.keys(projects);
 
+  // --- HMR test: dynamically add a third tab to expo-real ---
+
+  const settingsTabContent = `import { StyleSheet } from 'react-native';
+
+import { ThemedText } from '@/components/themed-text';
+import { ThemedView } from '@/components/themed-view';
+
+export default function SettingsScreen() {
+  return (
+    <ThemedView style={styles.container}>
+      <ThemedText type="title">Settings</ThemedText>
+      <ThemedText>This tab was added dynamically to test HMR!</ThemedText>
+    </ThemedView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+    gap: 12,
+  },
+});
+`;
+
+  const updatedTabLayoutContent = `import { Tabs } from 'expo-router';
+import React from 'react';
+
+import { HapticTab } from '@/components/haptic-tab';
+import { IconSymbol } from '@/components/ui/icon-symbol';
+import { Colors } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
+
+export default function TabLayout() {
+  const colorScheme = useColorScheme();
+
+  return (
+    <Tabs
+      screenOptions={{
+        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
+        headerShown: false,
+        tabBarButton: HapticTab,
+      }}>
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: 'Home',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="explore"
+        options={{
+          title: 'Explore',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: 'Settings',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="gearshape.fill" color={color} />,
+        }}
+      />
+    </Tabs>
+  );
+}
+`;
+
+  function addSettingsTab() {
+    const efs = editorFSRef.current;
+    if (!efs) return;
+    efs.write("/app/(tabs)/settings.tsx", settingsTabContent);
+    setFileList(efs.list());
+    addLog("Added /app/(tabs)/settings.tsx", "info");
+  }
+
+  function updateTabLayout() {
+    const efs = editorFSRef.current;
+    if (!efs) return;
+    efs.write("/app/(tabs)/_layout.tsx", updatedTabLayoutContent);
+    // If the layout file is currently open in the editor, refresh it
+    if (activeFile === "/app/(tabs)/_layout.tsx") {
+      setEditorValue(updatedTabLayoutContent);
+    }
+    addLog("Updated /app/(tabs)/_layout.tsx with Settings tab", "info");
+  }
+
+  const isExpoReal = currentProject === "expo-real";
+
   return (
     <>
       <header>
@@ -752,6 +845,16 @@ export function App() {
             <button onClick={downloadBundle} title="Download bundle">
               Download
             </button>
+          )}
+          {isExpoReal && watchMode && hmrReady && (
+            <>
+              <button onClick={addSettingsTab} style={{ backgroundColor: "#2196f3" }}>
+                1. Add Settings Tab
+              </button>
+              <button onClick={updateTabLayout} style={{ backgroundColor: "#4caf50" }}>
+                2. Update Layout
+              </button>
+            </>
           )}
         </div>
       </header>

@@ -80,6 +80,7 @@ export interface HmrUpdate {
   removedModules: string[];
   requiresReload: boolean;
   reloadReason?: string;
+  reverseDepsMap?: Record<string, string[]>;
 }
 
 export interface IncrementalBuildResult {
