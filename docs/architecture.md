@@ -387,6 +387,54 @@ var _App = require("./App");
 
 The source map has 2 extra empty lines prepended (`";;"` in mappings) to account for the `new Function('module','exports','require', code)` wrapper that adds 2 lines before the code starts. The iframe's HMR listener extracts these per-module source maps and registers them with `__SM.add(sourceURL, map)` so runtime errors in HMR-updated modules resolve to correct original positions.
 
+#### Expo Router: HMR for dynamic route addition
+
+Expo Router uses file-based routing where files under `/app/` define routes. When a project uses `"main": "expo-router/entry"`, almostmetro generates a synthetic entry that maps route files to modules. To support HMR when route files are added or removed (without a full reload), the entry is split into two modules:
+
+```
+/__expo_ctx.js          /index.tsx (entry)
++---------------------+  +---------------------------+
+| var modules = {     |  | const ctx = require(      |
+|   "./(tabs)/...":   |  |   "./__expo_ctx"          |
+|     require("..."), |  | );                        |
+|   ...               |  |                           |
+| };                  |  | function App() {          |
+| module.exports = ctx|  |   return <ExpoRoot        |
++---------------------+  |     context={ctx} />;     |
+  Plain .js file          | }                        |
+  (no React Refresh       |                           |
+   accept boundary)       | registerRootComponent(App)|
+                          +---------------------------+
+                            .tsx file → React Refresh
+                            adds module.hot.accept()
+```
+
+**Why two files?** The route context (`/__expo_ctx.js`) is a plain `.js` file, so the React Refresh transformer does NOT add `module.hot.accept()` to it. This means HMR updates to the context bubble up through the reverse dependency chain until they reach `/index.tsx`, which has the `App` component and IS an accept boundary (React Refresh instrumented). The entry re-executes, `require("./__expo_ctx")` picks up the new route map, React Refresh re-renders App, and the new routes appear.
+
+If the route map were inlined in the entry, the incremental bundler would mark it as `requiresReload: true` (entry file changed), forcing a full reload.
+
+**Route change detection** (`bundler.worker.ts` `handleWatchUpdate`):
+
+When a file under `/app/` with a route extension (`.tsx`, `.ts`, `.jsx`, `.js`) is created or deleted, the worker:
+1. Regenerates `/__expo_ctx.js` via `buildExpoRouteContext(watchFS)`
+2. Writes it to `watchFS` and appends it to the change list as `type: "update"`
+3. The incremental bundler processes it as a normal module change (not an entry change)
+
+**Reverse deps map updates**: Each HMR update includes an updated `reverseDepsMap` from the server-side dependency graph. This is critical for new files because the iframe's runtime has a stale reverse deps map from the initial bundle. Without the update, `findAcceptBoundary()` can't walk from a new module to any accept boundary, causing a full reload.
+
+**Cache clearing order** (Phase 5 in `hmr-runtime.ts`): All module caches in `modulesToReExecute` are cleared in a first pass before any modules are re-executed in a second pass. This prevents an ordering bug where a parent module (e.g., the entry) could re-execute and `require()` a dependency (e.g., `__expo_ctx.js`) before that dependency's cache was cleared, getting stale exports instead of the updated version.
+
+**Double-registration guard**: The synthetic entry guards `registerRootComponent(App)` with `window.__EXPO_ROOT_REGISTERED` to prevent calling `createRoot()` again on HMR re-execution (React Refresh handles the component update via `performReactRefresh()` instead).
+
+#### HMR test buttons (expo-real example)
+
+The editor UI shows two buttons when the `expo-real` project is in watch mode with HMR active:
+
+1. **"Add Settings Tab"** -- writes `/app/(tabs)/settings.tsx` to the virtual filesystem, triggering route context regeneration and HMR
+2. **"Update Layout"** -- updates `/app/(tabs)/_layout.tsx` to include the new tab in the tab navigator, triggering a normal component HMR update
+
+These buttons test the full HMR flow for dynamic route addition without requiring manual file editing.
+
 ## Directory Structure
 
 ```
