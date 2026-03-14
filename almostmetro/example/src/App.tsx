@@ -18,15 +18,20 @@ interface ConsoleEntry {
   };
 }
 
+interface BundleResult {
+  code: string;
+  apiBundle: string | null;
+}
+
 function bundleInWorker(
   worker: Worker,
   files: FileMap,
   packageServerUrl: string,
-): Promise<string> {
+): Promise<BundleResult> {
   return new Promise((resolve, reject) => {
     worker.onmessage = (e: MessageEvent) => {
       if (e.data.type === "result") {
-        resolve(e.data.code);
+        resolve({ code: e.data.code, apiBundle: e.data.apiBundle || null });
       } else if (e.data.type === "error") {
         reject(new Error(e.data.message));
       }
@@ -155,6 +160,7 @@ function buildBundleHtml(
   jsBlobUrl: string,
   sourceMap: { sources: string[]; mappings: string } | null,
   tailwindConfigScript?: string,
+  apiBlobUrl?: string,
 ): string {
   // Script 1: Console interception (forwards console.* to parent)
   const consoleScript =
@@ -354,6 +360,42 @@ function buildBundleHtml(
       "script>\n";
   }
 
+  // API routes: load the API bundle and inject fetch interceptor
+  let apiScripts = "";
+  if (apiBlobUrl) {
+    apiScripts =
+      '<script src="' + apiBlobUrl + '"></' + "script>\n" +
+      "<script>\n" +
+      "(function() {\n" +
+      "  var api = window.__API_ROUTES__;\n" +
+      "  if (!api) return;\n" +
+      "  var _origFetch = window.fetch;\n" +
+      "  window.fetch = function(input, init) {\n" +
+      "    var url = typeof input === 'string' ? input : input.url;\n" +
+      "    var pathname = url;\n" +
+      "    if (url.indexOf('://') !== -1) {\n" +
+      "      try { pathname = new URL(url).pathname; } catch(e) {}\n" +
+      "    } else if (url.indexOf('?') !== -1) {\n" +
+      "      pathname = url.split('?')[0];\n" +
+      "    }\n" +
+      "    if (!api) return _origFetch.apply(this, arguments);\n" +
+      "    var match = api.match(pathname);\n" +
+      "    if (!match) return _origFetch.apply(this, arguments);\n" +
+      "    var method = ((init && init.method) || 'GET').toUpperCase();\n" +
+      "    var handler = match.handler[method];\n" +
+      "    if (!handler) return Promise.resolve(new Response('Method not allowed', { status: 405 }));\n" +
+      "    var request = new Request('http://localhost' + pathname, init);\n" +
+      "    try {\n" +
+      "      var result = handler(request);\n" +
+      "      return result instanceof Promise ? result : Promise.resolve(result);\n" +
+      "    } catch(err) {\n" +
+      "      return Promise.resolve(new Response(JSON.stringify({ error: err.message }), { status: 500 }));\n" +
+      "    }\n" +
+      "  };\n" +
+      "})();\n" +
+      "</" + "script>\n";
+  }
+
   return (
     "<!DOCTYPE html><html><head><meta charset='UTF-8'>" +
     "<script src='https://cdn.tailwindcss.com'></" + "script>" +
@@ -364,6 +406,7 @@ function buildBundleHtml(
     "</" +
     "script>\n" +
     smInitScript +
+    apiScripts +
     '<script src="' +
     jsBlobUrl +
     '"></' +
@@ -392,6 +435,8 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const editorFSRef = useRef<EditorFS | null>(null);
   const lastBundleRef = useRef<string>("");
+  const lastApiBundleRef = useRef<string | null>(null);
+  const prevApiBlobUrlRef = useRef("");
   const tailwindConfigRef = useRef<string>("");
   const [hasBundle, setHasBundle] = useState(false);
 
@@ -409,14 +454,28 @@ export function App() {
     frame2Ref.current?.postMessage(data);
   }
 
-  function updateBundle(bundleCode: string) {
+  function updateBundle(bundleCode: string, apiBundle?: string | null) {
     if (prevJsBlobUrlRef.current) URL.revokeObjectURL(prevJsBlobUrlRef.current);
     if (prevBlobUrlRef.current) URL.revokeObjectURL(prevBlobUrlRef.current);
+    if (prevApiBlobUrlRef.current) URL.revokeObjectURL(prevApiBlobUrlRef.current);
+
     const jsBlob = new Blob([bundleCode], { type: "application/javascript" });
     const jsUrl = URL.createObjectURL(jsBlob);
     prevJsBlobUrlRef.current = jsUrl;
+
+    // Build API blob URL if we have an API bundle
+    let apiBlobUrl: string | undefined;
+    const effectiveApiBundle = apiBundle !== undefined ? apiBundle : lastApiBundleRef.current;
+    if (effectiveApiBundle) {
+      const apiBlob = new Blob([effectiveApiBundle], { type: "application/javascript" });
+      apiBlobUrl = URL.createObjectURL(apiBlob);
+      prevApiBlobUrlRef.current = apiBlobUrl;
+    } else {
+      prevApiBlobUrlRef.current = "";
+    }
+
     const sm = extractInlineSourceMap(bundleCode);
-    const html = buildBundleHtml(jsUrl, sm, tailwindConfigRef.current);
+    const html = buildBundleHtml(jsUrl, sm, tailwindConfigRef.current, apiBlobUrl);
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     prevBlobUrlRef.current = url;
@@ -511,13 +570,21 @@ export function App() {
         setHmrReady(true);
         setBundling(false);
         lastBundleRef.current = data.code;
+        if (data.apiBundle !== undefined) lastApiBundleRef.current = data.apiBundle;
         setHasBundle(true);
-        addLog("Watch build ready (initial)", "info");
-        updateBundle(data.code);
+        addLog("Watch build ready (initial)" + (data.apiBundle ? " + API routes" : ""), "info");
+        updateBundle(data.code, data.apiBundle);
       } else if (data.type === "hmr-update") {
         // Cache the full bundle for fallback
         lastBundleRef.current = data.bundle;
         setHasBundle(true);
+        // If API bundle changed, do a full reload with updated API
+        if (data.apiBundle) {
+          lastApiBundleRef.current = data.apiBundle;
+          addLog("API routes updated, reloading preview", "info");
+          updateBundle(data.bundle, data.apiBundle);
+          return;
+        }
         // Broadcast HMR update to all preview frames
         broadcastToFrames({
           type: "hmr-update",
@@ -533,9 +600,10 @@ export function App() {
         );
       } else if (data.type === "watch-rebuild") {
         lastBundleRef.current = data.code;
+        if (data.apiBundle !== undefined) lastApiBundleRef.current = data.apiBundle;
         setHasBundle(true);
-        addLog("Full rebuild (HMR not possible)", "info");
-        updateBundle(data.code);
+        addLog("Full rebuild (HMR not possible)" + (data.apiBundle ? " + API routes" : ""), "info");
+        updateBundle(data.code, data.apiBundle);
       } else if (data.type === "watch-stopped") {
         setHmrReady(false);
       } else if (data.type === "error" && watchMode) {
@@ -630,16 +698,17 @@ export function App() {
         addLog("Worker not initialized", "error");
         return;
       }
-      const bundleCode = await bundleInWorker(
+      const { code: bundleCode, apiBundle } = await bundleInWorker(
         workerRef.current,
         efs.toFileMap(),
         window.location.origin,
       );
 
       lastBundleRef.current = bundleCode;
+      lastApiBundleRef.current = apiBundle;
       setHasBundle(true);
-      addLog("Bundle ready. Executing...", "info");
-      updateBundle(bundleCode);
+      addLog("Bundle ready. Executing..." + (apiBundle ? " (+ API routes)" : ""), "info");
+      updateBundle(bundleCode, apiBundle);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       addLog("Bundle error: " + message, "error");
@@ -681,6 +750,7 @@ export function App() {
     setWatchMode(false);
     setHmrReady(false);
     lastBundleRef.current = "";
+    lastApiBundleRef.current = null;
     setHasBundle(false);
 
     // Revoke blob URLs
@@ -691,6 +761,10 @@ export function App() {
     if (prevBlobUrlRef.current) {
       URL.revokeObjectURL(prevBlobUrlRef.current);
       prevBlobUrlRef.current = "";
+    }
+    if (prevApiBlobUrlRef.current) {
+      URL.revokeObjectURL(prevApiBlobUrlRef.current);
+      prevApiBlobUrlRef.current = "";
     }
     setBlobUrl("");
 

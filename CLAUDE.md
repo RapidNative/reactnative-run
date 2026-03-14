@@ -21,6 +21,7 @@ Detailed architecture docs live in `docs/architecture.md`. Key sections:
 - Plugin system and transformer pipeline
 - HMR end-to-end flow and runtime
 - Expo Router HMR for dynamic route addition (split entry architecture, reverse deps updates, cache clearing order)
+- Expo API Routes (`+api.ts` files) -- separate API bundle with in-browser fetch interception
 - Source maps
 - npm package bundling via almostesm
 
@@ -30,3 +31,4 @@ Detailed architecture docs live in `docs/architecture.md`. Key sections:
 - **EditorFS** (`example/src/editor-fs.ts`): Wraps VirtualFS with dirty tracking and debounced flushes to the bundler worker.
 - **Synthetic entry for expo-router**: When `package.json` has `"main": "expo-router/entry"`, the bundler generates `/__expo_ctx.js` (route map) and `/index.tsx` (entry). See `docs/architecture.md` "Expo Router: HMR for dynamic route addition" for details on why these are split.
 - **HMR Phase 5 cache clearing**: All module caches are cleared before any re-execution to prevent stale requires from ordering bugs (`hmr-runtime.ts`).
+- **API Routes**: Files ending with `+api.ts` under `/app/` are bundled separately and served in-browser via a fetch interceptor. They are excluded from the client route context. See `docs/architecture.md` "Expo API Routes".

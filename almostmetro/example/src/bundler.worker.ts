@@ -45,10 +45,93 @@ type WorkerRequest =
 // --- Expo Router synthetic entry ---
 
 /**
- * Build the route context module that maps route files to their require paths.
- * This is a plain .js file so React Refresh does NOT add module.hot.accept(),
- * allowing HMR updates to bubble up to the entry's App component.
+ * Check if a file path is an API route (+api.ts/tsx/js/jsx).
  */
+function isApiRouteFile(filePath: string): boolean {
+  return /\+api\.(ts|tsx|js|jsx)$/.test(filePath);
+}
+
+/**
+ * Convert a file path like /app/api/hello+api.ts to a URL like /api/hello.
+ * Supports dynamic segments: /app/api/users/[id]+api.ts -> /api/users/[id]
+ * Supports index routes: /app/api/index+api.ts -> /api
+ */
+function filePathToApiRoute(filePath: string): string {
+  // Strip /app prefix and extension
+  let route = filePath.slice("/app".length).replace(/\+api\.(tsx?|jsx?|js)$/, "");
+  // Remove trailing slash
+  if (route.endsWith("/")) route = route.slice(0, -1);
+  // Handle index routes
+  if (route.endsWith("/index")) route = route.slice(0, -"/index".length);
+  return route || "/";
+}
+
+/**
+ * Build the API routes entry module that maps URL paths to their handler modules.
+ * Exports routes object and a match() function for URL matching.
+ */
+function buildApiRoutesEntry(vfs: VirtualFS): string | null {
+  const routeExts = new Set(["tsx", "ts", "jsx", "js"]);
+  const apiFiles: { filePath: string; urlPath: string }[] = [];
+
+  for (const filePath of vfs.list()) {
+    if (!filePath.startsWith("/app/")) continue;
+    if (!isApiRouteFile(filePath)) continue;
+    const ext = filePath.split(".").pop() || "";
+    if (!routeExts.has(ext)) continue;
+    apiFiles.push({
+      filePath,
+      urlPath: filePathToApiRoute(filePath),
+    });
+  }
+
+  if (apiFiles.length === 0) return null;
+
+  const routeEntries = apiFiles
+    .map((r) => {
+      const requirePath = "." + r.filePath.replace(/\.[^.]+$/, "");
+      return `  "${r.urlPath}": require("${requirePath}"),`;
+    })
+    .join("\n");
+
+  return `var routes = {
+${routeEntries}
+};
+
+function match(pathname) {
+  // Exact match first
+  if (routes[pathname]) return { handler: routes[pathname], params: {} };
+  // Dynamic segment matching
+  var keys = Object.keys(routes);
+  for (var i = 0; i < keys.length; i++) {
+    var pattern = keys[i];
+    if (pattern.indexOf("[") === -1) continue;
+    var patternParts = pattern.split("/");
+    var pathParts = pathname.split("/");
+    if (patternParts.length !== pathParts.length) continue;
+    var params = {};
+    var matched = true;
+    for (var j = 0; j < patternParts.length; j++) {
+      if (patternParts[j].startsWith("[") && patternParts[j].endsWith("]")) {
+        params[patternParts[j].slice(1, -1)] = pathParts[j];
+      } else if (patternParts[j] !== pathParts[j]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return { handler: routes[pattern], params: params };
+  }
+  return null;
+}
+
+// Expose on window so the fetch interceptor can access it
+if (typeof window !== "undefined") {
+  window.__API_ROUTES__ = { routes: routes, match: match };
+}
+module.exports = { routes: routes, match: match };
+`;
+}
+
 function buildExpoRouteContext(vfs: VirtualFS): string {
   const routeExts = new Set(["tsx", "ts", "jsx", "js"]);
   const routeFiles: string[] = [];
@@ -57,6 +140,8 @@ function buildExpoRouteContext(vfs: VirtualFS): string {
     if (!filePath.startsWith("/app/")) continue;
     const ext = filePath.split(".").pop() || "";
     if (!routeExts.has(ext)) continue;
+    // Exclude API route files from the client route context
+    if (isApiRouteFile(filePath)) continue;
     routeFiles.push(filePath);
   }
 
@@ -121,11 +206,32 @@ function ensureEntryFile(vfs: VirtualFS): string | null {
   return null;
 }
 
+// --- API bundle helper ---
+
+async function buildApiBundle(vfs: VirtualFS, packageServerUrl: string): Promise<string | null> {
+  const apiEntry = buildApiRoutesEntry(vfs);
+  if (!apiEntry) return null;
+
+  vfs.write("/__api_routes.js", apiEntry);
+
+  const config: BundlerConfig = {
+    resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
+    transformer: typescriptTransformer,
+    server: { packageServerUrl },
+    plugins: [dataBxPathPlugin],
+    env: {},
+  };
+
+  const bundler = new Bundler(vfs, config);
+  return await bundler.bundle("/__api_routes.js");
+}
+
 // --- Watch mode state ---
 
 let incrementalBundler: IncrementalBundler | null = null;
 let watchFS: VirtualFS | null = null;
 let watchPackageServerUrl: string | null = null;
+let lastClientBundle: string = "";
 
 async function handleBundle(data: BundleRequest): Promise<void> {
   const { files, packageServerUrl } = data;
@@ -150,7 +256,13 @@ async function handleBundle(data: BundleRequest): Promise<void> {
       return;
     }
     const code = await bundler.bundle(entryFile);
-    self.postMessage({ type: "result", code });
+
+    let apiBundle: string | null = null;
+    try {
+      apiBundle = await buildApiBundle(vfs, packageServerUrl);
+    } catch (_) {}
+
+    self.postMessage({ type: "result", code, apiBundle });
   } catch (err: unknown) {
     const message = err instanceof Error
       ? err.stack || err.message
@@ -185,7 +297,18 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
     }
 
     const result = await incrementalBundler.build(entryFile);
-    self.postMessage({ type: "watch-ready", code: result.bundle });
+    lastClientBundle = result.bundle;
+
+    // Build API bundle separately (if any +api files exist)
+    let apiBundle: string | null = null;
+    try {
+      apiBundle = await buildApiBundle(watchFS, packageServerUrl);
+    } catch (apiErr: unknown) {
+      const apiMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+      self.postMessage({ type: "error", message: "API bundle error: " + apiMsg });
+    }
+
+    self.postMessage({ type: "watch-ready", code: result.bundle, apiBundle });
   } catch (err: unknown) {
     const message = err instanceof Error
       ? err.stack || err.message
@@ -225,6 +348,7 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
       const routeExts = new Set(["tsx", "ts", "jsx", "js"]);
       const hasRouteChange = changes.some((c) => {
         if (!c.path.startsWith("/app/")) return false;
+        if (isApiRouteFile(c.path)) return false;
         const ext = c.path.split(".").pop() || "";
         if (!routeExts.has(ext)) return false;
         return c.type === "create" || c.type === "delete";
@@ -236,16 +360,42 @@ async function handleWatchUpdate(data: WatchUpdateRequest): Promise<void> {
       }
     }
 
-    // Rebuild with the FileChange-compatible list
+    // Check if any +api files changed -- rebuild API bundle if so
+    const hasApiChange = changes.some((c) => isApiRouteFile(c.path));
+
+    // Filter out +api file changes from the client rebuild
+    // (they shouldn't affect the client bundle's incremental rebuild)
+    const clientChanges = changes.filter((c) => !isApiRouteFile(c.path));
+
+    // Rebuild client bundle with non-API changes
     incrementalBundler.updateFS(watchFS);
-    const fileChanges = changes.map((c) => ({ path: c.path, type: c.type }));
+    const fileChanges = clientChanges.map((c) => ({ path: c.path, type: c.type }));
+
+    // Only rebuild client if there are client changes
+    let apiBundle: string | null = null;
+    if (hasApiChange && watchPackageServerUrl) {
+      try {
+        apiBundle = await buildApiBundle(watchFS, watchPackageServerUrl);
+      } catch (apiErr: unknown) {
+        const apiMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+        self.postMessage({ type: "error", message: "API bundle error: " + apiMsg });
+      }
+    }
+
+    if (fileChanges.length === 0 && hasApiChange) {
+      // Only API files changed -- send API-only update
+      self.postMessage({ type: "watch-rebuild", code: lastClientBundle, apiBundle });
+      return;
+    }
+
     const result = await incrementalBundler.rebuild(fileChanges);
+    lastClientBundle = result.bundle;
 
     if (result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload) {
-      self.postMessage({ type: "watch-rebuild", code: result.bundle });
+      self.postMessage({ type: "watch-rebuild", code: result.bundle, apiBundle });
     } else {
       // Include full bundle as fallback for hmr-full-reload from iframe
-      self.postMessage({ type: "hmr-update", update: result.hmrUpdate, bundle: result.bundle });
+      self.postMessage({ type: "hmr-update", update: result.hmrUpdate, bundle: result.bundle, apiBundle });
     }
   } catch (err: unknown) {
     const message = err instanceof Error
@@ -259,6 +409,7 @@ function handleWatchStop(): void {
   incrementalBundler = null;
   watchFS = null;
   watchPackageServerUrl = null;
+  lastClientBundle = "";
   self.postMessage({ type: "watch-stopped" });
 }
 

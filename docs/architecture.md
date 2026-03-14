@@ -426,6 +426,55 @@ When a file under `/app/` with a route extension (`.tsx`, `.ts`, `.jsx`, `.js`) 
 
 **Double-registration guard**: The synthetic entry guards `registerRootComponent(App)` with `window.__EXPO_ROOT_REGISTERED` to prevent calling `createRoot()` again on HMR re-execution (React Refresh handles the component update via `performReactRefresh()` instead).
 
+#### Expo API Routes (`+api.ts` files)
+
+Expo API routes are files ending with `+api.ts` (or `.tsx`, `.js`, `.jsx`) under `/app/`. They export HTTP method handlers (`GET`, `POST`, etc.) and are accessed via standard `fetch()` calls. In almostmetro, these run entirely in-browser -- no server or service worker needed.
+
+**Architecture:**
+
+```
+Client Bundle (existing)              API Bundle (separate)
++---------------------------+         +---------------------------+
+| /__expo_ctx.js            |         | /__api_routes.js          |
+|   (page routes only,      |         |   (only +api files,       |
+|    +api files excluded)   |         |    keyed by URL path)     |
+| /index.tsx                |         |                           |
+|   ExpoRoot + App          |         | Sets window.__API_ROUTES__|
++---------------------------+         +---------------------------+
+              |                                    |
+              v                                    v
++---------------------------------------------------------------+
+| Iframe HTML                                                   |
+|  1. Console interception (existing)                           |
+|  2. Source map resolver (existing)                             |
+|  3. <script src="api-bundle.js">  (sets __API_ROUTES__)       |
+|  4. <script> fetch interceptor     (patches window.fetch)     |
+|  5. <script src="client-bundle.js"> (existing)                |
++---------------------------------------------------------------+
+```
+
+**Key components:**
+
+- **`isApiRouteFile(path)`** -- detects `+api` files by filename pattern
+- **`filePathToApiRoute(path)`** -- converts file paths to URL paths (e.g. `/app/api/hello+api.ts` -> `/api/hello`, supports dynamic segments `[id]` and index routes)
+- **`buildApiRoutesEntry(vfs)`** -- generates `/__api_routes.js` with a route map, a `match(pathname)` function (exact + dynamic segment matching), and assigns `window.__API_ROUTES__`
+- **`buildApiBundle(vfs, url)`** -- creates a separate `Bundler` instance with `/__api_routes.js` as entry (one-shot, non-HMR)
+- **Client exclusion** -- `buildExpoRouteContext()` and route change detection both skip `+api` files so they never appear in the client route context
+
+**Fetch interceptor** (injected in iframe before the client bundle):
+
+The interceptor patches `window.fetch` to check if the request pathname matches an API route. If matched, it calls the handler directly in-browser and returns the `Response`. Otherwise, it falls through to the real `fetch`. Since the iframe runs from a blob URL (`location.origin` is `"null"`), the interceptor extracts pathnames directly from URL strings rather than using `new URL(url, location.origin)`.
+
+**Watch mode:** When `+api` files change, the worker rebuilds the API bundle separately and sends it alongside the client bundle in `watch-rebuild` or `hmr-update` messages (via the `apiBundle` field). Client-only changes still use granular HMR; API changes trigger a full API bundle rebuild (API bundles are small).
+
+**URL mapping:**
+
+| File path | URL |
+|---|---|
+| `/app/api/hello+api.ts` | `/api/hello` |
+| `/app/api/users/[id]+api.ts` | `/api/users/[id]` |
+| `/app/api/index+api.ts` | `/api` |
+
 #### HMR test buttons (expo-real example)
 
 The editor UI shows two buttons when the `expo-real` project is in watch mode with HMR active:
