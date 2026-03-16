@@ -12,6 +12,7 @@ export {
 export type { RawSourceMap } from "./source-map.js";
 export { createDataBxPathPlugin } from "./plugins/data-bx-path.js";
 export type {
+  FileEntry,
   FileMap,
   ModuleMap,
   TransformResult,

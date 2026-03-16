@@ -1,7 +1,12 @@
 import type { RawSourceMap } from "./source-map.js";
 
+export interface FileEntry {
+  content: string;
+  isExternal: boolean;
+}
+
 export interface FileMap {
-  [path: string]: string;
+  [path: string]: FileEntry;
 }
 
 export interface ModuleMap {
@@ -62,6 +67,8 @@ export interface BundlerConfig {
   plugins?: BundlerPlugin[];
   env?: Record<string, string>;
   routerShim?: boolean;
+  /** URL prefix for external assets, e.g. "/projects/expo-real" */
+  assetPublicPath?: string;
 }
 
 export interface FileChange {

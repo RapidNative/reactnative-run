@@ -220,9 +220,14 @@ export class IncrementalBundler {
     localDeps: string[];
     npmDeps: string[];
   } {
-    // Asset files get a stub module that exports the filename
+    // Asset files get a stub module that exports the filename (or a real URL for external assets)
     if (this.resolver.isAssetFile(filePath)) {
-      this.moduleMap[filePath] = "module.exports = " + JSON.stringify(filePath) + ";";
+      if (this.fs.isExternalAsset(filePath) && this.config.assetPublicPath) {
+        const assetUrl = this.config.assetPublicPath + filePath;
+        this.moduleMap[filePath] = "module.exports = { uri: " + JSON.stringify(assetUrl) + " };";
+      } else {
+        this.moduleMap[filePath] = "module.exports = " + JSON.stringify(filePath) + ";";
+      }
       return { localDeps: [], npmDeps: [] };
     }
 
