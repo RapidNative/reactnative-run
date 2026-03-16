@@ -17,6 +17,7 @@ interface BundleRequest {
   type?: "bundle";
   files: FileMap;
   packageServerUrl: string;
+  projectName?: string;
 }
 
 // --- Watch mode types ---
@@ -25,6 +26,7 @@ interface WatchStartRequest {
   type: "watch-start";
   files: FileMap;
   packageServerUrl: string;
+  projectName?: string;
 }
 
 interface WatchUpdateRequest {
@@ -234,7 +236,7 @@ let watchPackageServerUrl: string | null = null;
 let lastClientBundle: string = "";
 
 async function handleBundle(data: BundleRequest): Promise<void> {
-  const { files, packageServerUrl } = data;
+  const { files, packageServerUrl, projectName } = data;
 
   const config: BundlerConfig = {
     resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
@@ -245,6 +247,7 @@ async function handleBundle(data: BundleRequest): Promise<void> {
       EXPO_PUBLIC_TEST: "hello",
     },
     routerShim: true,
+    assetPublicPath: projectName ? packageServerUrl + "/projects/" + projectName : undefined,
   };
 
   try {
@@ -272,7 +275,7 @@ async function handleBundle(data: BundleRequest): Promise<void> {
 }
 
 async function handleWatchStart(data: WatchStartRequest): Promise<void> {
-  const { files, packageServerUrl } = data;
+  const { files, packageServerUrl, projectName } = data;
   watchPackageServerUrl = packageServerUrl;
 
   const config: BundlerConfig = {
@@ -285,6 +288,7 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
       EXPO_PUBLIC_TEST: "hello",
     },
     routerShim: true,
+    assetPublicPath: projectName ? packageServerUrl + "/projects/" + projectName : undefined,
   };
 
   try {

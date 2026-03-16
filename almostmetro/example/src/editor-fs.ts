@@ -27,15 +27,18 @@ export class EditorFS {
   // --- File operations ---
 
   read(path: string): string | undefined {
-    return this.files[path];
+    const entry = this.files[path];
+    if (entry === undefined) return undefined;
+    return entry.content;
   }
 
   write(path: string, content: string): void {
     // Skip if content hasn't actually changed
-    if (this.files[path] === content) return;
+    const entry = this.files[path];
+    if (entry && entry.content === content) return;
 
     const existed = path in this.files;
-    this.files[path] = content;
+    this.files[path] = { content, isExternal: false };
     this.dirty.set(path, {
       path,
       type: existed ? "update" : "create",

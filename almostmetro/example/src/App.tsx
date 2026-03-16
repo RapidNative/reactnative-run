@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 import type { FileMap } from "almostmetro";
 import { EditorFS } from "./editor-fs";
 
@@ -27,6 +27,7 @@ function bundleInWorker(
   worker: Worker,
   files: FileMap,
   packageServerUrl: string,
+  projectName?: string,
 ): Promise<BundleResult> {
   return new Promise((resolve, reject) => {
     worker.onmessage = (e: MessageEvent) => {
@@ -37,7 +38,7 @@ function bundleInWorker(
       }
     };
     worker.onerror = (e) => reject(new Error(e.message));
-    worker.postMessage({ files, packageServerUrl });
+    worker.postMessage({ files, packageServerUrl, projectName });
   });
 }
 
@@ -508,9 +509,9 @@ export function App() {
           setFileList(Object.keys(projectFiles));
           const entry = findEntryFile(projectFiles);
           setActiveFile(entry);
-          setEditorValue(projectFiles[entry] || "");
+          setEditorValue(projectFiles[entry]?.content || "");
           // Extract tailwind config from project files
-          const twConfig = projectFiles["/tailwind.config.js"] || projectFiles["/tailwind.config.ts"];
+          const twConfig = projectFiles["/tailwind.config.js"]?.content || projectFiles["/tailwind.config.ts"]?.content;
           if (twConfig) {
             tailwindConfigRef.current = extractTailwindConfig(twConfig);
           }
@@ -637,7 +638,7 @@ export function App() {
     setFileList(Object.keys(projectFiles));
     const entry = findEntryFile(projectFiles);
     setActiveFile(entry);
-    setEditorValue(projectFiles[entry] || "");
+    setEditorValue(projectFiles[entry]?.content || "");
     setConsoleOutput([]);
     window.history.replaceState(null, "", "?project=" + currentProject);
 
@@ -684,7 +685,7 @@ export function App() {
     }
   }
 
-  const handleRun = useCallback(async () => {
+  async function handleRun() {
     const efs = editorFSRef.current;
     if (!efs) return;
 
@@ -702,6 +703,7 @@ export function App() {
         workerRef.current,
         efs.toFileMap(),
         window.location.origin,
+        currentProject,
       );
 
       lastBundleRef.current = bundleCode;
@@ -715,7 +717,7 @@ export function App() {
     } finally {
       setBundling(false);
     }
-  }, []);
+  }
 
   function startWatch() {
     const efs = editorFSRef.current;
@@ -734,6 +736,7 @@ export function App() {
       type: "watch-start",
       files: efs.toFileMap(),
       packageServerUrl: window.location.origin,
+      projectName: currentProject,
     });
   }
 

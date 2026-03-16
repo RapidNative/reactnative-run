@@ -8,11 +8,13 @@ export class VirtualFS {
   }
 
   read(path: string): string | undefined {
-    return this.files[path];
+    const entry = this.files[path];
+    if (entry === undefined) return undefined;
+    return entry.content;
   }
 
   write(path: string, content: string): void {
-    this.files[path] = content;
+    this.files[path] = { content, isExternal: false };
   }
 
   delete(path: string): boolean {
@@ -25,6 +27,12 @@ export class VirtualFS {
 
   exists(path: string): boolean {
     return path in this.files;
+  }
+
+  /** Check if a file is an external asset (binary file served from public/) */
+  isExternalAsset(path: string): boolean {
+    const entry = this.files[path];
+    return entry !== undefined && entry.isExternal === true;
   }
 
   list(): string[] {
@@ -89,7 +97,7 @@ export class VirtualFS {
     for (const path in newFiles) {
       if (!(path in this.files)) {
         changes.push({ path, type: "create" });
-      } else if (this.files[path] !== newFiles[path]) {
+      } else if (this.files[path].content !== newFiles[path].content) {
         changes.push({ path, type: "update" });
       }
     }
