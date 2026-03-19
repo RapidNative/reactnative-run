@@ -124,6 +124,21 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			`module.exports = require("${requireSpecifier}");\n`
 		);
 
+		// Write a shim file for Node built-ins and build an alias map.
+		// RN packages sometimes import Node APIs (buffer, stream, etc.) for
+		// native code paths that are dead code in the browser bundle.
+		const shimFile = path.join(tmpDir, "__node-shim.js");
+		fs.writeFileSync(shimFile, "module.exports = {};");
+		const nodeBuiltinAliases: Record<string, string> = {};
+		for (const name of [
+			"buffer", "stream", "fs", "path", "os", "crypto", "util", "events",
+			"http", "https", "net", "tls", "zlib", "child_process", "worker_threads",
+			"url", "querystring", "string_decoder", "assert", "tty", "domain",
+		]) {
+			nodeBuiltinAliases[name] = shimFile;
+			nodeBuiltinAliases[`node:${name}`] = shimFile;
+		}
+
 		// Externalize bare package imports (e.g. "react") so shared deps are
 		// loaded once. For subpath imports (e.g. "css-in-js-utils/lib/foo"),
 		// generally inline them since they're internal implementation details.
@@ -173,30 +188,43 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 					} else {
 						pkg = args.path.split("/")[0];
 					}
-					if (!externalSet.has(pkg)) return null;
 
-					// Track installed version for the base package
-					if (!externalizedMap[pkg]) {
-						const version = getInstalledVersion(pkg);
-						if (version) externalizedMap[pkg] = version;
+					if (externalSet.has(pkg)) {
+						// Track installed version for the base package
+						if (!externalizedMap[pkg]) {
+							const version = getInstalledVersion(pkg);
+							if (version) externalizedMap[pkg] = version;
+						}
+
+						// Bare import: always externalize
+						if (args.path === pkg) {
+							return { path: pkg, external: true };
+						}
+
+						// Subpath import: for version-sensitive packages (react, react-dom,
+						// react-native), always externalize to avoid inlining mismatched
+						// versions. For other packages, try to resolve locally and inline.
+						if (alwaysExternalSubpaths.has(pkg)) {
+							return { path: args.path, external: true };
+						}
+
+						try {
+							require.resolve(args.path, { paths: [args.resolveDir] });
+							return null;
+						} catch {
+							return { path: args.path, external: true };
+						}
 					}
 
-					// Bare import: always externalize
-					if (args.path === pkg) {
-						return { path: pkg, external: true };
-					}
-
-					// Subpath import: for version-sensitive packages (react, react-dom,
-					// react-native), always externalize to avoid inlining mismatched
-					// versions. For other packages, try to resolve locally and inline.
-					if (alwaysExternalSubpaths.has(pkg)) {
-						return { path: args.path, external: true };
-					}
-
+					// Not in the explicit externals set — try to resolve locally.
+					// If resolution fails (implicit peer dep like expo-modules-core
+					// imported by expo-router without being listed as a dependency),
+					// externalize it so esbuild doesn't crash the entire build.
 					try {
 						require.resolve(args.path, { paths: [args.resolveDir] });
-						return null;
+						return null; // resolvable locally → inline it
 					} catch {
+						console.log(`[auto-external] ${args.path} (not in deps, unresolvable)`);
 						return { path: args.path, external: true };
 					}
 				});
@@ -212,6 +240,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			outfile: outFile,
 			platform: "browser",
 			target: "es2020",
+			alias: nodeBuiltinAliases,
 			// For RN/Expo packages: prioritize .web.* extensions, handle JSX in .js,
 			// and inline font/image assets as data URLs.
 			...(isReactNative && {
