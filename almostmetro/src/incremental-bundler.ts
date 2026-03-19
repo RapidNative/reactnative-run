@@ -569,6 +569,12 @@ export class IncrementalBundler {
       }
     }
 
+    // Snapshot which npm packages exist before this rebuild so we can detect
+    // newly-introduced ones. New packages must be injected into HMR updatedModules
+    // so the running iframe's `modules` closure has them before re-execution —
+    // otherwise require('new-package') throws "Module not found".
+    const preRebuildNpmIds = new Set<string>(npmPackagesNeeded);
+
     // Phase 1: Classify changes and collect files to reprocess
     for (const change of changes) {
       if (change.path === "/package.json") continue;
@@ -708,6 +714,16 @@ export class IncrementalBundler {
             updatedModules[id] = code;
           }
         }
+        // Inject npm packages that are new since the last bundle the iframe loaded.
+        // The HMR runtime's Phase 3 (module factory replacement) will add them to
+        // `modules` before re-executing changed files, preventing "Module not found"
+        // when a newly-generated component imports a package for the first time.
+        for (const [id, code] of Object.entries(this.moduleMap)) {
+          if (this.resolver.isNpmPackage(id) && !preRebuildNpmIds.has(id)) {
+            updatedModules[id] = code;
+          }
+        }
+
         hmrUpdate = {
           updatedModules,
           removedModules,
