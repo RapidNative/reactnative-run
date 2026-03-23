@@ -291,17 +291,31 @@ export class IncrementalBundler {
     return { localDeps, npmDeps };
   }
 
-  /** Walk the dependency tree starting from a file, processing all reachable modules */
+  /**
+   * Walk the dependency tree starting from a file, processing all reachable modules.
+   *
+   * Returns all files that were visited and processed, so callers can include
+   * them in HMR updatedModules. Without this, only the direct dependency would
+   * be sent to the iframe — transitive deps (e.g. hooks/index.ts → hooks/useAuth.ts)
+   * would be missing from the HMR payload, causing "Module not found" at runtime.
+   *
+   * Files that don't exist yet on the VFS are silently skipped. During AI streaming,
+   * a barrel file (e.g. seeds/index.ts) may reference a sibling (e.g. seeds/users.ts)
+   * that hasn't been created yet. Without this guard, processFile() would throw
+   * "File not found" and crash the entire rebuild. The missing file will be picked
+   * up on a subsequent rebuild once it's created.
+   */
   private walkDeps(
     startFile: string,
     npmPackagesNeeded: Set<string>,
-  ): void {
+  ): string[] {
     const visited = new Set<string>();
     const queue = [startFile];
 
     while (queue.length > 0) {
       const filePath = queue.shift()!;
       if (visited.has(filePath)) continue;
+      if (!this.fs.exists(filePath)) continue;
       visited.add(filePath);
 
       const { localDeps, npmDeps } = this.processFile(filePath);
@@ -316,6 +330,8 @@ export class IncrementalBundler {
         }
       }
     }
+
+    return [...visited];
   }
 
   /** Fetch all npm packages that aren't already cached */
@@ -612,11 +628,16 @@ export class IncrementalBundler {
         npmPackagesNeeded.add(dep);
       }
 
-      // Walk any new local deps that aren't yet in the graph
+      // Walk any new local deps that aren't yet in the graph.
+      // Include ALL transitive deps in rebuiltModules so they appear in the
+      // HMR updatedModules payload. Previously only the direct dep was pushed,
+      // so transitive deps (e.g. barrel re-exports) were missing from HMR.
       for (const dep of localDeps) {
         if (!this.graph.hasModule(dep) && this.fs.exists(dep)) {
-          this.walkDeps(dep, npmPackagesNeeded);
-          rebuiltModules.push(dep);
+          const walked = this.walkDeps(dep, npmPackagesNeeded);
+          for (const w of walked) {
+            rebuiltModules.push(w);
+          }
         }
       }
     }
