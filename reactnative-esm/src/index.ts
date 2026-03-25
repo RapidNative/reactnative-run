@@ -86,11 +86,38 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			timeout: 60000,
 		});
 
+		// Resolve the actual installed version (semver range -> exact)
+		const installedPkgJson = path.join(tmpDir, "node_modules", pkgName, "package.json");
+		let resolvedVersion = version;
+		if (fs.existsSync(installedPkgJson)) {
+			const meta = JSON.parse(fs.readFileSync(installedPkgJson, "utf-8"));
+			if (meta.version) {
+				resolvedVersion = meta.version;
+				// Check if we already have a cache for the resolved exact version
+				const resolvedCacheKey = `${pkgName.replace(/\//g, "__")}@${resolvedVersion}${subpath.replace(/\//g, "__")}`;
+				const resolvedCacheFile = path.join(CACHE_DIR, `${resolvedCacheKey}.js`);
+				const resolvedExternalsFile = path.join(CACHE_DIR, `${resolvedCacheKey}.externals.json`);
+				if (fs.existsSync(resolvedCacheFile)) {
+					console.log(`[cache hit] ${requireSpecifier}@${resolvedVersion} (resolved from ${version})`);
+					if (fs.existsSync(resolvedExternalsFile)) {
+						res.header("X-Externals", fs.readFileSync(resolvedExternalsFile, "utf-8"));
+					}
+					res.type("application/javascript").sendFile(resolvedCacheFile);
+					fs.rmSync(tmpDir, { recursive: true, force: true });
+					return;
+				}
+			}
+		}
+
+		// Use resolved version for cache key from now on
+		const resolvedCacheKey = `${pkgName.replace(/\//g, "__")}@${resolvedVersion}${subpath.replace(/\//g, "__")}`;
+		const resolvedCacheFile = path.join(CACHE_DIR, `${resolvedCacheKey}.js`);
+		const resolvedExternalsFile = path.join(CACHE_DIR, `${resolvedCacheKey}.externals.json`);
+
 		// Read package metadata to detect RN/Expo packages and collect externals.
 		// We externalize ALL dependencies (not just peerDependencies) so that
 		// shared transitive deps (e.g. @react-navigation/core) are loaded once
 		// at runtime rather than inlined into every bundle that uses them.
-		const installedPkgJson = path.join(tmpDir, "node_modules", pkgName, "package.json");
 		let externals: string[] = [];
 		let isReactNative = false;
 		let keywords: string[] = [];
@@ -237,19 +264,22 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		});
 
 		const bundled = fs.readFileSync(outFile, "utf-8");
-		const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
+		const wrapped = `// Bundled: ${requireSpecifier}@${resolvedVersion}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
 
-		fs.writeFileSync(cacheFile, wrapped);
+		fs.writeFileSync(resolvedCacheFile, wrapped);
 		const externalsJson = JSON.stringify(externalizedMap);
-		fs.writeFileSync(externalsFile, externalsJson);
-		console.log(`[cached] ${requireSpecifier}@${version} (externals: ${Object.keys(externalizedMap).length})`);
+		fs.writeFileSync(resolvedExternalsFile, externalsJson);
+		console.log(`[cached] ${requireSpecifier}@${resolvedVersion} (externals: ${Object.keys(externalizedMap).length})`);
 
 		res.header("X-Externals", externalsJson);
+		res.header("X-Resolved-Version", resolvedVersion);
 		res.type("application/javascript").send(wrapped);
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
 		console.error(`[error] ${requireSpecifier}@${version}:`, message);
-		res.status(500).send(`// Error bundling ${requireSpecifier}@${version}\n// ${message}\n`);
+		if (!res.headersSent) {
+			res.status(500).send(`// Error bundling ${requireSpecifier}@${version}\n// ${message}\n`);
+		}
 	} finally {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	}
