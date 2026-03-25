@@ -11,8 +11,14 @@ DEST_DIR="$REPO_ROOT/website/public/playground"
 
 export VITE_PACKAGE_SERVER_URL="${VITE_PACKAGE_SERVER_URL:-https://esm.reactnative.run}"
 
+echo "Installing browser-metro dependencies..."
+npm install --prefix "$REPO_ROOT/browser-metro"
+
 echo "Building browser-metro library..."
 npm run build --prefix "$REPO_ROOT/browser-metro"
+
+echo "Installing playground dependencies..."
+npm install --prefix "$EXAMPLE_DIR"
 
 echo "Building playground (ESM server: $VITE_PACKAGE_SERVER_URL)..."
 cd "$EXAMPLE_DIR" && npx tsx scripts/build-projects.ts && npx vite build --base /playground/
