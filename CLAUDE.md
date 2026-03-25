@@ -2,17 +2,17 @@
 
 ## Project overview
 
-almostmetro is a browser-based JavaScript/TypeScript bundler with HMR support, mirroring Metro (React Native's bundler) in simplified form. It runs entirely in the browser using Web Workers.
+browser-metro is a browser-based JavaScript/TypeScript bundler with HMR support, mirroring Metro (React Native's bundler) in simplified form. It runs entirely in the browser using Web Workers.
 
-- `almostmetro/` -- the core bundler library (VirtualFS, Resolver, Bundler, IncrementalBundler, HMR runtime)
-- `almostesm/` -- Express server that bundles npm packages on-demand via esbuild
-- `almostmetro/example/` -- Vite-based demo app with editor, preview iframes, and console
+- `browser-metro/` -- the core bundler library (VirtualFS, Resolver, Bundler, IncrementalBundler, HMR runtime)
+- `reactnative-esm/` -- Express server that bundles npm packages on-demand via esbuild
+- `browser-metro/example/` -- Vite-based demo app with editor, preview iframes, and console
 
 ## Key commands
 
-- `cd almostmetro && npm run build` -- compile the library (tsc). Required after editing `almostmetro/src/`.
-- `cd almostmetro/example && npm run dev` -- start the example app (Vite dev server on port 5201)
-- `cd almostesm && npm start` -- start the package server on port 5200
+- `cd browser-metro && npm run build` -- compile the library (tsc). Required after editing `browser-metro/src/`.
+- `cd browser-metro/example && npm run dev` -- start the example app (Vite dev server on port 5201)
+- `cd reactnative-esm && npm start` -- start the package server on port 5200
 
 ## Architecture documentation
 
@@ -23,7 +23,7 @@ Detailed architecture docs live in `docs/architecture.md`. Key sections:
 - Expo Router HMR for dynamic route addition (split entry architecture, reverse deps updates, cache clearing order)
 - Expo API Routes (`+api.ts` files) -- separate API bundle with in-browser fetch interception
 - Source maps
-- npm package bundling via almostesm
+- npm package bundling via reactnative-esm
 
 ## Important patterns
 

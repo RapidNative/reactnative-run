@@ -1,6 +1,6 @@
 # Example App
 
-The example app is a Vite + React application that demonstrates almostmetro in a browser-based IDE. It provides a code editor, file tabs, a preview iframe, and a console output panel.
+The example app is a Vite + React application that demonstrates browser-metro in a browser-based IDE. It provides a code editor, file tabs, a preview iframe, and a console output panel.
 
 ## Running
 
@@ -8,8 +8,8 @@ The example app is a Vite + React application that demonstrates almostmetro in a
 # From the repo root (starts all services)
 npm run dev
 
-# Or standalone (requires almostesm running separately)
-cd almostmetro/example
+# Or standalone (requires reactnative-esm running separately)
+cd browser-metro/example
 npm run dev
 ```
 
@@ -19,7 +19,7 @@ The app runs at `http://localhost:5201` (or next available port).
 
 - **Multi-file editor** with tab switching
 - **Project selector** dropdown (URL-synced via `?project=` param)
-- **Live bundling** using almostmetro library
+- **Live bundling** using browser-metro library
 - **Watch mode with HMR** -- edit code and see changes instantly without page reload
 - **React Refresh** -- preserves component state across HMR updates
 - **Sandboxed execution** in dual preview iframes
@@ -182,7 +182,7 @@ Switching projects resets the editor, console, and file state.
 - Must have an entry file: `index.js`, `index.ts`, `index.tsx`, or `index.jsx`
 - Must have a `package.json` (can be empty: `{ "dependencies": {} }`)
 - File paths are relative to the project root and prefixed with `/` in the file map
-- npm dependencies listed in `package.json` are fetched from almostesm at runtime
+- npm dependencies listed in `package.json` are fetched from reactnative-esm at runtime
 
 ## Sample Projects
 

@@ -2,10 +2,10 @@
 
 ## Overview
 
-almostmetro is a browser-based bundler that mirrors the architecture of Metro (React Native's bundler) in a simplified form. The system has three runtime components that work together:
+browser-metro is a browser-based bundler that mirrors the architecture of Metro (React Native's bundler) in a simplified form. The system has three runtime components that work together:
 
 ```
-Browser (example app)          almostesm (:5200)
+Browser (example app)          reactnative-esm (:5200)
 +------------------------+     +---------------------+
 | VirtualFS              |     | GET /pkg/:specifier  |
 |   FileMap of sources   |     |   npm install        |
@@ -112,7 +112,7 @@ The bundler walks the dependency graph starting from the entry file:
 
 1. **Walk** - recursively follow `require()` calls, transforming each file
 2. **Collect npm packages** - track any require targets that are npm packages
-3. **Fetch packages** - download pre-bundled npm packages from almostesm in parallel
+3. **Fetch packages** - download pre-bundled npm packages from reactnative-esm in parallel
 4. **Emit** - produce a single self-executing bundle:
 
 ```javascript
@@ -180,7 +180,7 @@ The preamble is built by `buildBundlePreamble(env?)` in `utils.ts`, called from 
 
 ### 7. npm Package Bundling
 
-When the bundler encounters `require("lodash")`, it fetches from almostesm:
+When the bundler encounters `require("lodash")`, it fetches from reactnative-esm:
 
 1. Server receives `GET /pkg/lodash@4.17.21`
 2. Creates temp directory, runs `npm install lodash@4.17.21`
@@ -198,7 +198,7 @@ The `X-Externals` header enables **version pinning** for transitive dependencies
 
 ### 8. Source Maps
 
-almostmetro generates source maps so that browser dev tools and the UI console show original file names and line numbers, not bundle positions.
+browser-metro generates source maps so that browser dev tools and the UI console show original file names and line numbers, not bundle positions.
 
 #### Per-module source maps
 
@@ -389,7 +389,7 @@ The source map has 2 extra empty lines prepended (`";;"` in mappings) to account
 
 #### Expo Router: HMR for dynamic route addition
 
-Expo Router uses file-based routing where files under `/app/` define routes. When a project uses `"main": "expo-router/entry"`, almostmetro generates a synthetic entry that maps route files to modules. To support HMR when route files are added or removed (without a full reload), the entry is split into two modules:
+Expo Router uses file-based routing where files under `/app/` define routes. When a project uses `"main": "expo-router/entry"`, browser-metro generates a synthetic entry that maps route files to modules. To support HMR when route files are added or removed (without a full reload), the entry is split into two modules:
 
 ```
 /__expo_ctx.js          /index.tsx (entry)
@@ -428,7 +428,7 @@ When a file under `/app/` with a route extension (`.tsx`, `.ts`, `.jsx`, `.js`) 
 
 #### Expo API Routes (`+api.ts` files)
 
-Expo API routes are files ending with `+api.ts` (or `.tsx`, `.js`, `.jsx`) under `/app/`. They export HTTP method handlers (`GET`, `POST`, etc.) and are accessed via standard `fetch()` calls. In almostmetro, these run entirely in-browser -- no server or service worker needed.
+Expo API routes are files ending with `+api.ts` (or `.tsx`, `.js`, `.jsx`) under `/app/`. They export HTTP method handlers (`GET`, `POST`, etc.) and are accessed via standard `fetch()` calls. In browser-metro, these run entirely in-browser -- no server or service worker needed.
 
 **Architecture:**
 
@@ -487,7 +487,7 @@ These buttons test the full HMR flow for dynamic route addition without requirin
 ## Directory Structure
 
 ```
-almostmetro/
+browser-metro/
   src/                        # Library source (TypeScript)
     types.ts                  # FileMap, ModuleMap, Transformer, BundlerConfig, BundlerPlugin,
                               #   HmrUpdate, IncrementalBuildResult, FileChange, ContentChange
@@ -519,12 +519,12 @@ almostmetro/
     scripts/                  # Build scripts (projects.json generation)
     public/                   # Static assets (generated projects.json)
 
-almostesm/
+reactnative-esm/
   src/index.ts                # Express server
   cache/                      # Bundled npm packages + externals manifests (gitignored)
 ```
 
-> **Note:** After editing `almostmetro/src/`, run `npm run build` (tsc) in the `almostmetro/` directory. The example app imports from `dist/index.js`, not source directly.
+> **Note:** After editing `browser-metro/src/`, run `npm run build` (tsc) in the `browser-metro/` directory. The example app imports from `dist/index.js`, not source directly.
 
 ## Design Decisions
 
@@ -532,13 +532,13 @@ almostesm/
 
 **Sucrase over Babel/SWC** - Sucrase is chosen as the default transformer because it's fast and works in the browser (pure JS, no WASM). It handles the common case (TypeScript + JSX + import/export) with minimal overhead. The transformer interface allows swapping it for any other tool.
 
-**On-demand package bundling** - Rather than pre-bundling a fixed set of packages, almostesm bundles npm packages the first time they're requested. This means any npm package works without configuration, at the cost of a cold-start delay on first use. Subsequent requests are instant (disk cache).
+**On-demand package bundling** - Rather than pre-bundling a fixed set of packages, reactnative-esm bundles npm packages the first time they're requested. This means any npm package works without configuration, at the cost of a cold-start delay on first use. Subsequent requests are instant (disk cache).
 
 **IIFE format for npm packages** - Packages are bundled as IIFE (Immediately Invoked Function Expression) with esbuild. The IIFE assigns to a `__module` variable, which our wrapper converts to `module.exports = __module`. The wrapper is kept simple because both Sucrase and esbuild consumers generate their own interop helpers. This approach avoids polluting the global scope and works within our CommonJS factory wrapper.
 
 **Multi-target architecture** - Each target (web, expo) gets its own `Bundler`/`IncrementalBundler` instance with its own config, plugins, cache, and module map. The web worker orchestrator creates per-target instances, runs them in parallel, and merges results. Plugins are target-specific (e.g. web-plugin aliases, expo-plugin React import injection + react-native-web alias).
 
-**Full dependency externalization** - almostesm externalizes ALL `dependencies` + `peerDependencies` (not just peer deps). This ensures shared transitive deps are loaded once at runtime. Version pinning via the `X-Externals` response header prevents version mismatches for transitive dependencies.
+**Full dependency externalization** - reactnative-esm externalizes ALL `dependencies` + `peerDependencies` (not just peer deps). This ensures shared transitive deps are loaded once at runtime. Version pinning via the `X-Externals` response header prevents version mismatches for transitive dependencies.
 
 **Embedded source map resolver in the iframe** - The browser console resolves source maps automatically, but `window.onerror` receives raw bundle line numbers. Rather than depending on a library like `source-map`, the iframe HTML embeds a lightweight ES5 VLQ decoder (~80 lines) that resolves error positions at runtime. This keeps the iframe self-contained with no external dependencies.
 

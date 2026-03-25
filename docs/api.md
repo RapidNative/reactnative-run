@@ -1,14 +1,14 @@
 # Library API
 
-almostmetro exports the following classes, functions, and types.
+browser-metro exports the following classes, functions, and types.
 
 ## VirtualFS
 
 An in-memory filesystem wrapping a `FileMap`.
 
 ```typescript
-import { VirtualFS } from "almostmetro";
-import type { FileMap } from "almostmetro";
+import { VirtualFS } from "browser-metro";
+import type { FileMap } from "browser-metro";
 
 const files: FileMap = {
   "/index.js": 'console.log("hello");',
@@ -67,8 +67,8 @@ Returns a copy of the internal file map.
 The main one-shot bundler class. Takes a `VirtualFS` and `BundlerConfig`, walks the dependency graph, transforms files, fetches npm packages, and emits an executable bundle with an appended inline source map.
 
 ```typescript
-import { Bundler, VirtualFS, typescriptTransformer } from "almostmetro";
-import type { BundlerConfig } from "almostmetro";
+import { Bundler, VirtualFS, typescriptTransformer } from "browser-metro";
+import type { BundlerConfig } from "browser-metro";
 
 const config: BundlerConfig = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
@@ -93,7 +93,7 @@ The bundle process:
 1. Walks the dependency graph from the entry file
 2. Runs the plugin + transformer pipeline on each file
 3. Rewrites relative `require()` calls to absolute paths
-4. Fetches any npm packages from almostesm
+4. Fetches any npm packages from reactnative-esm
 5. Emits a self-executing CommonJS bundle with combined source map
 
 #### `transformFile(filename: string, src: string): string`
@@ -110,8 +110,8 @@ const jsCode = bundler.transformFile("/app.tsx", tsxSource);
 A watch-mode bundler that maintains an internal dependency graph, module cache, and module map across rebuilds. Only re-transforms changed files and their affected dependents.
 
 ```typescript
-import { IncrementalBundler, VirtualFS, reactRefreshTransformer } from "almostmetro";
-import type { BundlerConfig } from "almostmetro";
+import { IncrementalBundler, VirtualFS, reactRefreshTransformer } from "browser-metro";
+import type { BundlerConfig } from "browser-metro";
 
 const config: BundlerConfig = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
@@ -167,7 +167,7 @@ Replaces the internal VirtualFS (call after modifying files, before `rebuild()`)
 Module resolution engine. Used internally by the Bundler, but also exported for direct use.
 
 ```typescript
-import { Resolver, VirtualFS } from "almostmetro";
+import { Resolver, VirtualFS } from "browser-metro";
 
 const resolver = new Resolver(vfs, { sourceExts: ["ts", "tsx", "js", "jsx"] });
 ```
@@ -331,7 +331,7 @@ interface ContentChange {
 A pre-configured `Transformer` using sucrase. Handles TypeScript, JSX, and ES module syntax. Returns source maps.
 
 ```typescript
-import { typescriptTransformer } from "almostmetro";
+import { typescriptTransformer } from "browser-metro";
 ```
 
 Transform behavior by file extension:
@@ -350,7 +350,7 @@ The `imports` transform converts ES module syntax (`import`/`export`) to CommonJ
 Extends `typescriptTransformer` with React Refresh support. Wraps each component with `$RefreshReg$` / `$RefreshSig$` calls and appends a `module.hot.accept()` postamble. Used in watch mode.
 
 ```typescript
-import { reactRefreshTransformer } from "almostmetro";
+import { reactRefreshTransformer } from "browser-metro";
 ```
 
 ---
@@ -362,7 +362,7 @@ import { reactRefreshTransformer } from "almostmetro";
 Creates a plugin that injects `data-bx-path` attributes into JSX elements, enabling click-to-source functionality.
 
 ```typescript
-import { createDataBxPathPlugin } from "almostmetro";
+import { createDataBxPathPlugin } from "browser-metro";
 
 const plugin = createDataBxPathPlugin();
 // Use in config: plugins: [plugin]

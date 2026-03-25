@@ -1,6 +1,6 @@
-# almostmetro
+# browser-metro
 
-A browser-based JavaScript/TypeScript bundler inspired by Metro. It provides a virtual filesystem, a CommonJS module bundler with a pluggable transformer and plugin pipeline, source maps, HMR with React Refresh, and **almostesm** -- an npm package server that bundles packages on-demand.
+A browser-based JavaScript/TypeScript bundler inspired by Metro. It provides a virtual filesystem, a CommonJS module bundler with a pluggable transformer and plugin pipeline, source maps, HMR with React Refresh, and **reactnative-esm** -- an npm package server that bundles packages on-demand.
 
 ## Architecture
 
@@ -8,12 +8,12 @@ The project has three components:
 
 | Component | Path | Description |
 |---|---|---|
-| **almostmetro** (library) | `almostmetro/` | Virtual FS, resolver, bundler, transformer/plugin pipeline, source maps, HMR |
-| **almostesm** | `almostesm/` | Express server that installs and bundles npm packages on-demand |
-| **example** | `almostmetro/example/` | Vite + React app demonstrating the library |
+| **browser-metro** (library) | `browser-metro/` | Virtual FS, resolver, bundler, transformer/plugin pipeline, source maps, HMR |
+| **reactnative-esm** | `reactnative-esm/` | Express server that installs and bundles npm packages on-demand |
+| **example** | `browser-metro/example/` | Vite + React app demonstrating the library |
 
 ```
-almostmetro/               # Library (published as "almostmetro")
+browser-metro/               # Library (published as "browser-metro")
   src/
     types.ts               # Core interfaces (BundlerConfig, BundlerPlugin, HmrUpdate, etc.)
     fs.ts                  # VirtualFS class
@@ -37,7 +37,7 @@ almostmetro/               # Library (published as "almostmetro")
       editor-fs.ts         # EditorFS with change tracking for watch mode
     scripts/
       build-projects.ts
-almostesm/                 # npm package bundling service
+reactnative-esm/                 # npm package bundling service
   src/index.ts
   cache/                   # Cached bundled packages
 ```
@@ -47,19 +47,19 @@ almostesm/                 # npm package bundling service
 ```bash
 # Install dependencies
 npm install
-npm install --prefix almostmetro
-npm install --prefix almostmetro/example
-npm install --prefix almostesm
+npm install --prefix browser-metro
+npm install --prefix browser-metro/example
+npm install --prefix reactnative-esm
 
 # Build the library
-npm run build --prefix almostmetro
+npm run build --prefix browser-metro
 
-# Start all three services (library watch + almostesm + vite dev)
+# Start all three services (library watch + reactnative-esm + vite dev)
 npm run dev
 ```
 
 This starts:
-- **almostesm** at `http://localhost:5200`
+- **reactnative-esm** at `http://localhost:5200`
 - **Library** in watch mode (recompiles on changes)
 - **Vite dev server** at `http://localhost:5201`
 
@@ -70,8 +70,8 @@ import {
   Bundler, IncrementalBundler, VirtualFS,
   typescriptTransformer, reactRefreshTransformer,
   createDataBxPathPlugin,
-} from "almostmetro";
-import type { BundlerConfig, FileMap } from "almostmetro";
+} from "browser-metro";
+import type { BundlerConfig, FileMap } from "browser-metro";
 
 // 1. Create a virtual filesystem from a file map
 const files: FileMap = {
@@ -108,9 +108,9 @@ const result = await incBundler.rebuild([{ path: "/utils.ts", type: "update" }])
 // result.hmrUpdate contains per-module code for hot patching
 ```
 
-## almostesm (unpkg-style URLs)
+## reactnative-esm (unpkg-style URLs)
 
-almostesm bundles npm packages on-demand for browser consumption:
+reactnative-esm bundles npm packages on-demand for browser consumption:
 
 ```
 GET /pkg/lodash              -> lodash@latest
@@ -135,5 +135,5 @@ Switch between projects in the example app using the dropdown or URL params:
 - [Architecture](docs/architecture.md) - System design and data flow
 - [Library API](docs/api.md) - VirtualFS, Bundler, Resolver, types
 - [Transformer System](docs/transformers.md) - How transforms work, writing custom transformers
-- [almostesm](docs/almostesm.md) - npm package bundling service
+- [reactnative-esm](docs/reactnative-esm.md) - npm package bundling service
 - [Example App](docs/example.md) - The Vite React demo application

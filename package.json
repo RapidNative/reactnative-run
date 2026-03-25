@@ -1,9 +1,20 @@
 {
-  "name": "new-es-builder",
+  "name": "reactnative-run",
   "version": "1.0.0",
   "private": true,
+  "workspaces": [
+    "browser-metro",
+    "reactnative-esm",
+    "website"
+  ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --prefix almostesm\" \"npm run dev --prefix almostmetro\" \"npm run dev --prefix almostmetro/example\" \"npx serve docs -l 3002\"",
+    "dev": "concurrently \"npm run dev --prefix reactnative-esm\" \"npm run dev --prefix browser-metro\" \"npm run dev --prefix browser-metro/example\" \"npm run dev --prefix website\"",
+    "dev:bundler": "concurrently \"npm run dev --prefix reactnative-esm\" \"npm run dev --prefix browser-metro\" \"npm run dev --prefix browser-metro/example\"",
+    "dev:website": "npm run dev --prefix website",
+    "build": "bash scripts/build-playground.sh && npm run build --prefix website",
+    "build:playground": "bash scripts/build-playground.sh",
+    "build:metro": "npm run build --prefix browser-metro",
+    "build:website": "npm run build --prefix website",
     "docs": "npx serve docs -l 3002"
   },
   "devDependencies": {

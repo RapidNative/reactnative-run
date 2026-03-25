@@ -1,6 +1,6 @@
 # Transformer System
 
-almostmetro uses a pluggable transformer pipeline inspired by Metro's transformer architecture. Every file passes through a `Transformer` before being added to the bundle.
+browser-metro uses a pluggable transformer pipeline inspired by Metro's transformer architecture. Every file passes through a `Transformer` before being added to the bundle.
 
 ## How It Works
 
@@ -50,7 +50,7 @@ interface Transformer {
 The default transformer uses [sucrase](https://github.com/alangpierce/sucrase) for fast TypeScript and JSX compilation.
 
 ```typescript
-import { typescriptTransformer } from "almostmetro";
+import { typescriptTransformer } from "browser-metro";
 
 const config = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
@@ -165,7 +165,7 @@ const config = {
 Extends `typescriptTransformer` with React Refresh support for HMR. Used in watch mode.
 
 ```typescript
-import { reactRefreshTransformer } from "almostmetro";
+import { reactRefreshTransformer } from "browser-metro";
 
 const config = {
   resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
@@ -183,7 +183,7 @@ For each `.tsx`/`.jsx` file, it:
 You can also create a custom React Refresh transformer with different base transforms:
 
 ```typescript
-import { createReactRefreshTransformer } from "almostmetro";
+import { createReactRefreshTransformer } from "browser-metro";
 
 const myRefreshTransformer = createReactRefreshTransformer(myBaseTransformer);
 ```
