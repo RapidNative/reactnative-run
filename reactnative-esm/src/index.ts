@@ -59,22 +59,59 @@ function parseSpecifier(raw: string) {
 }
 
 // Bundle and serve an npm package
+// Resolve a semver range to an exact version via npm view (no install needed)
+function resolveVersionQuick(pkgName: string, range: string): string | null {
+	try {
+		const result = execSync(`npm view ${pkgName}@${range} version`, {
+			stdio: ["pipe", "pipe", "pipe"],
+			timeout: 10000,
+		}).toString().trim();
+		// npm view can return multiple lines for ranges; take the last (highest)
+		const lines = result.split("\n");
+		return lines[lines.length - 1].replace(/^'|'$/g, "").trim();
+	} catch {
+		return null;
+	}
+}
+
+function cacheKeyFor(pkgName: string, version: string, subpath: string): string {
+	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
+}
+
+function serveCached(res: Response, cacheFile: string, externalsFile: string, label: string): boolean {
+	if (!fs.existsSync(cacheFile)) return false;
+	console.log(`[cache hit] ${label}`);
+	if (fs.existsSync(externalsFile)) {
+		res.header("X-Externals", fs.readFileSync(externalsFile, "utf-8"));
+	}
+	res.type("application/javascript").sendFile(cacheFile);
+	return true;
+}
+
 async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string) {
 	const requireSpecifier = pkgName + subpath;
-	const cacheKey = `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
-	const cacheFile = path.join(CACHE_DIR, `${cacheKey}.js`);
 
-	// Check disk cache
-	const externalsFile = path.join(CACHE_DIR, `${cacheKey}.externals.json`);
-	if (fs.existsSync(cacheFile)) {
-		console.log(`[cache hit] ${requireSpecifier}@${version}`);
-		if (fs.existsSync(externalsFile)) {
-			res.header("X-Externals", fs.readFileSync(externalsFile, "utf-8"));
+	// 1. Check exact cache (works for exact versions like "6.0.12")
+	const exactKey = cacheKeyFor(pkgName, version, subpath);
+	const exactCache = path.join(CACHE_DIR, `${exactKey}.js`);
+	const exactExternals = path.join(CACHE_DIR, `${exactKey}.externals.json`);
+	if (serveCached(res, exactCache, exactExternals, `${requireSpecifier}@${version}`)) return;
+
+	// 2. For semver ranges, quick-resolve to exact version and check cache
+	let resolvedVersion = version;
+	const isRange = /[~^<>=*|]/.test(version) || version === "latest";
+	if (isRange) {
+		const quick = resolveVersionQuick(pkgName, version);
+		if (quick && quick !== version) {
+			resolvedVersion = quick;
+			const resolvedKey = cacheKeyFor(pkgName, resolvedVersion, subpath);
+			const resolvedCache = path.join(CACHE_DIR, `${resolvedKey}.js`);
+			const resolvedExternals = path.join(CACHE_DIR, `${resolvedKey}.externals.json`);
+			if (serveCached(res, resolvedCache, resolvedExternals, `${requireSpecifier}@${resolvedVersion} (resolved from ${version})`)) return;
 		}
-		res.type("application/javascript").sendFile(cacheFile);
-		return;
 	}
 
+	// 3. No cache - install and bundle
 	console.log(`[bundling] ${requireSpecifier}@${version}`);
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pkg-"));
 
@@ -86,33 +123,17 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			timeout: 60000,
 		});
 
-		// Resolve the actual installed version (semver range -> exact)
+		// Get the actual installed version
 		const installedPkgJson = path.join(tmpDir, "node_modules", pkgName, "package.json");
-		let resolvedVersion = version;
 		if (fs.existsSync(installedPkgJson)) {
 			const meta = JSON.parse(fs.readFileSync(installedPkgJson, "utf-8"));
-			if (meta.version) {
-				resolvedVersion = meta.version;
-				// Check if we already have a cache for the resolved exact version
-				const resolvedCacheKey = `${pkgName.replace(/\//g, "__")}@${resolvedVersion}${subpath.replace(/\//g, "__")}`;
-				const resolvedCacheFile = path.join(CACHE_DIR, `${resolvedCacheKey}.js`);
-				const resolvedExternalsFile = path.join(CACHE_DIR, `${resolvedCacheKey}.externals.json`);
-				if (fs.existsSync(resolvedCacheFile)) {
-					console.log(`[cache hit] ${requireSpecifier}@${resolvedVersion} (resolved from ${version})`);
-					if (fs.existsSync(resolvedExternalsFile)) {
-						res.header("X-Externals", fs.readFileSync(resolvedExternalsFile, "utf-8"));
-					}
-					res.type("application/javascript").sendFile(resolvedCacheFile);
-					fs.rmSync(tmpDir, { recursive: true, force: true });
-					return;
-				}
-			}
+			if (meta.version) resolvedVersion = meta.version;
 		}
 
-		// Use resolved version for cache key from now on
-		const resolvedCacheKey = `${pkgName.replace(/\//g, "__")}@${resolvedVersion}${subpath.replace(/\//g, "__")}`;
-		const resolvedCacheFile = path.join(CACHE_DIR, `${resolvedCacheKey}.js`);
-		const resolvedExternalsFile = path.join(CACHE_DIR, `${resolvedCacheKey}.externals.json`);
+		// Final cache key uses resolved exact version
+		const finalKey = cacheKeyFor(pkgName, resolvedVersion, subpath);
+		const finalCacheFile = path.join(CACHE_DIR, `${finalKey}.js`);
+		const finalExternalsFile = path.join(CACHE_DIR, `${finalKey}.externals.json`);
 
 		// Read package metadata to detect RN/Expo packages and collect externals.
 		// We externalize ALL dependencies (not just peerDependencies) so that
@@ -272,9 +293,9 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		const bundled = fs.readFileSync(outFile, "utf-8");
 		const wrapped = `// Bundled: ${requireSpecifier}@${resolvedVersion}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
 
-		fs.writeFileSync(resolvedCacheFile, wrapped);
+		fs.writeFileSync(finalCacheFile, wrapped);
 		const externalsJson = JSON.stringify(externalizedMap);
-		fs.writeFileSync(resolvedExternalsFile, externalsJson);
+		fs.writeFileSync(finalExternalsFile, externalsJson);
 		console.log(`[cached] ${requireSpecifier}@${resolvedVersion} (externals: ${Object.keys(externalizedMap).length})`);
 
 		res.header("X-Externals", externalsJson);
