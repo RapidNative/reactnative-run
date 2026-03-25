@@ -134,10 +134,16 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		}
 
 		if (isReactNative) {
-			// Always externalize react-native for RN/Expo packages -- the runtime
-			// resolves it to react-native-web. Many packages use it without listing
-			// it as a dep.
-			for (const dep of ["react-native", "react", "react-dom"]) {
+			// Always externalize react-native and Expo platform modules for RN/Expo
+			// packages. Many packages use these without listing them as deps,
+			// expecting them to be available via the Expo/RN runtime.
+			const implicitExternals = [
+				"react-native", "react", "react-dom",
+				"expo", "expo-modules-core", "expo-modules-autolinking",
+				"expo-constants", "expo-linking", "expo-status-bar",
+				"expo-splash-screen", "expo-font", "expo-asset",
+			];
+			for (const dep of implicitExternals) {
 				if (!externals.includes(dep)) externals.push(dep);
 			}
 		}
