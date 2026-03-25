@@ -8,7 +8,7 @@ import {
   shiftSourceMapOrigLines,
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
-import { findRequires, rewriteRequires, buildBundlePreamble } from "./utils.js";
+import { findRequires, rewriteRequires, buildBundlePreamble, parseExternalsFromBody } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -183,11 +183,7 @@ export class Bundler {
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
     }
     const code = await res.text();
-    let externals: Record<string, string> = {};
-    const externalsHeader = res.headers.get("X-Externals");
-    if (externalsHeader) {
-      try { externals = JSON.parse(externalsHeader); } catch {}
-    }
+    const externals = parseExternalsFromBody(code);
     return { code, externals };
   }
 

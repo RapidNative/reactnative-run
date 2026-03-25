@@ -291,10 +291,10 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		});
 
 		const bundled = fs.readFileSync(outFile, "utf-8");
-		const wrapped = `// Bundled: ${requireSpecifier}@${resolvedVersion}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
+		const externalsJson = JSON.stringify(externalizedMap);
+		const wrapped = `// Bundled: ${requireSpecifier}@${resolvedVersion}\n// @externals ${externalsJson}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
 
 		fs.writeFileSync(finalCacheFile, wrapped);
-		const externalsJson = JSON.stringify(externalizedMap);
 		fs.writeFileSync(finalExternalsFile, externalsJson);
 		console.log(`[cached] ${requireSpecifier}@${resolvedVersion} (externals: ${Object.keys(externalizedMap).length})`);
 

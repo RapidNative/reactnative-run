@@ -1,6 +1,16 @@
 const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 // Matches lines that are single-line comments or JSDoc/block comment continuations
 const COMMENT_LINE_RE = /^\s*(?:\/\/|\/?\*)/;
+const EXTERNALS_RE = /^\/\/ @externals (.+)$/m;
+
+/** Parse externals metadata from a package bundle body.
+ *  Looks for a `// @externals {...}` comment line near the top.
+ *  Falls back to empty object if not found. */
+export function parseExternalsFromBody(code: string): Record<string, string> {
+  const match = EXTERNALS_RE.exec(code);
+  if (!match) return {};
+  try { return JSON.parse(match[1]); } catch { return {}; }
+}
 
 /** Extract all require('...') call targets from source */
 export function findRequires(source: string): string[] {

@@ -10,7 +10,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, hashString, buildBundlePreamble } from "./utils.js";
+import { findRequires, rewriteRequires, hashString, buildBundlePreamble, parseExternalsFromBody } from "./utils.js";
 import type {
   BundlerConfig,
   BundlerPlugin,
@@ -204,11 +204,7 @@ export class IncrementalBundler {
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
     }
     const code = await res.text();
-    let externals: Record<string, string> = {};
-    const externalsHeader = res.headers.get("X-Externals");
-    if (externalsHeader) {
-      try { externals = JSON.parse(externalsHeader); } catch {}
-    }
+    const externals = parseExternalsFromBody(code);
     return { code, externals };
   }
 
