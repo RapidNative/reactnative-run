@@ -167,6 +167,19 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			for (const dep of implicitExternals) {
 				if (!externals.includes(dep)) externals.push(dep);
 			}
+
+			// Scan node_modules for any @react-native/* and @expo/* scoped
+			// packages and externalize them - they're platform modules that
+			// should be loaded at runtime, not inlined.
+			for (const scope of ["@react-native", "@expo"]) {
+				const scopeDir = path.join(tmpDir, "node_modules", scope);
+				if (fs.existsSync(scopeDir)) {
+					for (const entry of fs.readdirSync(scopeDir)) {
+						const scopedName = `${scope}/${entry}`;
+						if (!externals.includes(scopedName)) externals.push(scopedName);
+					}
+				}
+			}
 		}
 
 		// Don't externalize a package from itself (would create circular require).
@@ -227,6 +240,13 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 					} else {
 						pkg = args.path.split("/")[0];
 					}
+
+					// For RN/Expo builds, always externalize platform scoped packages
+					// even if not in the dependency list (they're implicit runtime deps)
+					if (isReactNative && (pkg.startsWith("@react-native/") || pkg.startsWith("@expo/"))) {
+						return { path: args.path, external: true };
+					}
+
 					if (!externalSet.has(pkg)) return null;
 
 					// Track installed version for the base package
@@ -240,10 +260,9 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 						return { path: pkg, external: true };
 					}
 
-					// Subpath import: for version-sensitive packages (react, react-dom,
-					// react-native), always externalize to avoid inlining mismatched
-					// versions. For other packages, try to resolve locally and inline.
-					if (alwaysExternalSubpaths.has(pkg)) {
+					// Subpath import: for version-sensitive packages and platform
+					// scoped packages, always externalize to avoid inlining.
+					if (alwaysExternalSubpaths.has(pkg) || pkg.startsWith("@react-native/") || pkg.startsWith("@expo/")) {
 						return { path: args.path, external: true };
 					}
 
