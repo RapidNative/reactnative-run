@@ -1,0 +1,99 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Quick Start
+
+## Try the playground
+
+The fastest way to get started is the [playground](/playground). It comes pre-loaded with an Expo Router project that you can edit and preview instantly.
+
+1. Open the [playground](/playground)
+2. The default **expo** project loads automatically with watch mode
+3. Edit any file in the code editor - changes appear instantly via HMR
+4. Use the file explorer to navigate the project structure
+
+## Use browser-metro in your own project
+
+Install browser-metro as a dependency:
+
+```bash
+npm install browser-metro
+```
+
+Basic usage:
+
+```typescript
+import {
+  Bundler, VirtualFS, typescriptTransformer
+} from "browser-metro";
+import type { BundlerConfig, FileMap } from "browser-metro";
+
+// 1. Create a virtual filesystem
+const files: FileMap = {
+  "/index.ts": 'import { greet } from "./utils";\nconsole.log(greet("World"));',
+  "/utils.ts": 'export function greet(name: string) { return "Hello, " + name; }',
+};
+const vfs = new VirtualFS(files);
+
+// 2. Configure the bundler
+const config: BundlerConfig = {
+  resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+  transformer: typescriptTransformer,
+  server: { packageServerUrl: "https://esm.reactnative.run" },
+};
+
+// 3. Bundle
+const bundler = new Bundler(vfs, config);
+const code = await bundler.bundle("/index.ts");
+
+// 4. Execute (e.g. in an iframe)
+```
+
+## With HMR (watch mode)
+
+```typescript
+import {
+  IncrementalBundler, VirtualFS, reactRefreshTransformer
+} from "browser-metro";
+
+const config = {
+  resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+  transformer: reactRefreshTransformer,
+  server: { packageServerUrl: "https://esm.reactnative.run" },
+  hmr: { enabled: true, reactRefresh: true },
+};
+
+const bundler = new IncrementalBundler(vfs, config);
+const initial = await bundler.build("/index.ts");
+
+// On file change:
+const result = await bundler.rebuild([
+  { path: "/utils.ts", type: "update" }
+]);
+
+if (result.hmrUpdate && !result.hmrUpdate.requiresReload) {
+  // Send HMR update to iframe
+} else {
+  // Full reload needed
+}
+```
+
+## Run the ESM server locally
+
+For local development, you can run the ESM package server:
+
+```bash
+cd reactnative-esm
+npm install
+npm start
+# Server runs on http://localhost:5200
+```
+
+Then point the bundler at it:
+
+```typescript
+server: { packageServerUrl: "http://localhost:5200" }
+```
+
+In production, use `https://esm.reactnative.run`.
+
+<MobileDocsNav />

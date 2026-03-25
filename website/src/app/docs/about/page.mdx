@@ -1,0 +1,40 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# About
+
+## Origin story
+
+reactnative.run started as an experiment to see if a Metro-like bundler could run entirely in the browser.
+
+The previous version used **ES Modules** to run React Native code directly in the browser - each module was loaded as a native ESM import. While this worked, it had limitations with CommonJS packages and didn't match how Metro actually works.
+
+The current version takes a different approach: it's a **CommonJS bundler that mirrors Metro's architecture** but runs entirely client-side. It walks the dependency graph, transforms files with Sucrase, rewrites require() calls, and emits a single self-executing bundle - just like Metro does, but in a Web Worker instead of a Node.js process.
+
+You can read more about the technical journey in this Expo blog post: [How to build a dev server in the browser](https://expo.dev/blog/how-to-build-a-dev-server-in-the-browser).
+
+## Author
+
+**Sanket Sahu** is the primary author of reactnative.run and browser-metro.
+
+- GitHub: [github.com/sanketsahu](https://github.com/sanketsahu)
+- X: [x.com/sanketsahu](https://x.com/sanketsahu)
+
+## RapidNative
+
+reactnative.run is built and maintained by [RapidNative](https://rapidnative.com?utm_source=reactnative.run&utm_medium=docs&utm_campaign=about).
+
+## Open source
+
+The entire project is open source under the MIT license:
+
+- **browser-metro** - the core bundler library
+- **reactnative-esm** - the npm package server
+- **reactnative.run** - the playground and website
+
+Source code: [github.com/RapidNative/reactnative-run](https://github.com/RapidNative/reactnative-run)
+
+## Disclaimer
+
+This project is **not affiliated with, endorsed by, or associated with Meta, Facebook, or the React Native team**. React Native is a trademark of Meta Platforms, Inc. The domain name "reactnative.run" is simply a descriptive name for this open-source tool.
+
+<MobileDocsNav />

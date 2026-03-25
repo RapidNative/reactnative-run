@@ -18,6 +18,7 @@ interface BundleRequest {
   files: FileMap;
   packageServerUrl: string;
   projectName?: string;
+  assetBaseUrl?: string;
 }
 
 // --- Watch mode types ---
@@ -27,6 +28,7 @@ interface WatchStartRequest {
   files: FileMap;
   packageServerUrl: string;
   projectName?: string;
+  assetBaseUrl?: string;
 }
 
 interface WatchUpdateRequest {
@@ -236,7 +238,8 @@ let watchPackageServerUrl: string | null = null;
 let lastClientBundle: string = "";
 
 async function handleBundle(data: BundleRequest): Promise<void> {
-  const { files, packageServerUrl, projectName } = data;
+  const { files, packageServerUrl, projectName, assetBaseUrl } = data;
+  const assetBase = assetBaseUrl || packageServerUrl;
 
   const config: BundlerConfig = {
     resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
@@ -247,7 +250,7 @@ async function handleBundle(data: BundleRequest): Promise<void> {
       EXPO_PUBLIC_TEST: "hello",
     },
     routerShim: true,
-    assetPublicPath: projectName ? packageServerUrl + "/projects/" + projectName : undefined,
+    assetPublicPath: projectName ? assetBase + "projects/" + projectName : undefined,
   };
 
   try {
@@ -275,8 +278,9 @@ async function handleBundle(data: BundleRequest): Promise<void> {
 }
 
 async function handleWatchStart(data: WatchStartRequest): Promise<void> {
-  const { files, packageServerUrl, projectName } = data;
+  const { files, packageServerUrl, projectName, assetBaseUrl } = data;
   watchPackageServerUrl = packageServerUrl;
+  const assetBase = assetBaseUrl || packageServerUrl;
 
   const config: BundlerConfig = {
     resolver: { sourceExts: ["web.ts", "web.tsx", "web.js", "web.jsx", "ts", "tsx", "js", "jsx"] },
@@ -288,7 +292,7 @@ async function handleWatchStart(data: WatchStartRequest): Promise<void> {
       EXPO_PUBLIC_TEST: "hello",
     },
     routerShim: true,
-    assetPublicPath: projectName ? packageServerUrl + "/projects/" + projectName : undefined,
+    assetPublicPath: projectName ? assetBase + "projects/" + projectName : undefined,
   };
 
   try {

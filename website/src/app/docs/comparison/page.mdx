@@ -1,0 +1,73 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Comparison
+
+How reactnative.run compares to other online React Native development tools.
+
+## vs Expo Snack
+
+[Expo Snack](https://snack.expo.dev) is Expo's official online editor for React Native.
+
+| | reactnative.run | Expo Snack |
+|---|---|---|
+| **Bundling** | Client-side (browser-metro) | Partially client-side |
+| **npm packages** | Any package, on-demand | Curated subset, some restrictions |
+| **HMR** | Full HMR with React Refresh | Live reload |
+| **Expo Router** | Full file-based routing + HMR | Limited support |
+| **API Routes** | In-browser `+api.ts` | Not supported |
+| **Offline capable** | Partially (after package cache) | No (requires server) |
+| **Source maps** | Full, inline | Yes |
+| **Open source** | Yes (MIT) | Partially |
+| **Native preview** | Web only | iOS, Android, Web |
+
+**Key difference**: Expo Snack partially bundles on the client but still relies on Expo's servers for package resolution and native preview. reactnative.run bundles everything client-side with on-demand package fetching via the ESM server. Expo Snack can preview on native devices via the Expo Go app, which we don't support (yet).
+
+## vs CodeSandbox
+
+[CodeSandbox](https://codesandbox.io) is a general-purpose online IDE.
+
+| | reactnative.run | CodeSandbox |
+|---|---|---|
+| **Focus** | React Native (web) | Any web framework |
+| **Bundling** | Client-side, custom Metro-like | Server-side (Nodebox/microVM) |
+| **React Native support** | First-class | Via templates, limited |
+| **Expo Router** | Full support with HMR | Basic support |
+| **npm packages** | Any, on-demand bundling | Any, via server |
+| **Collaboration** | Not yet | Real-time multiplayer |
+| **GitHub integration** | Not yet | Full integration |
+| **Pricing** | Free, open source | Free tier + paid plans |
+
+**Key difference**: reactnative.run is purpose-built for React Native with deep Expo Router integration, HMR, and API routes. CodeSandbox is a general-purpose IDE that supports React Native through templates but doesn't have the same depth of React Native-specific features.
+
+## vs StackBlitz
+
+[StackBlitz](https://stackblitz.com) runs Node.js in the browser via WebContainers.
+
+| | reactnative.run | StackBlitz |
+|---|---|---|
+| **Runtime** | Custom bundler (browser-metro) | Full Node.js (WebContainers) |
+| **npm install** | On-demand via ESM server | Full npm in browser |
+| **Startup time** | Fast (no Node.js boot) | Slower (boots Node.js) |
+| **React Native** | First-class | Via manual setup |
+| **Expo Router** | Full HMR support | Manual configuration |
+| **Open source** | Yes (MIT) | WebContainers is proprietary |
+
+**Key difference**: StackBlitz runs a full Node.js environment in the browser, which is more general but heavier. reactnative.run uses a purpose-built bundler that's faster for the specific use case of React Native development.
+
+## When to use reactnative.run
+
+- You want to **quickly prototype** a React Native (web) app
+- You need **Expo Router** with file-based routing and HMR
+- You want to **test API routes** without a server
+- You want **instant feedback** with client-side HMR
+- You're **teaching or learning** React Native
+- You want an **open-source** tool you can self-host
+
+## When to use something else
+
+- You need **native iOS/Android preview** (use Expo Snack)
+- You need **full Node.js** capabilities (use StackBlitz)
+- You need **collaboration** features (use CodeSandbox)
+- You need to run **non-React-Native** projects (use CodeSandbox/StackBlitz)
+
+<MobileDocsNav />

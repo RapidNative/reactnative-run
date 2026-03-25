@@ -1,0 +1,65 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Asset Handling
+
+browser-metro handles different types of assets in different ways depending on where they're encountered.
+
+## Source files
+
+All source files (`.ts`, `.tsx`, `.js`, `.jsx`, `.json`) live in the VirtualFS and are transformed by the bundler pipeline.
+
+### JSON files
+
+JSON files are wrapped as CommonJS modules:
+
+```javascript
+// /config.json becomes:
+module.exports = { "key": "value" };
+```
+
+This allows `require("./config.json")` to work as expected.
+
+## npm package assets
+
+When the ESM server bundles npm packages, non-JavaScript assets are handled by esbuild's loaders:
+
+### React Native / Expo packages
+
+For packages detected as React Native or Expo:
+
+| File type | esbuild loader | Result |
+|---|---|---|
+| `.js` | `jsx` | Treated as JSX (many RN packages use JSX in `.js` files) |
+| `.png`, `.jpg`, `.gif`, `.svg` | `dataurl` | Inlined as base64 data URLs |
+| `.ttf`, `.otf`, `.woff`, `.woff2` | `dataurl` | Inlined as base64 data URLs |
+| `.css` | `css` | Bundled as CSS |
+
+### Standard packages
+
+For non-RN packages, esbuild uses its default loaders. Most assets that aren't JavaScript will cause a build error at the package level, but this rarely happens since npm packages typically don't include raw assets.
+
+## Image handling in user code
+
+Images referenced in user code (e.g. `require("@/assets/images/logo.png")`) currently need to be available as URLs. Since the VirtualFS only holds text content, binary assets like images are not directly supported in user projects.
+
+**Workaround**: Use external URLs for images:
+
+```tsx
+<Image source={{ uri: "https://example.com/logo.png" }} />
+```
+
+## Tailwind CSS
+
+For projects using Tailwind CSS, the playground loads Tailwind via CDN in the preview iframe:
+
+```html
+<script src="https://cdn.tailwindcss.com"></script>
+```
+
+If the project has a `tailwind.config.js`, the playground extracts the `theme.extend` configuration and applies it to the CDN Tailwind instance. This allows custom colors, spacing, and other theme values to work.
+
+## Fonts
+
+Custom fonts from npm packages (like `@expo/vector-icons`) are inlined as data URLs by the ESM server. System fonts and web fonts loaded via CSS `@font-face` work as normal since the preview runs in a standard browser context.
+
+<MobileDocsNav />

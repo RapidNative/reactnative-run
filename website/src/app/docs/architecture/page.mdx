@@ -1,0 +1,113 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Architecture
+
+browser-metro is a browser-based bundler that mirrors the architecture of Metro (React Native's bundler) in a simplified form. The system has two runtime components that work together.
+
+## System overview
+
+```text
+Browser (Web Worker)              esm.reactnative.run
++----------------------------+   +---------------------+
+| VirtualFS                  |   | GET /pkg/:specifier |
+|   In-memory file system    |   |   npm install       |
+|                            |   |   esbuild bundle    |
+| Bundler                    |   |   cache to disk     |
+|   1. Walk dependency graph |   +---------------------+
+|   2. Transform (Sucrase)   |            ^
+|   3. Rewrite requires      |            |
+|   4. Fetch npm pkgs -------+---> fetch /pkg/lodash
+|   5. Emit bundle + HMR     |
+|                            |
+| Execute in iframe          |
++----------------------------+
+```
+
+## Data flow
+
+### 1. Project loading
+
+The playground loads project files into memory as a `FileMap` - a flat object mapping absolute paths to source strings:
+
+```typescript
+{
+  "/index.ts": "import { greet } from './utils';\n...",
+  "/utils.ts": "export function greet(name: string) {...}",
+  "/package.json": "{ \"dependencies\": {} }"
+}
+```
+
+### 2. Virtual filesystem
+
+`VirtualFS` wraps a `FileMap` with filesystem operations (read, write, exists, list). The bundler never touches the real filesystem - everything operates on this in-memory map. This makes the system portable: the same bundler runs in the browser, in tests, or on a server.
+
+### 3. Module resolution
+
+The `Resolver` implements Node.js-style module resolution against the VirtualFS:
+
+1. **Relative imports** (`./utils`, `../lib/foo`) - resolved against the importing file's directory
+2. **Extension resolution** - tries each extension in `sourceExts` (e.g. `.ts`, `.tsx`, `.js`, `.jsx`)
+3. **Index files** - tries `dir/index.{ext}` for directory imports
+4. **npm packages** - anything not starting with `.` or `/` is treated as an npm package
+
+### 4. Transformation pipeline
+
+Each file passes through a three-stage pipeline:
+
+```text
+Original source (.tsx/.ts/.jsx/.js)
+         │
+         ▼
+┌──────────────────────┐
+│  Pre-transform hooks │  BundlerPlugin.transformSource()
+│  (JSX still intact)  │  e.g. data-bx-path injection
+└──────────┬───────────┘
+         │
+         ▼
+┌──────────────────────┐
+│  Core transform      │  Transformer.transform()
+│  (Sucrase)           │  TS types stripped, JSX → createElement
+└──────────┬───────────┘
+         │
+         ▼
+┌──────────────────────┐
+│  Post-transform hooks│  BundlerPlugin.transformOutput()
+│  (CommonJS output)   │  e.g. React Refresh registration
+└──────────────────────┘
+```
+
+### 5. Bundle generation
+
+The bundler walks the dependency graph starting from the entry file, then emits a single self-executing bundle:
+
+```javascript
+(function(modules) {
+  var cache = {};
+  function require(id) {
+    if (cache[id]) return cache[id].exports;
+    var module = cache[id] = { exports: {} };
+    modules[id].call(module.exports, module, module.exports, require);
+    return module.exports;
+  }
+  require("/index.ts");
+})({
+  "/index.ts": function(module, exports, require) { /* transformed */ },
+  "/utils.ts": function(module, exports, require) { /* transformed */ },
+  "react": function(module, exports, require) { /* from ESM server */ },
+});
+```
+
+### 6. Iframe execution
+
+The bundle runs in a sandboxed iframe. Two blob URLs are created:
+
+1. **JS Blob** - the bundle code as `application/javascript`
+2. **HTML Blob** - an HTML document that loads the JS blob via `<script src>` and includes console interception, a source map resolver, and error handlers
+
+The key insight is that loading the bundle via `<script src>` (not inline) ensures the browser associates error positions with the JS blob URL, enabling source map resolution.
+
+## Multi-target architecture
+
+Each target (web, expo) gets its own `Bundler` / `IncrementalBundler` instance with its own config, plugins, cache, and module map. The web worker orchestrator creates per-target instances, runs them in parallel, and merges results.
+
+<MobileDocsNav />

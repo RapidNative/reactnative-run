@@ -8,7 +8,8 @@ export function syncFilesToMonaco(monaco: Monaco, files: FileMap) {
 
   // Add or update models for each file
   const activePaths = new Set<string>();
-  for (const [path, content] of Object.entries(files)) {
+  for (const [path, entry] of Object.entries(files)) {
+    const content = typeof entry === "string" ? entry : entry.content;
     activePaths.add(path);
     const monacoUri = uri.parse("file://" + path);
     const existing = monaco.editor.getModel(monacoUri);

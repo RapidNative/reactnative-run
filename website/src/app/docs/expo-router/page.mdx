@@ -1,0 +1,57 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Expo Router
+
+browser-metro supports Expo Router's file-based routing, including dynamic route addition via HMR.
+
+## How it works
+
+When a project uses `"main": "expo-router/entry"` in its `package.json`, browser-metro generates synthetic entry files:
+
+- **`/__expo_ctx.js`** - route map that maps file paths to modules
+- **`/index.tsx`** - entry that imports the route context and renders `ExpoRoot`
+
+## Split entry architecture
+
+The entry is deliberately split into two files:
+
+```text
+/__expo_ctx.js              /index.tsx (entry)
++---------------------+    +---------------------------+
+| var modules = {     |    | const ctx = require(      |
+|   "./(tabs)/...":   |    |   "./__expo_ctx"          |
+|     require("..."), |    | );                        |
+|   ...               |    |                           |
+| };                  |    | function App() {          |
+| module.exports = ctx|    |   return <ExpoRoot        |
++---------------------+    |     context={ctx} />;     |
+  Plain .js file            | }                        |
+  (no React Refresh         |                          |
+   accept boundary)         | registerRootComponent(App)|
+                            +---------------------------+
+                              .tsx → React Refresh
+                              adds module.hot.accept()
+```
+
+**Why two files?** The route context (`/__expo_ctx.js`) is a plain `.js` file, so React Refresh does NOT add `module.hot.accept()` to it. This means HMR updates to the context bubble up through the reverse dependency chain until they reach `/index.tsx`, which IS an accept boundary. The entry re-executes, picks up the new route map, and React Refresh re-renders.
+
+If the route map were inlined in the entry, the incremental bundler would mark it as `requiresReload: true` (entry file changed), forcing a full reload.
+
+## Dynamic route addition
+
+When a new file is created under `/app/` with a route extension (`.tsx`, `.ts`, `.jsx`, `.js`):
+
+1. The worker regenerates `/__expo_ctx.js` via `buildExpoRouteContext()`
+2. Writes it to the VirtualFS and appends it to the change list as `type: "update"`
+3. The incremental bundler processes it as a normal module change (not an entry change)
+4. The HMR runtime receives the updated reverse deps map and can walk from the new module to the accept boundary
+
+## Route change detection
+
+The worker's `handleWatchUpdate` function watches for file creates/deletes under `/app/` and automatically regenerates the route context. The updated `reverseDepsMap` is included in each HMR update so the iframe's runtime can find accept boundaries for new files.
+
+## Client exclusion of API routes
+
+Files ending with `+api.ts` under `/app/` are excluded from the client route context. They are bundled separately as [API Routes](/docs/api-routes).
+
+<MobileDocsNav />

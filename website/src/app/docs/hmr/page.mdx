@@ -1,0 +1,77 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# HMR & React Refresh
+
+Hot Module Replacement (HMR) allows updating individual modules without a full page reload, preserving application state.
+
+## End-to-end flow
+
+```text
+Editor (keystroke)
+   │
+   ▼
+EditorFS.write()
+   │  detects change, debounces
+   ▼
+Worker receives "watch-update" message
+   │  with ContentChange[] (path, type, content)
+   ▼
+IncrementalBundler.rebuild(changes)
+   │  1. Invalidate changed module caches
+   │  2. Re-transform only changed files
+   │  3. Walk any new local deps
+   │  4. Fetch any new npm packages
+   │  5. Clean up orphaned modules
+   │  6. Emit full bundle (for fallback)
+   │  7. Build HmrUpdate with per-module code
+   ▼
+Worker posts "hmr-update" to parent
+   │  updatedModules, removedModules, bundle (fallback)
+   ▼
+App broadcasts to iframe via postMessage
+   ▼
+Iframe HMR runtime receives "hmr-update"
+   │  1. Find accept boundaries (walk reverse deps)
+   │  2. Run dispose callbacks
+   │  3. Replace module factories
+   │  4. Delete removed modules
+   │  5. Re-execute boundary modules
+   │  6. React Refresh: performReactRefresh()
+   ▼
+UI updates without page reload
+```
+
+## HMR runtime
+
+The HMR runtime (`hmr-runtime.ts`) is a CommonJS module loader with `module.hot` API support:
+
+- **`module.hot.accept(cb?)`** - marks the module as an accept boundary
+- **`module.hot.dispose(cb)`** - registers a cleanup callback that runs before the module is replaced
+- **`module.hot.decline()`** - forces a full reload when this module changes
+
+## Accept boundaries
+
+When a module changes, the runtime walks the reverse dependency graph to find the nearest module with `module.hot.accept()`. If found, only modules between the changed module and the boundary are re-executed. If no boundary is found, a full reload is triggered.
+
+React Refresh automatically adds `module.hot.accept()` to every `.tsx`/`.jsx` file, making each component its own accept boundary.
+
+## React Refresh integration
+
+When `hmr.reactRefresh` is enabled:
+
+1. The `reactRefreshTransformer` wraps each component with `$RefreshReg$` / `$RefreshSig$` calls
+2. Each component file gets a `module.hot.accept()` postamble
+3. The HMR runtime initializes the React Refresh runtime before executing the entry module
+4. After each HMR update, `performReactRefresh()` tells React to re-render with updated component definitions
+
+This preserves component state (e.g. `useState` values) across updates.
+
+## Cache clearing order
+
+All module caches in `modulesToReExecute` are cleared in a first pass **before** any modules are re-executed in a second pass. This prevents an ordering bug where a parent module could re-execute and `require()` a dependency before that dependency's cache was cleared, getting stale exports.
+
+## Per-module source maps in HMR
+
+Each module in an HMR update includes its own inline source map and `//# sourceURL=` annotation. The iframe's HMR listener extracts these and registers them with the source map resolver so runtime errors in HMR-updated modules resolve to correct original positions.
+
+<MobileDocsNav />

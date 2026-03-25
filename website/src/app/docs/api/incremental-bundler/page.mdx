@@ -1,0 +1,90 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# IncrementalBundler
+
+A watch-mode bundler that maintains an internal dependency graph, module cache, and module map across rebuilds. Only re-transforms changed files and their affected dependents.
+
+## Usage
+
+```typescript
+import {
+  IncrementalBundler, VirtualFS, reactRefreshTransformer
+} from "browser-metro";
+
+const config: BundlerConfig = {
+  resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+  transformer: reactRefreshTransformer,
+  server: { packageServerUrl: "https://esm.reactnative.run" },
+  hmr: { enabled: true, reactRefresh: true },
+  plugins: [myPlugin],
+};
+
+const bundler = new IncrementalBundler(vfs, config);
+```
+
+## Methods
+
+### `async build(entryFile: string): Promise<IncrementalBuildResult>`
+
+Performs the initial full build. Must be called before `rebuild()`.
+
+```typescript
+const result = await bundler.build("/index.tsx");
+// result.bundle   -- full bundle string
+// result.type     -- "full"
+// result.hmrUpdate -- null (initial build)
+```
+
+### `async rebuild(changes: FileChange[]): Promise<IncrementalBuildResult>`
+
+Incrementally rebuilds based on file changes. Returns a result that may include an HMR update.
+
+```typescript
+const result = await bundler.rebuild([
+  { path: "/App.tsx", type: "update" },
+]);
+
+if (result.hmrUpdate && !result.hmrUpdate.requiresReload) {
+  // Send HMR update to iframe
+  iframe.postMessage({
+    type: "hmr-update",
+    updatedModules: result.hmrUpdate.updatedModules,
+    removedModules: result.hmrUpdate.removedModules,
+  });
+} else {
+  // Full reload needed
+  loadBundle(result.bundle);
+}
+```
+
+### `updateFS(fs: VirtualFS): void`
+
+Replaces the internal VirtualFS. Call after modifying files, before `rebuild()`.
+
+## IncrementalBuildResult
+
+```typescript
+interface IncrementalBuildResult {
+  bundle: string;                // full bundle (always available as fallback)
+  hmrUpdate: HmrUpdate | null;  // null for initial build
+  type: "full" | "incremental";
+  rebuiltModules: string[];
+  removedModules: string[];
+  buildTime: number;             // milliseconds
+}
+```
+
+## HmrUpdate
+
+```typescript
+interface HmrUpdate {
+  updatedModules: Record<string, string>; // module ID → new code
+  removedModules: string[];
+  requiresReload: boolean;
+  reloadReason?: string;
+}
+```
+
+When `requiresReload` is true, the entry file itself changed or no accept boundary was found, and a full reload is needed.
+
+<MobileDocsNav />

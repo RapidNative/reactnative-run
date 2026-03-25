@@ -1,0 +1,100 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Plugins
+
+Plugins implement the `BundlerPlugin` interface and can hook into multiple stages of the bundling process.
+
+## BundlerPlugin interface
+
+```typescript
+interface BundlerPlugin {
+  name: string;
+
+  /** Runs BEFORE Sucrase. Receives raw .tsx/.ts source (JSX still intact). */
+  transformSource?(params: {
+    src: string;
+    filename: string;
+  }): { src: string } | null;
+
+  /** Runs AFTER Sucrase. Receives CommonJS output. */
+  transformOutput?(params: {
+    code: string;
+    filename: string;
+  }): { code: string } | null;
+
+  /** Custom module resolution. Return a resolved path or null. */
+  resolveRequest?(
+    context: { fromFile: string },
+    moduleName: string
+  ): string | null;
+
+  /** Module aliases: { source: target }. */
+  moduleAliases?(): Record<string, string>;
+
+  /** Module shims: { moduleName: inlineCode }. */
+  shimModules?(): Record<string, string>;
+}
+```
+
+## Plugin hooks
+
+| Hook | Phase | Use Case |
+|---|---|---|
+| `transformSource` | Before Sucrase | Modify raw JSX/TS source (e.g. inject attributes) |
+| `transformOutput` | After Sucrase | Modify CJS output (e.g. add instrumentation) |
+| `resolveRequest` | Module resolution | Custom resolution logic |
+| `moduleAliases` | Pre-fetch | Redirect `require("A")` to package B |
+| `shimModules` | Pre-fetch | Replace npm packages with inline code |
+
+**Plugin ordering matters**: plugins run in array order.
+
+## Built-in plugins
+
+### createDataBxPathPlugin
+
+Injects `data-bx-path` attributes into JSX elements for click-to-source functionality.
+
+```typescript
+import { createDataBxPathPlugin } from "browser-metro";
+
+const plugin = createDataBxPathPlugin();
+// Use in config: plugins: [plugin]
+```
+
+- **Lowercase HTML tags** (`<div>`, `<span>`) get `data-bx-path="filename:line:col"`
+- **Uppercase component tags** (`<View>`, `<Text>`) get `dataSet={{"bx-path":"filename:line:col"}}`
+- Fragments and generics are skipped
+
+## Example: Module aliases
+
+```typescript
+const expoWebPlugin: BundlerPlugin = {
+  name: "expo-web",
+  moduleAliases() {
+    return {
+      "react-native": "react-native-web",
+    };
+  },
+  shimModules() {
+    return {
+      "expo-haptics": "module.exports = { impactAsync() {}, selectionAsync() {} };",
+    };
+  },
+};
+```
+
+## Example: Transform hook
+
+```typescript
+const loggingPlugin: BundlerPlugin = {
+  name: "logging",
+  transformOutput({ code, filename }) {
+    // Add a log statement at the top of every module
+    return {
+      code: `console.log("Loading: ${filename}");\n${code}`,
+    };
+  },
+};
+```
+
+<MobileDocsNav />

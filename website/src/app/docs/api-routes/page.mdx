@@ -1,0 +1,63 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# API Routes
+
+Expo API routes are files ending with `+api.ts` (or `.tsx`, `.js`, `.jsx`) under `/app/`. They export HTTP method handlers (`GET`, `POST`, etc.) and are accessed via standard `fetch()` calls. In browser-metro, these run entirely in-browser - no server or service worker needed.
+
+## How it works
+
+```text
+Client Bundle                    API Bundle (separate)
++---------------------------+   +---------------------------+
+| /__expo_ctx.js            |   | /__api_routes.js          |
+|   (page routes only,      |   |   (only +api files,       |
+|    +api files excluded)   |   |    keyed by URL path)     |
+| /index.tsx                |   |                           |
+|   ExpoRoot + App          |   | Sets window.__API_ROUTES__|
++---------------------------+   +---------------------------+
+```
+
+The API bundle is loaded in the iframe **before** the client bundle. A fetch interceptor patches `window.fetch` to check if the request pathname matches an API route. If matched, it calls the handler directly in-browser and returns the `Response`. Otherwise, it falls through to the real `fetch`.
+
+## File path to URL mapping
+
+| File path | URL |
+|---|---|
+| `/app/api/hello+api.ts` | `/api/hello` |
+| `/app/api/users/[id]+api.ts` | `/api/users/[id]` |
+| `/app/api/index+api.ts` | `/api` |
+
+Dynamic segments (`[id]`) are supported with parameter extraction.
+
+## Writing an API route
+
+```typescript
+// /app/api/hello+api.ts
+export function GET(request: Request) {
+  return Response.json({
+    message: "Hello from the API!",
+    timestamp: Date.now(),
+  });
+}
+
+export function POST(request: Request) {
+  const body = await request.json();
+  return Response.json({
+    received: body,
+    echo: true,
+  });
+}
+```
+
+## Key components
+
+- **`isApiRouteFile(path)`** - detects `+api` files by filename pattern
+- **`filePathToApiRoute(path)`** - converts file paths to URL paths
+- **`buildApiRoutesEntry(vfs)`** - generates `/__api_routes.js` with route map and `match()` function
+- **`buildApiBundle(vfs, url)`** - creates a separate `Bundler` instance for API routes
+
+## Watch mode
+
+When `+api` files change, the worker rebuilds the API bundle separately and sends it alongside the client bundle. Client-only changes still use granular HMR; API changes trigger a full API bundle rebuild (API bundles are small, so this is fast).
+
+<MobileDocsNav />

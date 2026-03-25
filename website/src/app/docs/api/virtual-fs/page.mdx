@@ -1,0 +1,65 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# VirtualFS API
+
+Complete API reference for the `VirtualFS` class.
+
+## Constructor
+
+```typescript
+import { VirtualFS } from "browser-metro";
+import type { FileMap } from "browser-metro";
+
+const files: FileMap = {
+  "/index.js": 'console.log("hello");',
+  "/utils.js": 'module.exports = { add: (a, b) => a + b };',
+};
+
+const vfs = new VirtualFS(files);
+```
+
+## Methods
+
+### `read(path: string): string | undefined`
+
+Returns the file contents, or `undefined` if the file doesn't exist.
+
+```typescript
+const src = vfs.read("/index.js"); // 'console.log("hello");'
+const missing = vfs.read("/nope"); // undefined
+```
+
+### `write(path: string, content: string): void`
+
+Creates or overwrites a file.
+
+```typescript
+vfs.write("/newfile.js", "module.exports = 42;");
+```
+
+### `exists(path: string): boolean`
+
+Checks if a file exists.
+
+```typescript
+vfs.exists("/index.js"); // true
+vfs.exists("/nope");     // false
+```
+
+### `list(): string[]`
+
+Returns all file paths.
+
+```typescript
+vfs.list(); // ["/index.js", "/utils.js"]
+```
+
+### `getEntryFile(): string | null`
+
+Returns the first matching entry file from: `/index.js`, `/index.ts`, `/index.tsx`, `/index.jsx`. Returns `null` if none found.
+
+### `toFileMap(): FileMap`
+
+Returns a copy of the internal file map.
+
+<MobileDocsNav />

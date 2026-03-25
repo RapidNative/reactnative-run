@@ -1,0 +1,100 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Shims & Polyfills
+
+Since browser-metro runs React Native code in the browser, several modules and APIs need to be shimmed or aliased to work correctly in a web environment.
+
+## Module aliases
+
+Aliases redirect `require("A")` to package B at resolution time.
+
+| Source | Target | Reason |
+|---|---|---|
+| `react-native` | `react-native-web` | RN components rendered as DOM elements |
+
+## Shimmed modules
+
+Shims replace npm packages with inline browser-compatible code, avoiding network requests entirely.
+
+### nativewind
+
+A lightweight shim that provides:
+- **`useColorScheme()`** - returns current color scheme with `setColorScheme` and `toggleColorScheme` methods, backed by `matchMedia("(prefers-color-scheme: dark)")`
+- **`vars(obj)`** - marks an object with `__cssVars` so the className patch can apply CSS custom properties to DOM elements
+- **`cssInterop()`** / **`remapProps()`** - identity functions (no-ops in web)
+- **`createStyleSheet()`** - delegates to `RN.StyleSheet.create()`
+
+### react-native-css-interop
+
+Shimmed as an empty module (`module.exports = {}`) since its functionality is handled by the nativewind shim.
+
+### \_\_classname-patch\_\_
+
+An internal shim that monkey-patches `React.createElement` to convert Tailwind `className` props into react-native-web's `$$css` style objects. This lets you use Tailwind classes on RN components:
+
+```tsx
+// This JSX:
+<View className="flex-1 bg-red-500">
+
+// Gets transformed so RNW outputs:
+<div class="flex-1 bg-red-500">
+```
+
+The patch also handles NativeWind's `vars()` CSS custom properties by injecting a `ref` that applies `style.setProperty()` directly to the DOM element.
+
+## Global polyfills
+
+The expo-web plugin prepends these globals to every module:
+
+```javascript
+if (typeof __DEV__ === 'undefined') globalThis.__DEV__ = true;
+if (typeof global === 'undefined') globalThis.global = globalThis;
+```
+
+And the bundle preamble sets up `process.env`:
+
+```javascript
+var process = globalThis.process || {};
+process.env = process.env || {};
+process.env.NODE_ENV = process.env.NODE_ENV || "development";
+```
+
+## Auto-injected imports
+
+The expo-web plugin auto-injects `import React from "react"` at the top of `.tsx` and `.jsx` files that don't already have it. This is needed because Sucrase's JSX transform uses `React.createElement`.
+
+## Expo Router shims
+
+When a project uses Expo Router (`"main": "expo-router/entry"` in package.json), browser-metro generates synthetic files:
+
+- **`/__expo_ctx.js`** - route context map built from `app/` directory files
+- **`/index.tsx`** - entry file that imports the route context and renders `ExpoRoot`
+
+The router itself runs via `expo-router` which is fetched from the ESM server as a real npm package (not shimmed). The shim is only the synthetic entry files that wire up the file-based routing.
+
+### What Expo Router features work
+
+- File-based routing (`app/(tabs)/index.tsx`, `app/modal.tsx`)
+- Tab navigation via `Tabs` component
+- Stack navigation via `Stack` component
+- Dynamic route segments (`[id]`)
+- API routes (`+api.ts` files)
+- Dynamic route addition via HMR
+
+### What doesn't work (yet)
+
+- Native-specific navigation features (gestures, native transitions)
+- `expo-linking` deep link handling
+- Server-side rendering features
+
+## ESM server: React Native package handling
+
+When the ESM server detects a React Native or Expo package (by name prefix or keywords), it applies special esbuild config:
+
+- **Resolve extensions**: `.web.tsx`, `.web.ts`, `.web.js` are prioritized to pick web-specific implementations
+- **Loaders**: `.js` files treated as JSX (many RN packages use JSX without the extension), fonts/images as data URLs
+- **Banner**: Injects `process.env` and React global
+- **Defines**: `__DEV__` set to `false`
+- **Extra externals**: `react-native`, `react`, `react-dom` always externalized
+
+<MobileDocsNav />

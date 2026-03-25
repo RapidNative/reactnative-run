@@ -1,0 +1,65 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Virtual Filesystem
+
+The `VirtualFS` is the foundation of browser-metro. It provides an in-memory filesystem that the bundler operates against, making the entire system portable and browser-compatible.
+
+## Why a virtual filesystem?
+
+The bundler runs in the browser where there's no access to a real filesystem. `VirtualFS` wraps a `FileMap` (a plain object mapping paths to content strings) with filesystem operations, so the bundler code doesn't need to know whether it's running in a browser, in tests, or on a server.
+
+## FileMap
+
+A `FileMap` is the simplest possible representation of a project:
+
+```typescript
+interface FileMap {
+  [path: string]: string; // absolute path → source code
+}
+
+const files: FileMap = {
+  "/index.tsx": 'import App from "./App";\n...',
+  "/App.tsx": 'export default function App() { return <View />; }',
+  "/package.json": '{ "dependencies": { "react": "^19" } }',
+};
+```
+
+All paths are absolute (start with `/`). There are no directories as first-class objects - directory structure is inferred from file paths.
+
+## VirtualFS API
+
+```typescript
+import { VirtualFS } from "browser-metro";
+
+const vfs = new VirtualFS(files);
+
+// Read a file
+vfs.read("/index.tsx"); // returns content string or undefined
+
+// Write a file (create or overwrite)
+vfs.write("/new-file.ts", "export const x = 1;");
+
+// Check existence
+vfs.exists("/index.tsx"); // true
+
+// List all files
+vfs.list(); // ["/index.tsx", "/App.tsx", "/package.json", "/new-file.ts"]
+
+// Get a copy of the internal file map
+vfs.toFileMap(); // { "/index.tsx": "...", ... }
+
+// Find entry file (tries /index.js, /index.ts, /index.tsx, /index.jsx)
+vfs.getEntryFile(); // "/index.tsx"
+```
+
+## EditorFS
+
+The playground wraps `VirtualFS` with `EditorFS`, which adds:
+
+- **Dirty tracking** - knows which files have changed since last flush
+- **Debounced flushes** - batches rapid edits into single update messages to the bundler worker
+- **Worker communication** - sends `watch-update` messages with `ContentChange[]` arrays
+
+This keeps the UI responsive while typing, even as the bundler processes changes in the background.
+
+<MobileDocsNav />

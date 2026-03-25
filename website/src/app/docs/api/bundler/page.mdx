@@ -1,0 +1,75 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Bundler
+
+The main one-shot bundler class. Takes a `VirtualFS` and `BundlerConfig`, walks the dependency graph, transforms files, fetches npm packages, and emits an executable bundle with an appended inline source map.
+
+## Usage
+
+```typescript
+import { Bundler, VirtualFS, typescriptTransformer } from "browser-metro";
+import type { BundlerConfig } from "browser-metro";
+
+const config: BundlerConfig = {
+  resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+  transformer: typescriptTransformer,
+  server: { packageServerUrl: "https://esm.reactnative.run" },
+};
+
+const bundler = new Bundler(vfs, config);
+```
+
+## Methods
+
+### `async bundle(entryFile: string): Promise<string>`
+
+Bundles the project starting from `entryFile`. Returns the complete bundle as a string.
+
+```typescript
+const code = await bundler.bundle("/index.ts");
+// code is a self-executing bundle string with inline source map
+```
+
+The bundle process:
+1. Walks the dependency graph from the entry file
+2. Runs the plugin + transformer pipeline on each file
+3. Rewrites relative `require()` calls to absolute paths
+4. Fetches any npm packages from the ESM server
+5. Emits a self-executing CommonJS bundle with combined source map
+
+### `transformFile(filename: string, src: string): string`
+
+Transforms a single file using the configured transformer (including plugin hooks). Useful for one-off transforms outside of bundling.
+
+```typescript
+const jsCode = bundler.transformFile("/app.tsx", tsxSource);
+```
+
+## Bundle preamble
+
+Every emitted bundle is prefixed with a preamble that sets up `process.env`:
+
+```javascript
+var process = globalThis.process || {};
+process.env = process.env || {};
+process.env.NODE_ENV = process.env.NODE_ENV || "development";
+```
+
+### Environment variable injection
+
+The `env` config option injects environment variables. For security, only vars with public prefixes are included:
+
+- `EXPO_PUBLIC_*`
+- `NEXT_PUBLIC_*`
+
+```typescript
+const config: BundlerConfig = {
+  // ...
+  env: {
+    EXPO_PUBLIC_API_URL: "https://api.example.com",
+    SECRET_KEY: "abc123", // filtered out
+  },
+};
+```
+
+<MobileDocsNav />

@@ -1,0 +1,100 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# ESM Package Server
+
+**reactnative-esm** is an Express service that bundles npm packages on-demand for browser consumption. It follows an unpkg-style URL scheme and caches results to disk.
+
+In production, it's hosted at `https://esm.reactnative.run`.
+
+## URL format
+
+```text
+GET /pkg/<package>[@<version>][/<subpath>]
+```
+
+| URL | Package | Version | Subpath |
+|---|---|---|---|
+| `/pkg/lodash` | lodash | latest | - |
+| `/pkg/lodash@4.17.21` | lodash | 4.17.21 | - |
+| `/pkg/react-dom/client` | react-dom | latest | /client |
+| `/pkg/react-dom@19/client` | react-dom | 19 | /client |
+| `/pkg/@scope/name@1.0/sub` | @scope/name | 1.0 | /sub |
+
+## How it works
+
+1. **Parse** the URL into package name, version, and optional subpath
+2. **Check disk cache** - if cached, serve immediately
+3. **Create temp directory** and run `npm install <package>@<version>`
+4. **Read package metadata** to collect all `dependencies` + `peerDependencies` as externals
+5. **Detect React Native/Expo packages** and apply special config
+6. **Bundle with esbuild** (IIFE format, browser platform) with selective external plugin
+7. **Wrap output** with `module.exports = __module`
+8. **Cache to disk** (both `.js` bundle and `.externals.json` manifest)
+9. **Return response** with `X-Externals` header
+
+## Dependency externalization
+
+All `dependencies` and `peerDependencies` are externalized during bundling. This means they remain as `require()` calls in the output rather than being inlined. This ensures shared transitive deps are loaded once at runtime.
+
+### Selective external plugin
+
+- **Bare imports** (`require("react")`) - always externalized
+- **Subpath imports of react/react-dom/react-native** - always externalized
+- **Other subpath imports** - try to resolve locally first; only externalize if resolution fails
+
+## Version pinning via X-Externals
+
+The server tracks installed versions of all externalized dependencies:
+
+```text
+X-Externals: {"react":"19.1.0","react-dom":"19.1.0","memoize-one":"4.1.0"}
+```
+
+The bundler reads this header and uses pinned versions for transitive dependencies, preventing version mismatches.
+
+**Version resolution priority:**
+1. User's `package.json` version (explicit constraint)
+2. Transitive dep version from `X-Externals` (pinned by parent)
+3. Latest (fallback)
+
+## React Native / Expo package handling
+
+Packages are detected as React Native/Expo when:
+- Package name starts with `@expo/`
+- Package name contains `react-native`
+- Package keywords include `react-native` or `expo`
+
+For these packages, esbuild gets additional config:
+- **Resolve extensions**: `.web.tsx`, `.web.ts`, `.web.js` prioritized
+- **Loaders**: `.js` treated as JSX, fonts/images as data URLs
+- **Extra externals**: `react-native`, `react`, `react-dom` always externalized
+
+## Caching
+
+Bundled packages are cached to disk:
+
+```text
+cache/
+  lodash@4.17.21.js
+  lodash@4.17.21.externals.json
+  react-dom@19.1.0__client.js          # subpath "/" → "__"
+  react-dom@19.1.0__client.externals.json
+```
+
+To clear all cached packages:
+
+```bash
+rm -f reactnative-esm/cache/*.js reactnative-esm/cache/*.json
+```
+
+## Running locally
+
+```bash
+cd reactnative-esm
+npm install
+npm run dev    # with auto-reload
+npm start      # production
+# Server runs on http://localhost:5200
+```
+
+<MobileDocsNav />

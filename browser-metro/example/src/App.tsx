@@ -1,6 +1,11 @@
-import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from "react";
-import type { FileMap } from "almostmetro";
+import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
+import type { FileMap } from "browser-metro";
 import { EditorFS } from "./editor-fs";
+import { FileExplorer } from "./FileExplorer";
+import { Play, Eye, Square, Download, Plus, RefreshCw, Terminal, Monitor, Sun, Moon, ChevronDown, FlaskConical, FolderTree, Code, Smartphone, Settings, Hammer, Info } from "lucide-react";
+import Editor, { type Monaco } from "@monaco-editor/react";
+import { Panel, Group as PanelGroup, Separator } from "react-resizable-panels";
+import { configureTypeScript, syncFilesToMonaco } from "./monaco-ts-setup";
 
 interface Projects {
   [projectName: string]: FileMap;
@@ -28,6 +33,7 @@ function bundleInWorker(
   files: FileMap,
   packageServerUrl: string,
   projectName?: string,
+  assetBaseUrl?: string,
 ): Promise<BundleResult> {
   return new Promise((resolve, reject) => {
     worker.onmessage = (e: MessageEvent) => {
@@ -38,7 +44,7 @@ function bundleInWorker(
       }
     };
     worker.onerror = (e) => reject(new Error(e.message));
-    worker.postMessage({ files, packageServerUrl, projectName });
+    worker.postMessage({ files, packageServerUrl, projectName, assetBaseUrl });
   });
 }
 
@@ -87,7 +93,7 @@ const PreviewFrame = forwardRef<PreviewFrameHandle, PreviewFrameProps>(
     return (
       <iframe
         ref={iframeRef}
-        className="preview-iframe"
+        className="flex-1 border-0 bg-white min-w-0"
         sandbox="allow-scripts allow-same-origin"
       />
     );
@@ -401,7 +407,7 @@ function buildBundleHtml(
     "<!DOCTYPE html><html><head><meta charset='UTF-8'>" +
     "<script src='https://cdn.tailwindcss.com'></" + "script>" +
     (tailwindConfigScript ? "<script>" + tailwindConfigScript + "</" + "script>" : "") +
-    "<style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}</style></head><body><div id='root'></div><script>\n" +
+    "<style>html,body,#root{height:100%;margin:0}body{overflow:hidden}#root{display:flex;flex-direction:column}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#3f3f46;border-radius:4px}::-webkit-scrollbar-thumb:hover{background:#52525b}::-webkit-scrollbar-corner{background:transparent}*{scrollbar-color:#3f3f46 transparent}</style></head><body><div id='root'></div><script>\n" +
     consoleScript +
     smResolverScript +
     "</" +
@@ -418,21 +424,26 @@ function buildBundleHtml(
 
 // --- Main App ---
 
-type MobileTab = "editor" | "preview" | "console";
+type MobileTab = "explorer" | "editor" | "preview";
+
+const PACKAGE_SERVER_URL = import.meta.env.VITE_PACKAGE_SERVER_URL || window.location.origin;
+const ASSET_BASE_URL = window.location.origin + import.meta.env.BASE_URL;
 
 export function App() {
   const [projects, setProjects] = useState<Projects>({});
-  const [currentProject, setCurrentProject] = useState("basic");
+  const [currentProject, setCurrentProject] = useState("expo");
   const [fileList, setFileList] = useState<string[]>([]);
   const [activeFile, setActiveFile] = useState("");
   const [editorValue, setEditorValue] = useState("");
   const [consoleOutput, setConsoleOutput] = useState<ConsoleEntry[]>([]);
   const [bundling, setBundling] = useState(false);
-  const [mobileTab, setMobileTab] = useState<MobileTab>("editor");
+  const [mobileTab, setMobileTab] = useState<MobileTab>("preview");
   const [watchMode, setWatchMode] = useState(false);
   const [hmrReady, setHmrReady] = useState(false);
   const consoleRef = useRef<HTMLDivElement>(null);
-  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<any>(null);
+  const monacoRef = useRef<Monaco | null>(null);
+  const startWatchRef = useRef<(() => void) | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const editorFSRef = useRef<EditorFS | null>(null);
   const lastBundleRef = useRef<string>("");
@@ -440,6 +451,18 @@ export function App() {
   const prevApiBlobUrlRef = useRef("");
   const tailwindConfigRef = useRef<string>("");
   const [hasBundle, setHasBundle] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [hmrMenuOpen, setHmrMenuOpen] = useState(false);
+  const [dualPreview, setDualPreview] = useState(false);
+  const [showDisclaimer, setShowDisclaimer] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.matchMedia("(max-width: 767px)").matches);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
 
   // Blob URLs for preview iframes (built once, loaded by all frames)
   const [blobUrl, setBlobUrl] = useState("");
@@ -496,25 +519,27 @@ export function App() {
 
   // Load projects on mount
   useEffect(() => {
-    fetch("/projects.json")
+    fetch(import.meta.env.BASE_URL + "projects.json")
       .then((res) => res.json())
       .then((data: Projects) => {
         setProjects(data);
         const params = new URLSearchParams(window.location.search);
-        const project = params.get("project") || "basic";
+        const project = params.get("project") || "expo";
         setCurrentProject(project);
         const projectFiles = data[project];
         if (projectFiles) {
           editorFSRef.current = new EditorFS(projectFiles);
           setFileList(Object.keys(projectFiles));
-          const entry = findEntryFile(projectFiles);
-          setActiveFile(entry);
-          setEditorValue(projectFiles[entry]?.content || "");
+          const defaultFile = findDefaultEditorFile(projectFiles);
+          setActiveFile(defaultFile);
+          setEditorValue(projectFiles[defaultFile]?.content || "");
           // Extract tailwind config from project files
           const twConfig = projectFiles["/tailwind.config.js"]?.content || projectFiles["/tailwind.config.ts"]?.content;
           if (twConfig) {
             tailwindConfigRef.current = extractTailwindConfig(twConfig);
           }
+          // Auto-start watch mode (delay to let worker initialize)
+          setTimeout(() => startWatchRef.current?.(), 500);
         }
       });
   }, []);
@@ -636,11 +661,15 @@ export function App() {
       editorFSRef.current = new EditorFS(projectFiles);
     }
     setFileList(Object.keys(projectFiles));
-    const entry = findEntryFile(projectFiles);
-    setActiveFile(entry);
-    setEditorValue(projectFiles[entry]?.content || "");
+    const defaultFile = findDefaultEditorFile(projectFiles);
+    setActiveFile(defaultFile);
+    setEditorValue(projectFiles[defaultFile]?.content || "");
     setConsoleOutput([]);
     window.history.replaceState(null, "", "?project=" + currentProject);
+
+    if (monacoRef.current) {
+      syncFilesToMonaco(monacoRef.current, projectFiles);
+    }
 
     if (watchMode) {
       stopWatch();
@@ -659,9 +688,35 @@ export function App() {
     return Object.keys(fileMap)[0] || "";
   }
 
+  function findDefaultEditorFile(fileMap: FileMap): string {
+    const preferred = [
+      "/app/(tabs)/index.tsx",
+      "/app/(tabs)/index.ts",
+      "/app/(tabs)/index.jsx",
+      "/app/(tabs)/index.js",
+      "/App.tsx",
+      "/App.ts",
+      "/App.jsx",
+      "/App.js",
+      "/index.tsx",
+      "/index.ts",
+      "/index.jsx",
+      "/index.js",
+    ];
+    for (const p of preferred) {
+      if (p in fileMap) return p;
+    }
+    return Object.keys(fileMap)[0] || "";
+  }
+
   function switchTab(name: string) {
     setActiveFile(name);
     setEditorValue(editorFSRef.current?.read(name) || "");
+  }
+
+  function mobileSelectFile(name: string) {
+    switchTab(name);
+    setMobileTab("editor");
   }
 
   function handleEditorChange(value: string) {
@@ -669,23 +724,17 @@ export function App() {
     editorFSRef.current?.write(activeFile, value);
   }
 
-  function handleEditorKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Tab") {
-      e.preventDefault();
-      const textarea = editorRef.current;
-      if (!textarea) return;
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const newValue =
-        editorValue.substring(0, start) + "  " + editorValue.substring(end);
-      handleEditorChange(newValue);
-      requestAnimationFrame(() => {
-        textarea.selectionStart = textarea.selectionEnd = start + 2;
-      });
-    }
+  function getMonacoLanguage(filename: string): string {
+    if (filename.endsWith(".tsx") || filename.endsWith(".jsx")) return "typescript";
+    if (filename.endsWith(".ts")) return "typescript";
+    if (filename.endsWith(".js")) return "javascript";
+    if (filename.endsWith(".json")) return "json";
+    if (filename.endsWith(".css")) return "css";
+    if (filename.endsWith(".html")) return "html";
+    return "plaintext";
   }
 
-  async function handleRun() {
+  const handleRun = useCallback(async () => {
     const efs = editorFSRef.current;
     if (!efs) return;
 
@@ -702,8 +751,9 @@ export function App() {
       const { code: bundleCode, apiBundle } = await bundleInWorker(
         workerRef.current,
         efs.toFileMap(),
-        window.location.origin,
+        PACKAGE_SERVER_URL,
         currentProject,
+        ASSET_BASE_URL,
       );
 
       lastBundleRef.current = bundleCode;
@@ -717,7 +767,7 @@ export function App() {
     } finally {
       setBundling(false);
     }
-  }
+  }, []);
 
   function startWatch() {
     const efs = editorFSRef.current;
@@ -735,10 +785,12 @@ export function App() {
     workerRef.current.postMessage({
       type: "watch-start",
       files: efs.toFileMap(),
-      packageServerUrl: window.location.origin,
+      packageServerUrl: PACKAGE_SERVER_URL,
       projectName: currentProject,
+      assetBaseUrl: ASSET_BASE_URL,
     });
   }
+  startWatchRef.current = startWatch;
 
   function stopWatch() {
     const efs = editorFSRef.current;
@@ -795,7 +847,7 @@ export function App() {
 
   const projectNames = Object.keys(projects);
 
-  // --- HMR test: dynamically add a third tab to expo-real ---
+  // --- HMR test: dynamically add a third tab to expo ---
 
   const settingsTabContent = `import { StyleSheet } from 'react-native';
 
@@ -855,6 +907,20 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="api-test"
+        options={{
+          title: 'API Test',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="network" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="error"
+        options={{
+          title: 'Error',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="exclamationmark.triangle.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="settings"
         options={{
           title: 'Settings',
@@ -885,17 +951,63 @@ export default function TabLayout() {
     addLog("Updated /app/(tabs)/_layout.tsx with Settings tab", "info");
   }
 
-  const isExpoReal = currentProject === "expo-real";
+  const isExpoReal = currentProject === "expo";
 
   return (
-    <>
-      <header>
-        <h1>ES Builder</h1>
-        <div className="header-controls">
+    <div className={`flex flex-col h-screen font-sans ${theme === "dark" ? "theme-dark bg-zinc-950 text-zinc-300" : "bg-white text-zinc-800"}`}>
+      {/* Header */}
+      <header className={`flex items-center gap-2 px-2 md:px-4 py-2 border-b shrink-0 relative z-50 ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+        <div className="flex items-center gap-2 shrink-0">
+          <a
+            href="/"
+            onClick={(e) => {
+              e.preventDefault();
+              const target = window.parent !== window ? window.parent : window;
+              target.location.href = "/";
+            }}
+            className="flex items-center gap-2 cursor-pointer"
+          >
+            <img src={import.meta.env.BASE_URL + "logo.svg"} alt="logo" className="w-6 h-6" />
+            <h1 className={`text-sm font-semibold ${theme === "dark" ? "text-white" : "text-zinc-900"}`}>
+              reactnative.run
+            </h1>
+          </a>
+          <a
+            href="https://rapidnative.com?utm_source=reactnative.run&utm_medium=header&utm_campaign=playground"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] text-zinc-500 hover:text-zinc-400 transition-colors hidden md:inline"
+          >
+            by RapidNative
+          </a>
+          <div className="relative hidden md:block">
+            <button
+              onClick={() => setShowDisclaimer(!showDisclaimer)}
+              className="text-zinc-600 hover:text-zinc-400 transition-colors"
+            >
+              <Info size={12} />
+            </button>
+            {showDisclaimer && (
+              <div className={`absolute left-0 top-full mt-2 w-72 rounded-lg border shadow-xl z-50 p-3 text-xs leading-relaxed ${theme === "dark" ? "bg-zinc-900 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"}`}>
+                This project is not affiliated with, endorsed by, or associated with Meta, Facebook, or the React Native team. The domain name "reactnative.run" is simply a descriptive name for this tool.
+                <button
+                  onClick={() => setShowDisclaimer(false)}
+                  className="block mt-2 text-blue-400 hover:text-blue-300 text-[10px] font-medium"
+                >
+                  Got it
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex-1" />
+        <div className="flex items-center gap-1.5 shrink-0">
           {projectNames.length > 1 && (
             <select
               value={currentProject}
               onChange={(e) => setCurrentProject(e.target.value)}
+              className={`h-7 pl-3 pr-7 text-xs rounded outline-none cursor-pointer border shrink-0 hidden md:block appearance-none bg-[length:12px] bg-[position:right_8px_center] bg-no-repeat ${theme === "dark" ? "bg-zinc-800 text-zinc-300 border-zinc-700 hover:border-zinc-500" : "bg-white text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
+              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='${theme === "dark" ? "%23a1a1aa" : "%2371717a"}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")` }}
             >
               {projectNames.map((name) => (
                 <option key={name} value={name}>
@@ -905,131 +1017,305 @@ export default function TabLayout() {
             </select>
           )}
           {watchMode ? (
-            <button id="stop-btn" onClick={stopWatch}>
-              Stop
+            <button
+              onClick={stopWatch}
+              className="flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-red-500/20 text-red-400 border border-red-500/30 rounded hover:bg-red-500/30 transition-colors"
+            >
+              <Square size={12} />
+              <span className="hidden sm:inline">Stop</span>
             </button>
           ) : (
             <>
-              <button id="run-btn" onClick={handleRun} disabled={bundling}>
-                {bundling ? "Bundling..." : "Run"}
+              <button
+                onClick={startWatch}
+                disabled={bundling}
+                className="flex items-center gap-1.5 h-7 px-3 text-xs font-medium bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Play size={12} />
+                <span className="hidden sm:inline">{bundling ? "Bundling..." : "Run & Watch"}</span>
               </button>
-              <button id="watch-btn" onClick={startWatch} disabled={bundling}>
-                Watch
+              <button
+                onClick={handleRun}
+                disabled={bundling}
+                className={`flex items-center gap-1.5 h-7 px-3 text-xs font-medium rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
+              >
+                <Hammer size={12} />
+                <span className="hidden sm:inline">Build</span>
               </button>
             </>
           )}
           {hasBundle && (
-            <button onClick={downloadBundle} title="Download bundle">
-              Download
+            <button
+              onClick={downloadBundle}
+              title="Download bundle"
+              className={`flex items-center h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
+            >
+              <Download size={12} />
             </button>
           )}
           {isExpoReal && watchMode && hmrReady && (
-            <>
-              <button onClick={addSettingsTab} style={{ backgroundColor: "#2196f3" }}>
-                1. Add Settings Tab
+            <div className="relative">
+              <button
+                onClick={() => setHmrMenuOpen(!hmrMenuOpen)}
+                className={`flex items-center gap-1.5 h-7 px-3 text-xs font-medium rounded transition-colors ${theme === "dark" ? "bg-purple-500/20 text-purple-400 border border-purple-500/30 hover:bg-purple-500/30" : "bg-purple-50 text-purple-600 border border-purple-200 hover:bg-purple-100"}`}
+              >
+                <FlaskConical size={12} />
+                <span className="hidden sm:inline">Test HMR</span>
+                <ChevronDown size={10} />
               </button>
-              <button onClick={updateTabLayout} style={{ backgroundColor: "#4caf50" }}>
-                2. Update Layout
-              </button>
-            </>
+              {hmrMenuOpen && (
+                <div className={`absolute right-0 top-full mt-1 w-48 rounded-md border shadow-lg z-50 py-1 ${theme === "dark" ? "bg-zinc-900 border-zinc-700" : "bg-white border-zinc-200"}`}>
+                  <button
+                    onClick={() => { addSettingsTab(); setHmrMenuOpen(false); }}
+                    className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs text-left transition-colors ${theme === "dark" ? "text-zinc-300 hover:bg-zinc-800" : "text-zinc-700 hover:bg-zinc-100"}`}
+                  >
+                    <Plus size={12} className="text-blue-400" />
+                    Add Settings Tab
+                  </button>
+                  <button
+                    onClick={() => { updateTabLayout(); setHmrMenuOpen(false); }}
+                    className={`flex items-center gap-2 w-full px-3 py-1.5 text-xs text-left transition-colors ${theme === "dark" ? "text-zinc-300 hover:bg-zinc-800" : "text-zinc-700 hover:bg-zinc-100"}`}
+                  >
+                    <RefreshCw size={12} className="text-emerald-400" />
+                    Update Layout
+                  </button>
+                </div>
+              )}
+            </div>
           )}
+          <button
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            className={`flex items-center h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {theme === "dark" ? <Sun size={12} /> : <Moon size={12} />}
+          </button>
         </div>
       </header>
 
-      <div className="mobile-tabs">
-        <button
-          className={"mobile-tab" + (mobileTab === "editor" ? " active" : "")}
-          onClick={() => setMobileTab("editor")}
-        >
-          Editor
-        </button>
-        <button
-          className={"mobile-tab" + (mobileTab === "preview" ? " active" : "")}
-          onClick={() => setMobileTab("preview")}
-        >
-          Preview
-        </button>
-        <button
-          className={"mobile-tab" + (mobileTab === "console" ? " active" : "")}
-          onClick={() => setMobileTab("console")}
-        >
-          Console
-          {consoleOutput.length > 0 && (
-            <span className="console-badge">{consoleOutput.length}</span>
-          )}
-        </button>
-      </div>
+      {/* Mobile tabs */}
+      {isMobile && <div className={`flex border-b ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+        {([
+          { id: "explorer" as const, label: "Files", icon: <FolderTree size={14} /> },
+          { id: "editor" as const, label: "Code", icon: <Code size={14} /> },
+          { id: "preview" as const, label: "Preview", icon: <Smartphone size={14} /> },
+        ]).map((tab) => (
+          <button
+            key={tab.id}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium border-b-2 transition-colors ${mobileTab === tab.id ? "text-blue-400 border-blue-400" : "text-zinc-500 border-transparent"}`}
+            onClick={() => setMobileTab(tab.id)}
+          >
+            {tab.icon}
+            {tab.label}
+          </button>
+        ))}
+      </div>}
 
-      <div className="main">
-        <div className={`editor-panel mobile-panel ${mobileTab === "editor" ? "mobile-active" : ""}`}>
-          <div className="file-tabs">
-            {fileList.map((name) => (
-              <button
-                key={name}
-                className={"file-tab" + (name === activeFile ? " active" : "")}
-                onClick={() => switchTab(name)}
-              >
-                {name}
-              </button>
-            ))}
+      {/* Mobile layout */}
+      {isMobile && <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Mobile: Explorer */}
+        {mobileTab === "explorer" && (
+          <div className={`flex-1 overflow-y-auto ${theme === "dark" ? "bg-zinc-900/50" : "bg-zinc-50"}`}>
+            <FileExplorer
+              files={fileList}
+              activeFile={activeFile}
+              onSelect={mobileSelectFile}
+              theme={theme}
+            />
           </div>
-          <textarea
-            ref={editorRef}
-            id="editor"
-            spellCheck={false}
-            value={editorValue}
-            onChange={(e) => handleEditorChange(e.target.value)}
-            onKeyDown={handleEditorKeyDown}
-          />
-        </div>
+        )}
+        {/* Mobile: Editor */}
+        {mobileTab === "editor" && (
+          <div className="flex-1 flex flex-col">
+            <div className={`px-3 py-1.5 text-[11px] text-zinc-500 border-b truncate ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+              {activeFile}
+            </div>
+            <Editor
+              theme={theme === "dark" ? "vs-dark" : "light"}
+              language={getMonacoLanguage(activeFile)}
+              value={editorValue}
+              onChange={(value) => handleEditorChange(value || "")}
+              onMount={(editor, monaco) => {
+                editorRef.current = editor;
+                monacoRef.current = monaco;
+                configureTypeScript(monaco);
+                const efs = editorFSRef.current;
+                if (efs) syncFilesToMonaco(monaco, efs.toFileMap());
+              }}
+              options={{
+                minimap: { enabled: false },
+                fontSize: 13,
+                lineHeight: 1.6,
+                tabSize: 2,
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                wordWrap: "on",
+                padding: { top: 8 },
+              }}
+            />
+          </div>
+        )}
+        {/* Mobile: Preview (single iframe + console) */}
+        {mobileTab === "preview" && (
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 flex min-h-0">
+              <PreviewFrame ref={frame1Ref} blobUrl={blobUrl} route="#/" />
+            </div>
+            <div className={`h-32 shrink-0 flex flex-col border-t ${theme === "dark" ? "border-zinc-800" : "border-zinc-200"}`}>
+              <div className={`flex items-center gap-2 px-3 py-1 text-[11px] text-zinc-500 border-b ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+                <Terminal size={12} />
+                Console
+              </div>
+              <div
+                ref={consoleRef}
+                className={`flex-1 overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed ${theme === "dark" ? "bg-zinc-950" : "bg-white"}`}
+              >
+                {consoleOutput.map((entry, i) => (
+                  <div key={i} className={
+                    entry.error ? "text-red-400 font-semibold" :
+                    entry.type === "warn" ? "text-yellow-400" :
+                    entry.type === "error" ? "text-red-400" :
+                    entry.type === "info" ? "text-blue-400" : "text-zinc-300"
+                  }>
+                    {entry.error ? entry.error.message : entry.text}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>}
 
-        <div className={`preview-panel mobile-panel ${mobileTab === "preview" ? "mobile-active" : ""}`}>
-          <div className="panel-label">
+      {/* Desktop layout: 3 columns - Explorer | Editor+Console | Preview */}
+      {!isMobile && <div className="flex-1 overflow-hidden flex">
+      <PanelGroup orientation="horizontal" className="flex-1">
+        {/* File explorer */}
+        <Panel defaultSize={20} maxSize={250} className={`overflow-y-auto ${theme === "dark" ? "bg-zinc-900/50" : "bg-zinc-50"}`}>
+          <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+            Explorer
+          </div>
+          <FileExplorer
+            files={fileList}
+            activeFile={activeFile}
+            onSelect={switchTab}
+            theme={theme}
+          />
+        </Panel>
+
+        <Separator className={`w-px hover:w-1 cursor-col-resize transition-colors ${theme === "dark" ? "bg-zinc-800 hover:bg-blue-500 active:bg-blue-500" : "bg-zinc-200 hover:bg-blue-400 active:bg-blue-400"}`} />
+
+        {/* Code editor + Console (vertical split) */}
+        <Panel defaultSize={40}>
+          <PanelGroup orientation="vertical">
+            <Panel defaultSize={70} className="flex flex-col">
+              <div className={`px-3 py-1.5 text-[11px] text-zinc-500 border-b truncate ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+                {activeFile}
+              </div>
+              <Editor
+                theme={theme === "dark" ? "vs-dark" : "light"}
+                language={getMonacoLanguage(activeFile)}
+                value={editorValue}
+                onChange={(value) => handleEditorChange(value || "")}
+                onMount={(editor, monaco) => {
+                  editorRef.current = editor;
+                  monacoRef.current = monaco;
+                  configureTypeScript(monaco);
+                  const efs = editorFSRef.current;
+                  if (efs) syncFilesToMonaco(monaco, efs.toFileMap());
+                }}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  lineHeight: 1.6,
+                  tabSize: 2,
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  wordWrap: "on",
+                  padding: { top: 8 },
+                }}
+              />
+            </Panel>
+
+            <Separator className={`h-px hover:h-1 cursor-row-resize transition-colors ${theme === "dark" ? "bg-zinc-800 hover:bg-blue-500 active:bg-blue-500" : "bg-zinc-200 hover:bg-blue-400 active:bg-blue-400"}`} />
+
+            {/* Console */}
+            <Panel defaultSize={30} className="flex flex-col">
+              <div className={`flex items-center gap-2 px-3 py-1.5 text-[11px] text-zinc-500 border-b ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+                <Terminal size={12} />
+                Console
+              </div>
+              <div
+                ref={consoleRef}
+                className={`flex-1 overflow-y-auto px-3 py-2 font-mono text-xs leading-relaxed ${theme === "dark" ? "bg-zinc-950" : "bg-white"}`}
+              >
+                {consoleOutput.map((entry, i) =>
+                  entry.error ? (
+                    <div key={i} className="border-l-2 border-red-400 pl-2 py-0.5 my-0.5 bg-red-500/5">
+                      <div className="text-red-400 font-semibold">{entry.error.message}</div>
+                      {entry.error.file && entry.error.line != null && (
+                        <div className="text-orange-400 text-[11px] mt-0.5">
+                          {entry.error.file}:{entry.error.line}
+                          {entry.error.column != null ? ":" + entry.error.column : ""}
+                        </div>
+                      )}
+                      {entry.error.stack.length > 0 && (
+                        <div className="mt-1">
+                          {entry.error.stack.map((frame, j) => (
+                            <div key={j} className="text-zinc-600 text-[11px] pl-3">
+                              at {frame.fn} ({frame.file}:{frame.line}:{frame.column})
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div
+                      key={i}
+                      className={
+                        entry.type === "warn"
+                          ? "text-yellow-400"
+                          : entry.type === "error"
+                            ? "text-red-400"
+                            : entry.type === "info"
+                              ? "text-blue-400"
+                              : "text-zinc-300"
+                      }
+                    >
+                      {entry.text}
+                    </div>
+                  ),
+                )}
+              </div>
+            </Panel>
+          </PanelGroup>
+        </Panel>
+
+        <Separator className={`w-px hover:w-1 cursor-col-resize transition-colors ${theme === "dark" ? "bg-zinc-800 hover:bg-blue-500 active:bg-blue-500" : "bg-zinc-200 hover:bg-blue-400 active:bg-blue-400"}`} />
+
+        {/* Preview */}
+        <Panel defaultSize={40} className="flex flex-col">
+          <div className={`flex items-center gap-2 px-3 py-1.5 text-[11px] text-zinc-500 border-b ${theme === "dark" ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"}`}>
+            <Monitor size={12} />
             Preview
             {watchMode && hmrReady && (
-              <span style={{ marginLeft: 8, fontSize: "0.8em", color: "#4caf50" }}>
-                HMR active
-              </span>
+              <span className="ml-1 text-emerald-400">HMR active</span>
             )}
+            <div className="flex-1" />
+            <button
+              onClick={() => setDualPreview(!dualPreview)}
+              title={dualPreview ? "Single preview" : "Dual preview (test multiple routes)"}
+              className={`p-0.5 rounded transition-colors ${dualPreview ? "text-blue-400" : "text-zinc-600 hover:text-zinc-400"}`}
+            >
+              <Settings size={12} />
+            </button>
           </div>
-          <div className="preview-frames">
+          <div className={`flex-1 flex min-h-0 ${dualPreview ? `gap-px ${theme === "dark" ? "bg-zinc-800" : "bg-zinc-200"}` : ""}`}>
             <PreviewFrame ref={frame1Ref} blobUrl={blobUrl} route="#/" />
-            <PreviewFrame ref={frame2Ref} blobUrl={blobUrl} route="#/explore" />
+            {dualPreview && <PreviewFrame ref={frame2Ref} blobUrl={blobUrl} route="#/explore" />}
           </div>
-        </div>
-
-        <div className={`console-panel mobile-panel ${mobileTab === "console" ? "mobile-active" : ""}`}>
-          <div className="panel-label">Console</div>
-          <div id="console-output" ref={consoleRef}>
-            {consoleOutput.map((entry, i) =>
-              entry.error ? (
-                <div key={i} className="error-entry">
-                  <div className="error-message">{entry.error.message}</div>
-                  {entry.error.file && entry.error.line != null && (
-                    <div className="error-location">
-                      {entry.error.file}:{entry.error.line}
-                      {entry.error.column != null ? ":" + entry.error.column : ""}
-                    </div>
-                  )}
-                  {entry.error.stack.length > 0 && (
-                    <div className="error-stack">
-                      {entry.error.stack.map((frame, j) => (
-                        <div key={j} className="stack-frame">
-                          at {frame.fn} ({frame.file}:{frame.line}:{frame.column})
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div key={i} className={"log-" + entry.type}>
-                  {entry.text}
-                </div>
-              ),
-            )}
-          </div>
-        </div>
-      </div>
-    </>
+        </Panel>
+      </PanelGroup>
+      </div>}
+    </div>
   );
 }

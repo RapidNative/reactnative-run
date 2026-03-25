@@ -1,0 +1,84 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Module Resolution
+
+The `Resolver` implements Node.js-style module resolution against the VirtualFS. It determines what file each `import` or `require()` refers to.
+
+## Resolution algorithm
+
+When resolving `require("target")` from a file at `/src/app.tsx`:
+
+### 1. Relative imports
+
+If the target starts with `./` or `../`, it's resolved relative to the importing file's directory:
+
+```text
+require("./utils")  →  resolves from /src/
+require("../lib")   →  resolves from /
+```
+
+### 2. Extension resolution
+
+The resolver tries each extension in the configured `sourceExts` array:
+
+```text
+/src/utils       →  not found
+/src/utils.ts    →  found! ✓
+```
+
+Default source extensions: `["ts", "tsx", "js", "jsx"]`
+
+### 3. Index files
+
+If the path resolves to a directory, the resolver tries index files:
+
+```text
+/src/components     →  not found
+/src/components/index.ts  →  found! ✓
+```
+
+### 4. npm packages
+
+Anything not starting with `.` or `/` is treated as an npm package:
+
+```text
+require("react")           →  npm package "react"
+require("lodash/chunk")    →  npm package "lodash", subpath "/chunk"
+require("@expo/vector-icons")  →  scoped npm package
+```
+
+npm packages are fetched from the ESM package server rather than resolved against the VirtualFS.
+
+## Configuration
+
+```typescript
+const config: BundlerConfig = {
+  resolver: {
+    sourceExts: ["ts", "tsx", "js", "jsx"],
+    paths: {
+      "@/*": ["./*"],  // TypeScript path aliases
+    },
+  },
+  // ...
+};
+```
+
+The `sourceExts` config makes extension resolution dynamic. Adding `"svelte"` to sourceExts would make the resolver find `.svelte` files without any other changes.
+
+## Plugin resolution hooks
+
+Plugins can customize resolution via the `resolveRequest` hook:
+
+```typescript
+const myPlugin: BundlerPlugin = {
+  name: "my-plugin",
+  resolveRequest(context, moduleName) {
+    if (moduleName === "react-native") {
+      return "react-native-web";  // redirect
+    }
+    return null;  // fall through to default resolution
+  },
+};
+```
+
+<MobileDocsNav />

@@ -1,0 +1,65 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+import Image from "next/image";
+
+# Introduction
+
+**reactnative.run** is an open-source, browser-based development environment for React Native apps. Write, bundle, and preview React Native (web) apps entirely in the browser - no installs required.
+
+The project consists of three components that work together:
+
+## browser-metro
+
+The core bundler library. It mirrors [Metro](https://metrobundler.dev/) (React Native's official bundler) in a simplified form, running entirely client-side in a Web Worker.
+
+- **VirtualFS** - in-memory filesystem that holds all source files
+- **Resolver** - Node.js-style module resolution with configurable extensions
+- **Transformer** - pluggable pipeline using Sucrase for fast TS/JSX compilation
+- **Plugin system** - hooks for pre/post transform, custom resolution, module aliases, and shims
+- **HMR runtime** - hot module replacement with React Refresh for instant updates
+- **Source maps** - accurate error reporting with original file names and line numbers
+- **Expo Router** - file-based routing with dynamic route addition via HMR
+- **API Routes** - in-browser `+api.ts` files via fetch interception
+
+Install it as a library:
+
+```bash
+npm install browser-metro
+```
+
+## reactnative.run playground
+
+The interactive web app at [reactnative.run/playground](/playground). It wraps browser-metro with:
+
+- **Monaco Editor** with TypeScript support and syntax highlighting
+- **File explorer** with tree view and file type icons
+- **Live preview** in a sandboxed iframe
+- **Console** with color-coded output and source-mapped error traces
+- **Watch mode** with HMR that auto-starts on page load
+- **Dark/light theme** toggle
+
+The playground comes pre-loaded with an Expo Router project, but you can switch between multiple example templates.
+
+## reactnative-esm
+
+An Express server that bundles npm packages on-demand for browser consumption. Hosted at `esm.reactnative.run` in production.
+
+- Follows an unpkg-style URL scheme: `GET /pkg/lodash@4.17.21`
+- Installs packages in a temp directory and bundles with esbuild
+- Externalizes all dependencies for shared runtime instances
+- Returns version pinning info via `X-Externals` headers
+- Caches to disk for instant subsequent requests
+- Special handling for React Native / Expo packages
+
+Any npm package works without configuration. The first request has a cold-start delay, but subsequent requests are instant.
+
+## Architecture
+
+<Image src="/architecture.svg" alt="Architecture diagram" width={800} height={420} className="rounded-xl border border-zinc-800/50 my-6" />
+
+## Disclaimer
+
+This project is **not affiliated with, endorsed by, or associated with Meta, Facebook, or the React Native team**. The domain name "reactnative.run" is simply a descriptive name for this open-source tool. React Native is a trademark of Meta Platforms, Inc.
+
+reactnative.run is built and maintained by [RapidNative](https://rapidnative.com).
+
+<MobileDocsNav />

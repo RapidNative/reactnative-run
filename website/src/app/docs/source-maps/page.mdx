@@ -1,0 +1,50 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Source Maps
+
+browser-metro generates source maps so that browser dev tools and the UI console show original file names and line numbers, not bundle positions.
+
+## Per-module source maps
+
+Sucrase generates a `RawSourceMap` for each file it transforms. This maps generated-line/column to original-line/column in the source file. The source map is stored alongside the transformed code.
+
+## Combined source map
+
+At emit time, all per-module source maps are merged into a single **combined source map** using `buildCombinedSourceMap()`. Each module's mappings are offset by its position in the final bundle (accounting for the preamble, runtime, wrapper function lines, and separators between modules).
+
+The combined source map is appended to the bundle as an inline base64 data URL:
+
+```text
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLC...
+```
+
+## Iframe source map resolution
+
+The browser console resolves source maps automatically for console output, but `window.onerror` receives raw bundle line numbers. Rather than depending on a library like `source-map`, the iframe HTML embeds a lightweight ES5 VLQ decoder (~80 lines) that resolves error positions at runtime.
+
+The iframe exposes a `window.__SM` API:
+
+- **`__SM.init(url, mapData)`** - registers the initial bundle's source map
+- **`__SM.add(url, mapData)`** - registers per-module source maps from HMR updates
+- **`__SM.resolve(url, line, col)`** - resolves a position to original file/line/column
+
+## Rich error display
+
+When a runtime error occurs:
+
+1. The iframe's error handler resolves it through the source map
+2. Each stack frame is resolved to original positions
+3. A structured `runtime-error` message is sent to the parent
+4. The parent renders: error message (red), file:line:column (orange), resolved stack trace (dimmed)
+
+## Source map utilities
+
+| Function | Purpose |
+|---|---|
+| `encodeVLQ` / `decodeVLQ` | Base64 VLQ encoding/decoding |
+| `decodeMappings` / `encodeMappings` | Convert between mappings string and decoded segments |
+| `buildCombinedSourceMap` | Merge per-module maps with line offsets |
+| `inlineSourceMap` | Serialize as inline base64 data URL |
+| `shiftSourceMapOrigLines` | Shift original-line references (for plugin adjustments) |
+
+<MobileDocsNav />

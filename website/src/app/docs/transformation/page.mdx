@@ -1,0 +1,100 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Transformation
+
+browser-metro uses a pluggable transformer pipeline to convert source files into browser-executable JavaScript. Every file passes through a `Transformer` before being added to the bundle.
+
+## Pipeline
+
+The transformation has three stages:
+
+1. **Pre-transform** (plugin hooks) - operates on raw source with JSX intact
+2. **Core transform** (Sucrase) - strips types, converts JSX, converts imports to CommonJS
+3. **Post-transform** (plugin hooks) - operates on CommonJS output
+
+## Built-in transformers
+
+### typescriptTransformer
+
+The default transformer uses [Sucrase](https://github.com/alangpierce/sucrase) for fast TypeScript and JSX compilation:
+
+| Extension | Transforms applied |
+|---|---|
+| `.ts` | `typescript`, `imports` |
+| `.tsx` | `typescript`, `jsx`, `imports` |
+| `.jsx` | `jsx`, `imports` |
+| `.js` | `imports` |
+
+The `imports` transform converts ES module syntax (`import`/`export`) to CommonJS (`require`/`module.exports`).
+
+### reactRefreshTransformer
+
+Extends `typescriptTransformer` with React Refresh support for HMR. For each `.tsx`/`.jsx` file, it:
+
+1. Applies the same transforms as `typescriptTransformer`
+2. Wraps each component with `$RefreshReg$` / `$RefreshSig$` calls
+3. Appends a `module.hot.accept()` postamble so the module is an HMR accept boundary
+
+## Writing a custom transformer
+
+The `Transformer` interface:
+
+```typescript
+interface Transformer {
+  transform(params: TransformParams): TransformResult;
+}
+
+interface TransformParams {
+  src: string;       // source code
+  filename: string;  // e.g. "/App.tsx"
+}
+
+interface TransformResult {
+  code: string;           // transformed JavaScript
+  sourceMap?: RawSourceMap; // optional source map
+}
+```
+
+### Example: Babel-based transformer
+
+```typescript
+import { transform } from "@babel/standalone";
+
+const babelTransformer: Transformer = {
+  transform({ src, filename }) {
+    const presets = ["env"];
+    if (filename.endsWith(".tsx") || filename.endsWith(".ts")) {
+      presets.push("typescript");
+    }
+    if (filename.endsWith(".tsx") || filename.endsWith(".jsx")) {
+      presets.push("react");
+    }
+    const result = transform(src, { filename, presets, sourceType: "module" });
+    return { code: result.code };
+  }
+};
+```
+
+### Extension-specific routing
+
+```typescript
+const routingTransformer: Transformer = {
+  transform({ src, filename }) {
+    const ext = filename.slice(filename.lastIndexOf("."));
+    switch (ext) {
+      case ".svelte": return svelteTransformer.transform({ src, filename });
+      case ".vue": return vueTransformer.transform({ src, filename });
+      default: return typescriptTransformer.transform({ src, filename });
+    }
+  }
+};
+```
+
+## Source map adjustments
+
+When plugins add or remove lines, source maps are automatically adjusted:
+
+- **Pre-transform plugins** that inject lines: `shiftSourceMapOrigLines()` shifts original-line references back
+- **Post-transform plugins** that prepend lines: empty mapping lines (`;`) are prepended to skip over added output lines
+
+<MobileDocsNav />
