@@ -18,7 +18,7 @@ echo "Building browser-metro library..."
 npm run build --prefix "$REPO_ROOT/browser-metro"
 
 echo "Installing playground dependencies..."
-npm install --prefix "$EXAMPLE_DIR"
+cd "$EXAMPLE_DIR" && npm install --include=dev
 
 echo "Building playground (ESM server: $VITE_PACKAGE_SERVER_URL)..."
 cd "$EXAMPLE_DIR" && npx tsx scripts/build-projects.ts && npx vite build --base /playground/
