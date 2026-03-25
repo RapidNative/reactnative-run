@@ -152,6 +152,14 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				pkgName.startsWith("@expo/") ||
 				pkgName.includes("react-native") ||
 				keywords.some((k: string) => k === "react-native" || k === "expo");
+
+			// For RN/Expo packages: don't externalize @react-native/* utility
+			// packages (e.g. @react-native/normalize-colors) that are installed
+			// as direct deps - they should be inlined since they're small utils.
+			// They'll only be externalized by the plugin if not locally resolvable.
+			if (isReactNative) {
+				externals = externals.filter(dep => !dep.startsWith("@react-native/"));
+			}
 		}
 
 		if (isReactNative) {
@@ -241,10 +249,17 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 						pkg = args.path.split("/")[0];
 					}
 
-					// For RN/Expo builds, always externalize platform scoped packages
-					// even if not in the dependency list (they're implicit runtime deps)
-					if (isReactNative && (pkg.startsWith("@react-native/") || pkg.startsWith("@expo/"))) {
-						return { path: args.path, external: true };
+					// For RN/Expo builds, externalize @react-native/* and @expo/*
+					// scoped packages that can't be resolved locally. If they're
+					// installed (e.g. @react-native/normalize-colors as a dep of
+					// react-native-web), let esbuild inline them.
+					if (isReactNative && !externalSet.has(pkg) && (pkg.startsWith("@react-native/") || pkg.startsWith("@expo/"))) {
+						try {
+							require.resolve(args.path, { paths: [args.resolveDir] });
+							return null; // resolvable locally - inline it
+						} catch {
+							return { path: args.path, external: true }; // not installed - externalize
+						}
 					}
 
 					if (!externalSet.has(pkg)) return null;
