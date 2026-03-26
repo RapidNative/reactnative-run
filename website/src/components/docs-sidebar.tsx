@@ -53,6 +53,7 @@ const sections: DocSection[] = [
     title: "Infrastructure",
     items: [
       { title: "ESM Package Server", href: "/docs/esm-server" },
+      { title: "Batch Fetching", href: "/docs/batch-fetching" },
     ],
   },
 ];

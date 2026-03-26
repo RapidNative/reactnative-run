@@ -1,0 +1,153 @@
+import { MobileDocsNav } from "@/components/docs-sidebar";
+
+# Batch Dependency Fetching
+
+By default, browser-metro fetches npm packages one at a time, discovering transitive dependencies in a waterfall pattern. A typical Expo project can make 60+ individual requests. The batch fetching system reduces this to a single request.
+
+## How it works
+
+```text
+Client                          CDN (Cloudflare)            ESM Server
+  │                                  │                          │
+  ├─ SHA-256 hash of deps ──────────►│                          │
+  │  GET /bundle-deps/:hash          │                          │
+  │                                  ├─ cache hit? ────► return │
+  │                                  ├─ cache miss ────────────►│ 404
+  │                                  │                          │
+  ├─ POST /bundle-deps ────────────────────────────────────────►│
+  │  { hash, dependencies }          │                     npm install all
+  │                                  │                     bundle each pkg
+  │◄───────────────────────────── single JS response ───────────┤
+  │                                  │                          │
+  │  (next request, same deps)       │                          │
+  ├─ GET /bundle-deps/:hash ────────►│                          │
+  │◄──── instant from CDN ───────────┤                          │
+```
+
+1. Client hashes the sorted `package.json` dependencies with SHA-256
+2. **GET `/bundle-deps/:hash`** - CDN-cacheable lookup. If cached, returns instantly
+3. **Cache miss** - client sends **POST `/bundle-deps`** with the full dependency list
+4. Server installs all deps in a single `npm install`, bundles each with esbuild, returns a concatenated response
+5. Response is cached by hash for subsequent users
+
+## Performance
+
+| Scenario | Requests | Cache |
+|---|---|---|
+| First user with these deps | 2 (GET miss + POST) | Server builds and caches |
+| Subsequent users, same deps | 1 (GET hit) | CDN serves instantly |
+| Old approach (no batch) | 60+ individual GETs | Each cached separately |
+
+## Response format
+
+The batch response uses `// @dep-start` and `// @dep-end` markers to delimit individual package code:
+
+```text
+// @dep-bundle a1b2c3d4e5f67890
+// @dep-manifest {"react":"19.1.0","expo-router":"6.0.12",...}
+// @dep-count 18
+// @dep-start react
+var __module = (() => { /* esbuild IIFE bundle */ })();
+if (typeof __module !== "undefined") { module.exports = __module; }
+// @dep-end react
+// @dep-start react-dom
+...
+// @dep-end react-dom
+// @dep-start react-dom/client
+...
+// @dep-end react-dom/client
+```
+
+Each package entry is the same format as individual `/pkg/` responses - an esbuild IIFE bundle wrapped with `module.exports`.
+
+## Hash computation
+
+The hash is computed identically on client and server:
+
+1. Sort dependency names alphabetically
+2. Join as `name@version` pairs: `expo-router@~6.0.12,react@19.1.0,...`
+3. Prepend server version: `v2:expo-router@~6.0.12,react@19.1.0,...`
+4. SHA-256, truncated to 16 hex characters
+
+The version prefix (`v2`) is bumped when bundling logic changes, invalidating all cached bundles.
+
+## What gets bundled
+
+Only **direct dependencies** from `package.json` are bundled as separate entries. Transitive dependencies (like `@babel/runtime`, `inline-style-prefixer`, `memoize-one`) are inlined into their parent packages. This avoids CJS/ESM interop issues with small utility packages.
+
+**Excluded from the batch:**
+- Packages with module aliases (e.g. `react-native` is aliased to `react-native-web` client-side)
+- Shimmed packages (e.g. `nativewind`, `react-native-css-interop`)
+
+**Known subpath entries** are automatically included:
+- `react-dom/client`, `react-dom/server`
+- `react/jsx-runtime`, `react/jsx-dev-runtime`
+
+Additional subpaths are discovered by scanning the bundled output for `require("pkg/subpath")` patterns.
+
+## Server endpoints
+
+### GET `/bundle-deps/:hash`
+
+Returns the cached bundle if it exists. Served with `Cache-Control: public, max-age=31536000, immutable` for CDN caching.
+
+Returns 404 if not cached.
+
+### POST `/bundle-deps`
+
+**Request body:**
+
+```json
+{
+  "hash": "a1b2c3d4e5f67890",
+  "dependencies": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "expo-router": "~6.0.12",
+    "expo": "~54.0.33"
+  }
+}
+```
+
+**Server process:**
+
+1. Check cache by hash - return if exists
+2. `npm install` all dependencies in a single temp directory
+3. Discover the full dependency tree by walking `node_modules`
+4. Filter to direct deps only (transitive deps are inlined)
+5. Add known subpath entry points
+6. Bundle each package with esbuild (IIFE format, externalize other batch packages)
+7. Scan output for subpath requires, bundle those too
+8. Concatenate with `@dep-start`/`@dep-end` markers
+9. Cache and return
+
+## Client integration
+
+browser-metro calls `prefetchDependencies()` before walking the dependency graph:
+
+```typescript
+import { Bundler, VirtualFS, typescriptTransformer } from "browser-metro";
+
+const bundler = new Bundler(vfs, {
+  resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+  transformer: typescriptTransformer,
+  server: { packageServerUrl: "https://esm.reactnative.run" },
+});
+
+// bundle() automatically calls prefetchDependencies() internally
+const code = await bundler.bundle("/index.tsx");
+```
+
+The prefetch is transparent - no API changes needed. If the batch request fails, the bundler falls back to individual `/pkg/` fetches.
+
+## Cache invalidation
+
+To invalidate all batch caches on the server:
+
+```bash
+rm -f reactnative-esm/cache/bundle-deps-*
+```
+
+To invalidate via code change, bump `SERVER_VERSION` in `reactnative-esm/src/index.ts` and `DEPS_HASH_VERSION` in `browser-metro/src/utils.ts` (they must match).
+
+<MobileDocsNav />
