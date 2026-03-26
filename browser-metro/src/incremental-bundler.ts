@@ -200,7 +200,14 @@ export class IncrementalBundler {
   private async prefetchDependencies(): Promise<void> {
     if (Object.keys(this.prefetchedPackages).length > 0) return; // already prefetched
 
-    const versions = this.packageVersions;
+    const versions = { ...this.packageVersions };
+    if (Object.keys(versions).length === 0) return;
+
+    // Remove aliased and shimmed packages - they're handled client-side
+    const aliases = this.getModuleAliases();
+    const shims = this.getShimModules();
+    for (const name of Object.keys(aliases)) delete versions[name];
+    for (const name of Object.keys(shims)) delete versions[name];
     if (Object.keys(versions).length === 0) return;
 
     const hash = await hashDeps(versions);

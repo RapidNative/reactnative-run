@@ -30,6 +30,14 @@ export class Bundler {
     const versions = this.getPackageVersions();
     if (Object.keys(versions).length === 0) return;
 
+    // Remove aliased and shimmed packages - they're handled client-side
+    const aliases = this.getModuleAliases();
+    const shims = this.getShimModules();
+    for (const name of Object.keys(aliases)) delete versions[name];
+    for (const name of Object.keys(shims)) delete versions[name];
+    // Also remove alias targets that are already in versions (e.g. react-native-web is fetched via alias)
+    if (Object.keys(versions).length === 0) return;
+
     const hash = await hashDeps(versions);
     const baseUrl = this.config.server.packageServerUrl;
 
