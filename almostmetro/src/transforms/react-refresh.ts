@@ -56,8 +56,12 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
         return result;
       }
 
+      // Check if module uses createContext (needs HMR identity preservation)
+      const usesCreateContext =
+        params.src.includes('createContext') || result.code.includes('createContext');
+
       // Preamble: set up refresh hooks scoped to this module
-      const preamble =
+      let preamble =
         'var _prevRefreshReg = window.$RefreshReg$;\n' +
         'var _prevRefreshSig = window.$RefreshSig$;\n' +
         'var _refreshModuleId = ' + JSON.stringify(params.filename) + ';\n' +
@@ -73,12 +77,38 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
         '  return function(type) { return type; };\n' +
         '};\n';
 
+      // Context identity preservation: patch React.createContext so re-executions
+      // return the same context object, preventing useContext identity mismatches
+      if (usesCreateContext) {
+        preamble +=
+          'var _hmrCtxIdx = 0;\n' +
+          'var _hmrOrigCC;\n' +
+          'try {\n' +
+          '  var _hmrReact = require("react");\n' +
+          '  _hmrOrigCC = _hmrReact.createContext;\n' +
+          '  if (!window.__HMR_CONTEXTS__) window.__HMR_CONTEXTS__ = {};\n' +
+          '  _hmrReact.createContext = function(defaultValue) {\n' +
+          '    var key = _refreshModuleId + ":ctx:" + (_hmrCtxIdx++);\n' +
+          '    if (window.__HMR_CONTEXTS__[key]) return window.__HMR_CONTEXTS__[key];\n' +
+          '    var ctx = _hmrOrigCC(defaultValue);\n' +
+          '    window.__HMR_CONTEXTS__[key] = ctx;\n' +
+          '    return ctx;\n' +
+          '  };\n' +
+          '} catch(_e) {}\n';
+      }
+
       // Postamble: register each component and accept HMR
       let postamble = '\n';
       for (const name of components) {
         postamble +=
           'if (typeof ' + name + ' === "function") {\n' +
           '  $RefreshReg$(' + name + ', ' + JSON.stringify(name) + ');\n' +
+          '}\n';
+      }
+      if (usesCreateContext) {
+        postamble +=
+          'if (_hmrOrigCC) {\n' +
+          '  try { require("react").createContext = _hmrOrigCC; } catch(_e) {}\n' +
           '}\n';
       }
       postamble +=
