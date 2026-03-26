@@ -12,6 +12,10 @@ export default defineConfig({
         target: "http://localhost:5200",
         changeOrigin: true,
       },
+      "/bundle-deps": {
+        target: "http://localhost:5200",
+        changeOrigin: true,
+      },
     },
   },
 });
