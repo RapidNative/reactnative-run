@@ -450,21 +450,21 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			discoverPackages(name, visited);
 		}
 
-		// Remove packages that get inlined into their consumers
-		const inlinePackages = [
-			"@babel/runtime", "tslib", "@swc/helpers", "regenerator-runtime",
-			"inline-style-prefixer", "fbjs", "styleq", "postcss-value-parser",
-			"nullthrows", "memoize-one", "invariant", "hoist-non-react-statics", "object-assign",
-		];
-		for (const skip of inlinePackages) {
-			allPackages.delete(skip);
+		// Only bundle the user's direct dependencies as separate entries.
+		// Transitive deps get inlined into their consumers. This avoids
+		// CJS/ESM interop issues with small utility packages.
+		const directDeps = new Set(Object.keys(dependencies));
+		for (const name of allPackages.keys()) {
+			if (!directDeps.has(name)) {
+				allPackages.delete(name);
+			}
 		}
 
-		console.log(`[bundle-deps] Discovered ${allPackages.size} packages, bundling...`);
+		console.log(`[bundle-deps] Bundling ${allPackages.size} direct deps (transitive inlined)...`);
 
-		// Set of all package names in the batch (used for externalization)
+		// Only externalize other direct deps (they're separate entries in the batch)
+		// Plus known platform modules
 		const batchSet = new Set(allPackages.keys());
-		// Also externalize implicit platform modules
 		for (const implicit of ["react-native", "react", "react-dom", "expo", "expo-modules-core"]) {
 			batchSet.add(implicit);
 		}
@@ -501,26 +501,8 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 							// Don't externalize from self
 							if (dep === pkgName) return null;
 
-							// Always inline runtime helpers, small utility packages, and
-							// internal CJS modules that don't work well as standalone IIFE bundles
-							const alwaysInline = new Set([
-								"@babel/runtime",
-								"tslib",
-								"@swc/helpers",
-								"regenerator-runtime",
-								"inline-style-prefixer",
-								"fbjs",
-								"styleq",
-								"postcss-value-parser",
-								"nullthrows",
-								"memoize-one",
-								"invariant",
-								"hoist-non-react-statics",
-								"object-assign",
-							]);
-							if (alwaysInline.has(dep)) return null;
-
-							// Externalize if it's another package in the batch
+							// Only externalize other direct deps in the batch.
+							// Transitive deps are inlined into their consumers.
 							if (batchSet.has(dep)) {
 								return { path: args.path, external: true };
 							}
