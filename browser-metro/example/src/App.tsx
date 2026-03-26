@@ -722,9 +722,20 @@ export function App() {
   function handleCreateFile(path: string, content: string) {
     const efs = editorFSRef.current;
     if (!efs) return;
-    efs.write(path, content);
+
+    // Provide a default template for route files so Expo Router
+    // doesn't encounter undefined exports before the user types content
+    let fileContent = content;
+    if (!fileContent && path.startsWith("/app/") && /\.(tsx|jsx)$/.test(path)) {
+      const name = path.split("/").pop()?.replace(/\.\w+$/, "") || "Screen";
+      const componentName = name.charAt(0).toUpperCase() + name.slice(1).replace(/[^a-zA-Z0-9]/g, "") + "Screen";
+      fileContent = `import { View, Text, StyleSheet } from 'react-native';\n\nexport default function ${componentName}() {\n  return (\n    <View style={styles.container}>\n      <Text>${name}</Text>\n    </View>\n  );\n}\n\nconst styles = StyleSheet.create({\n  container: {\n    flex: 1,\n    alignItems: 'center',\n    justifyContent: 'center',\n  },\n});\n`;
+    }
+
+    efs.write(path, fileContent);
     setFileList(efs.list());
     switchTab(path);
+    setEditorValue(fileContent);
   }
 
   function handleDeleteFile(path: string) {
