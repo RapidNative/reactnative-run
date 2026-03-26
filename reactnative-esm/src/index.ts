@@ -460,7 +460,28 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			}
 		}
 
-		console.log(`[bundle-deps] Bundling ${allPackages.size} direct deps (transitive inlined)...`);
+		// Add known subpath entry points for direct deps that are commonly imported
+		const knownSubpaths: Record<string, string[]> = {
+			"react-dom": ["react-dom/client", "react-dom/server"],
+			"react": ["react/jsx-runtime", "react/jsx-dev-runtime"],
+		};
+		for (const [pkg, subpaths] of Object.entries(knownSubpaths)) {
+			if (directDeps.has(pkg)) {
+				for (const sub of subpaths) {
+					const subPkgPath = path.join(nodeModules, ...sub.split("/"));
+					// Check if the subpath actually exists
+					try {
+						require.resolve(sub, { paths: [tmpDir] });
+						allPackages.set(sub, { version: allPackages.get(pkg)?.version || "unknown", isRN: false });
+					} catch {}
+				}
+			}
+		}
+
+		// Also scan all bundled code for subpath requires of direct deps and add them
+		// This is done AFTER initial bundling in the subpath scanning section below
+
+		console.log(`[bundle-deps] Bundling ${allPackages.size} entries (direct deps + subpaths)...`);
 
 		// Only externalize other direct deps (they're separate entries in the batch)
 		// Plus known platform modules
