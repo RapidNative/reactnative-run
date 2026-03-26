@@ -450,8 +450,13 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			discoverPackages(name, visited);
 		}
 
-		// Remove runtime helpers from the package list - they get inlined
-		for (const skip of ["@babel/runtime", "tslib", "@swc/helpers", "regenerator-runtime"]) {
+		// Remove packages that get inlined into their consumers
+		const inlinePackages = [
+			"@babel/runtime", "tslib", "@swc/helpers", "regenerator-runtime",
+			"inline-style-prefixer", "fbjs", "styleq", "postcss-value-parser",
+			"nullthrows", "memoize-one", "invariant", "hoist-non-react-statics", "object-assign",
+		];
+		for (const skip of inlinePackages) {
 			allPackages.delete(skip);
 		}
 
@@ -496,13 +501,22 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 							// Don't externalize from self
 							if (dep === pkgName) return null;
 
-							// Always inline runtime helpers and small utility packages
-							// They're used by many packages and should be bundled in
+							// Always inline runtime helpers, small utility packages, and
+							// internal CJS modules that don't work well as standalone IIFE bundles
 							const alwaysInline = new Set([
 								"@babel/runtime",
 								"tslib",
 								"@swc/helpers",
 								"regenerator-runtime",
+								"inline-style-prefixer",
+								"fbjs",
+								"styleq",
+								"postcss-value-parser",
+								"nullthrows",
+								"memoize-one",
+								"invariant",
+								"hoist-non-react-statics",
+								"object-assign",
 							]);
 							if (alwaysInline.has(dep)) return null;
 
