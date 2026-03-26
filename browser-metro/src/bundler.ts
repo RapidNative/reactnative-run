@@ -214,7 +214,7 @@ export class Bundler {
       }
 
       const source = this.fs.read(filePath);
-      if (!source) {
+      if (source === undefined) {
         throw new Error("File not found: " + filePath);
       }
 

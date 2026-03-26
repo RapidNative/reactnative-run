@@ -11,14 +11,17 @@ import {
   FilePlus,
   FolderPlus,
   Trash2,
-  X,
-  Check,
 } from "lucide-react";
 
 interface FileTreeNode {
   name: string;
   path: string;
   children?: FileTreeNode[];
+}
+
+interface CreatingState {
+  parentPath: string;
+  type: "file" | "folder";
 }
 
 function buildTree(files: string[]): FileTreeNode[] {
@@ -139,6 +142,9 @@ function TreeNode({
   onCreateFile,
   onCreateFolder,
   onDelete,
+  creating,
+  onConfirmCreate,
+  onCancelCreate,
   theme,
 }: {
   node: FileTreeNode;
@@ -148,12 +154,16 @@ function TreeNode({
   onCreateFile: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
   onDelete: (path: string) => void;
+  creating: CreatingState | null;
+  onConfirmCreate: (name: string) => void;
+  onCancelCreate: () => void;
   theme: "dark" | "light";
 }) {
   const [expanded, setExpanded] = useState(true);
   const [hovered, setHovered] = useState(false);
   const isFolder = !!node.children;
   const isActive = node.path === activeFile;
+  const isCreatingHere = creating?.parentPath === node.path;
 
   if (isFolder) {
     return (
@@ -219,20 +229,35 @@ function TreeNode({
             </div>
           )}
         </div>
-        {expanded &&
-          node.children!.map((child) => (
-            <TreeNode
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              activeFile={activeFile}
-              onSelect={onSelect}
-              onCreateFile={onCreateFile}
-              onCreateFolder={onCreateFolder}
-              onDelete={onDelete}
-              theme={theme}
-            />
-          ))}
+        {expanded && (
+          <>
+            {node.children!.map((child) => (
+              <TreeNode
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                activeFile={activeFile}
+                onSelect={onSelect}
+                onCreateFile={onCreateFile}
+                onCreateFolder={onCreateFolder}
+                onDelete={onDelete}
+                creating={creating}
+                onConfirmCreate={onConfirmCreate}
+                onCancelCreate={onCancelCreate}
+                theme={theme}
+              />
+            ))}
+            {isCreatingHere && (
+              <InlineInput
+                depth={depth + 1}
+                isFolder={creating!.type === "folder"}
+                theme={theme}
+                onConfirm={onConfirmCreate}
+                onCancel={onCancelCreate}
+              />
+            )}
+          </>
+        )}
       </div>
     );
   }
@@ -297,18 +322,7 @@ export function FileExplorer({
   theme?: "dark" | "light";
 }) {
   const tree = useMemo(() => buildTree(files), [files]);
-  const [creating, setCreating] = useState<{
-    parentPath: string;
-    type: "file" | "folder";
-  } | null>(null);
-
-  function handleCreateFile(parentPath: string) {
-    setCreating({ parentPath, type: "file" });
-  }
-
-  function handleCreateFolder(parentPath: string) {
-    setCreating({ parentPath, type: "folder" });
-  }
+  const [creating, setCreating] = useState<CreatingState | null>(null);
 
   function handleConfirmCreate(name: string) {
     if (!creating) return;
@@ -317,24 +331,16 @@ export function FileExplorer({
       onCreateFile(fullPath, "");
       onSelect(fullPath);
     } else {
-      // Create a placeholder file so the folder shows up
       onCreateFile(fullPath + "/.gitkeep", "");
     }
     setCreating(null);
   }
 
-  function handleDelete(path: string) {
-    onDeleteFile(path);
-  }
-
-  // Find the depth of the creating input
-  function getDepthForPath(p: string): number {
-    return p.split("/").filter(Boolean).length;
-  }
+  // Root-level creating (parentPath === "")
+  const isCreatingAtRoot = creating?.parentPath === "";
 
   return (
     <div className="py-1">
-      {/* Root-level create buttons */}
       <div className="flex items-center gap-1 px-2 mb-1">
         <button
           onClick={() => setCreating({ parentPath: "", type: "file" })}
@@ -366,16 +372,19 @@ export function FileExplorer({
           depth={0}
           activeFile={activeFile}
           onSelect={onSelect}
-          onCreateFile={handleCreateFile}
-          onCreateFolder={handleCreateFolder}
-          onDelete={handleDelete}
+          onCreateFile={(parentPath) => setCreating({ parentPath, type: "file" })}
+          onCreateFolder={(parentPath) => setCreating({ parentPath, type: "folder" })}
+          onDelete={onDeleteFile}
+          creating={creating}
+          onConfirmCreate={handleConfirmCreate}
+          onCancelCreate={() => setCreating(null)}
           theme={theme}
         />
       ))}
-      {creating && (
+      {isCreatingAtRoot && (
         <InlineInput
-          depth={getDepthForPath(creating.parentPath) + (creating.type === "folder" ? 0 : 0)}
-          isFolder={creating.type === "folder"}
+          depth={0}
+          isFolder={creating!.type === "folder"}
           theme={theme}
           onConfirm={handleConfirmCreate}
           onCancel={() => setCreating(null)}
