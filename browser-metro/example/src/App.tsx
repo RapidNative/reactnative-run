@@ -989,7 +989,7 @@ export default function TabLayout() {
             </button>
             {showDisclaimer && (
               <div className={`absolute left-0 top-full mt-2 w-72 rounded-lg border shadow-xl z-50 p-3 text-xs leading-relaxed ${theme === "dark" ? "bg-zinc-900 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"}`}>
-                This project is not affiliated with, endorsed by, or associated with Meta, Facebook, or the React Native team. The domain name "reactnative.run" is simply a descriptive name for this tool.
+                This project is not affiliated with, endorsed by, or associated with Meta, Facebook, the React Native team, or the React Foundation. The domain name "reactnative.run" is simply a descriptive name for this tool. React Native is a trademark of Meta Platforms, Inc.
                 <button
                   onClick={() => setShowDisclaimer(false)}
                   className="block mt-2 text-blue-400 hover:text-blue-300 text-[10px] font-medium"
