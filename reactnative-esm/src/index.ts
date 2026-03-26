@@ -519,8 +519,9 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 								dep = args.path.split("/")[0];
 							}
 
-							// Don't externalize from self
+							// Don't externalize from self (handles both base package and subpath entries)
 							if (dep === pkgName) return null;
+							if (args.path === pkgName || args.path.startsWith(pkgName + "/")) return null;
 
 							// Only externalize other direct deps in the batch.
 							// Transitive deps are inlined into their consumers.
@@ -629,6 +630,9 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					name: "batch-sub-external",
 					setup(build) {
 						build.onResolve({ filter: /^[^./]/ }, (args) => {
+							// Don't externalize the subpath we're bundling
+							if (args.path === subpath || args.path.startsWith(subpath + "/")) return null;
+
 							let dep: string;
 							if (args.path.startsWith("@")) {
 								const parts = args.path.split("/");
@@ -636,6 +640,10 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 							} else {
 								dep = args.path.split("/")[0];
 							}
+
+							// Don't externalize the base package of this subpath
+							if (dep === basePkg) return null;
+
 							if (batchSet.has(dep)) {
 								return { path: args.path, external: true };
 							}
