@@ -10,7 +10,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, hashString, buildBundlePreamble, parseExternalsFromBody } from "./utils.js";
+import { findRequires, rewriteRequires, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle } from "./utils.js";
 import type {
   BundlerConfig,
   BundlerPlugin,
@@ -32,6 +32,7 @@ export class IncrementalBundler {
   private entryFile: string | null = null;
   private packageVersions: Record<string, string> = {};
   private transitiveDepsVersions: Record<string, string> = {};
+  private prefetchedPackages: Record<string, string> = {};
 
   constructor(fs: VirtualFS, config: BundlerConfig) {
     this.fs = fs;
@@ -195,8 +196,56 @@ export class IncrementalBundler {
     return baseName + "@" + version + subpath;
   }
 
+  /** Prefetch all dependencies in a single batch request */
+  private async prefetchDependencies(): Promise<void> {
+    if (Object.keys(this.prefetchedPackages).length > 0) return; // already prefetched
+
+    const versions = this.packageVersions;
+    if (Object.keys(versions).length === 0) return;
+
+    const hash = hashDeps(versions);
+    const baseUrl = this.config.server.packageServerUrl;
+
+    try {
+      const getRes = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+      if (getRes.ok) {
+        const { packages } = parseDepBundle(await getRes.text());
+        this.prefetchedPackages = packages;
+        return;
+      }
+
+      const postRes = await fetch(`${baseUrl}/bundle-deps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash, dependencies: versions }),
+      });
+      if (postRes.ok) {
+        const { packages } = parseDepBundle(await postRes.text());
+        this.prefetchedPackages = packages;
+      }
+    } catch (err) {
+      console.warn("[prefetch] Failed, falling back to individual fetches:", err);
+    }
+  }
+
   /** Fetch a pre-bundled npm package from the package server */
   private async fetchPackage(specifier: string): Promise<{ code: string; externals: Record<string, string> }> {
+    // Check prefetched registry first
+    let baseName = specifier;
+    const atIdx = specifier.indexOf("@", specifier.startsWith("@") ? 1 : 0);
+    if (atIdx > 0) {
+      baseName = specifier.slice(0, atIdx);
+      const afterVersion = specifier.indexOf("/", atIdx + 1);
+      if (afterVersion > 0) {
+        baseName = specifier.slice(0, atIdx) + specifier.slice(afterVersion);
+      }
+    }
+
+    if (this.prefetchedPackages[baseName]) {
+      return { code: this.prefetchedPackages[baseName], externals: {} };
+    }
+
+    // Fallback to individual fetch
     const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
     const res = await fetch(url);
     if (!res.ok) {
@@ -478,6 +527,9 @@ export class IncrementalBundler {
     this.moduleMap = {};
     this.sourceMapMap = {};
     this.packageVersions = this.getPackageVersions();
+
+    // Prefetch all deps in a single batch request
+    await this.prefetchDependencies();
 
     const npmPackagesNeeded = new Set<string>();
 

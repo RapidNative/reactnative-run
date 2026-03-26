@@ -12,10 +12,16 @@ const PORT = 5200;
 // Ensure cache dir exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
+// JSON body parser for POST endpoints
+app.use(express.json({ limit: "1mb" }));
+
 // CORS for browser access
 app.use((req: Request, res: Response, next: NextFunction) => {
 	res.header("Access-Control-Allow-Origin", "*");
+	res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+	res.header("Access-Control-Allow-Headers", "Content-Type");
 	res.header("Access-Control-Expose-Headers", "X-Externals");
+	if (req.method === "OPTIONS") { res.sendStatus(204); return; }
 	next();
 });
 
@@ -345,6 +351,327 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	}
 }
+
+// ============================================================
+// Batch dependency bundling: GET /bundle-deps/:hash, POST /bundle-deps
+// ============================================================
+
+const BUNDLE_DEPS_PREFIX = "bundle-deps-";
+
+function hashDepsServer(deps: Record<string, string>): string {
+	const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
+	let hash = 5381;
+	for (let i = 0; i < sorted.length; i++) {
+		hash = ((hash << 5) + hash + sorted.charCodeAt(i)) | 0;
+	}
+	return (hash >>> 0).toString(36);
+}
+
+// GET /bundle-deps/:hash - serve cached dep bundle (CDN cacheable)
+app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
+	const hash = req.params.hash;
+	const cacheFile = path.join(CACHE_DIR, `${BUNDLE_DEPS_PREFIX}${hash}.js`);
+
+	if (fs.existsSync(cacheFile)) {
+		console.log(`[bundle-deps cache hit] ${hash}`);
+		res.header("Cache-Control", "public, max-age=31536000, immutable");
+		res.type("application/javascript").sendFile(cacheFile);
+		return;
+	}
+
+	res.status(404).send("// Not found\n");
+});
+
+// POST /bundle-deps - build a dep bundle
+app.post("/bundle-deps", async (req: Request, res: Response) => {
+	const { hash, dependencies } = req.body as { hash?: string; dependencies: Record<string, string> };
+
+	if (!dependencies || typeof dependencies !== "object") {
+		res.status(400).send("// Missing dependencies\n");
+		return;
+	}
+
+	// Compute hash if not provided
+	const depHash = hash || hashDepsServer(dependencies);
+	const cacheFile = path.join(CACHE_DIR, `${BUNDLE_DEPS_PREFIX}${depHash}.js`);
+
+	// Check cache
+	if (fs.existsSync(cacheFile)) {
+		console.log(`[bundle-deps cache hit] ${depHash}`);
+		res.header("Cache-Control", "public, max-age=31536000, immutable");
+		res.type("application/javascript").sendFile(cacheFile);
+		return;
+	}
+
+	console.log(`[bundle-deps] Building for ${Object.keys(dependencies).length} deps (hash: ${depHash})`);
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-deps-"));
+
+	try {
+		// Install ALL deps in one go
+		const installArgs = Object.entries(dependencies)
+			.map(([name, ver]) => `${name}@${ver}`)
+			.join(" ");
+		execSync("npm init -y", { cwd: tmpDir, stdio: "ignore" });
+		execSync(`npm install ${installArgs} --legacy-peer-deps`, {
+			cwd: tmpDir,
+			stdio: "ignore",
+			timeout: 120000,
+		});
+
+		// Discover all packages to bundle: direct deps + their transitive deps
+		const allPackages = new Map<string, { version: string; isRN: boolean }>();
+		const nodeModules = path.join(tmpDir, "node_modules");
+
+		function discoverPackages(pkgName: string, visited: Set<string>) {
+			if (visited.has(pkgName)) return;
+			visited.add(pkgName);
+
+			const pkgJsonPath = path.join(nodeModules, pkgName, "package.json");
+			if (!fs.existsSync(pkgJsonPath)) return;
+
+			const meta = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+			const keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
+			const isRN = pkgName.startsWith("@expo/") ||
+				pkgName.includes("react-native") ||
+				keywords.some((k: string) => k === "react-native" || k === "expo");
+
+			allPackages.set(pkgName, { version: meta.version, isRN });
+
+			// Recurse into deps
+			const deps = Object.keys(meta.dependencies || {});
+			const peerDeps = Object.keys(meta.peerDependencies || {});
+			for (const dep of [...deps, ...peerDeps]) {
+				discoverPackages(dep, visited);
+			}
+		}
+
+		const visited = new Set<string>();
+		for (const name of Object.keys(dependencies)) {
+			discoverPackages(name, visited);
+		}
+
+		console.log(`[bundle-deps] Discovered ${allPackages.size} packages, bundling...`);
+
+		// Set of all package names in the batch (used for externalization)
+		const batchSet = new Set(allPackages.keys());
+		// Also externalize implicit platform modules
+		for (const implicit of ["react-native", "react", "react-dom", "expo", "expo-modules-core"]) {
+			batchSet.add(implicit);
+		}
+
+		// Build the manifest (name -> resolved version)
+		const manifest: Record<string, string> = {};
+		for (const [name, info] of allPackages) {
+			manifest[name] = info.version;
+		}
+
+		// Bundle each package
+		const chunks: string[] = [];
+		const errors: string[] = [];
+
+		for (const [pkgName, info] of allPackages) {
+			try {
+				const entryFile = path.join(tmpDir, `__entry_${pkgName.replace(/\//g, "__")}.js`);
+				const outFile = path.join(tmpDir, `__out_${pkgName.replace(/\//g, "__")}.js`);
+				fs.writeFileSync(entryFile, `module.exports = require("${pkgName}");\n`);
+
+				// Create selective external plugin for this package
+				const pkgExternalPlugin: esbuild.Plugin = {
+					name: "batch-external",
+					setup(build) {
+						build.onResolve({ filter: /^[^./]/ }, (args) => {
+							let dep: string;
+							if (args.path.startsWith("@")) {
+								const parts = args.path.split("/");
+								dep = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
+							} else {
+								dep = args.path.split("/")[0];
+							}
+
+							// Don't externalize from self
+							if (dep === pkgName) return null;
+
+							// Externalize if it's another package in the batch
+							if (batchSet.has(dep)) {
+								return { path: args.path, external: true };
+							}
+
+							// For RN packages, externalize @react-native/* and @expo/* if unresolvable
+							if (info.isRN && (dep.startsWith("@react-native/") || dep.startsWith("@expo/"))) {
+								try {
+									require.resolve(args.path, { paths: [args.resolveDir] });
+									return null;
+								} catch {
+									return { path: args.path, external: true };
+								}
+							}
+
+							return null;
+						});
+					},
+				};
+
+				const filterNative: esbuild.Plugin = {
+					name: "filter-native",
+					setup(build) {
+						build.onLoad({ filter: /\.(android|ios|windows)\.[jt]sx?$/ }, () => ({ contents: "", loader: "js" }));
+					},
+				};
+
+				await esbuild.build({
+					entryPoints: [entryFile],
+					bundle: true,
+					format: "iife",
+					globalName: "__module",
+					outfile: outFile,
+					platform: "browser",
+					target: "es2020",
+					...(info.isRN && {
+						resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".js", ".json"],
+						loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl" },
+						banner: { js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');" },
+						define: { "__DEV__": "false" },
+					}),
+					plugins: [
+						...(info.isRN ? [filterNative] : []),
+						pkgExternalPlugin,
+					],
+					logLevel: "silent",
+				});
+
+				const bundled = fs.readFileSync(outFile, "utf-8");
+				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
+				chunks.push(`// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`);
+
+				// Also check for common subpath variants
+				const subpathVariants: string[] = [];
+				// Scan the bundled code for require("pkgName/...") patterns from OTHER packages
+				// We'll handle subpaths in a second pass if needed
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				errors.push(`${pkgName}: ${msg}`);
+				console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 200));
+				// Add a stub so require() doesn't fail
+				chunks.push(`// @dep-start ${pkgName}\n// Error bundling: ${msg.slice(0, 100)}\nmodule.exports = {};\n// @dep-end ${pkgName}`);
+			}
+		}
+
+		// Now scan all chunks for subpath requires that need separate entries
+		const allCode = chunks.join("\n");
+		const subpathRequires = new Set<string>();
+		const requireRe = /require\s*\(\s*["']([^"']+\/[^"']+)["']\s*\)/g;
+		let m: RegExpExecArray | null;
+		while ((m = requireRe.exec(allCode)) !== null) {
+			const req = m[1];
+			// Only handle subpath of packages in our batch (e.g. react-dom/client)
+			let basePkg: string;
+			if (req.startsWith("@")) {
+				const parts = req.split("/");
+				basePkg = parts.slice(0, 2).join("/");
+			} else {
+				basePkg = req.split("/")[0];
+			}
+			if (batchSet.has(basePkg) && req !== basePkg && !allPackages.has(req)) {
+				subpathRequires.add(req);
+			}
+		}
+
+		// Bundle subpath variants
+		for (const subpath of subpathRequires) {
+			try {
+				const safeName = subpath.replace(/\//g, "__");
+				const entryFile = path.join(tmpDir, `__entry_${safeName}.js`);
+				const outFile = path.join(tmpDir, `__out_${safeName}.js`);
+				fs.writeFileSync(entryFile, `module.exports = require("${subpath}");\n`);
+
+				let basePkg: string;
+				if (subpath.startsWith("@")) {
+					const parts = subpath.split("/");
+					basePkg = parts.slice(0, 2).join("/");
+				} else {
+					basePkg = subpath.split("/")[0];
+				}
+				const info = allPackages.get(basePkg);
+
+				const subExternalPlugin: esbuild.Plugin = {
+					name: "batch-sub-external",
+					setup(build) {
+						build.onResolve({ filter: /^[^./]/ }, (args) => {
+							let dep: string;
+							if (args.path.startsWith("@")) {
+								const parts = args.path.split("/");
+								dep = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
+							} else {
+								dep = args.path.split("/")[0];
+							}
+							if (batchSet.has(dep)) {
+								return { path: args.path, external: true };
+							}
+							return null;
+						});
+					},
+				};
+
+				const filterNative: esbuild.Plugin = {
+					name: "filter-native",
+					setup(build) {
+						build.onLoad({ filter: /\.(android|ios|windows)\.[jt]sx?$/ }, () => ({ contents: "", loader: "js" }));
+					},
+				};
+
+				await esbuild.build({
+					entryPoints: [entryFile],
+					bundle: true,
+					format: "iife",
+					globalName: "__module",
+					outfile: outFile,
+					platform: "browser",
+					target: "es2020",
+					...(info?.isRN && {
+						resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".js", ".json"],
+						loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl" },
+						banner: { js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');" },
+						define: { "__DEV__": "false" },
+					}),
+					plugins: [
+						...(info?.isRN ? [filterNative] : []),
+						subExternalPlugin,
+					],
+					logLevel: "silent",
+				});
+
+				const bundled = fs.readFileSync(outFile, "utf-8");
+				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
+				chunks.push(`// @dep-start ${subpath}\n${wrapped}\n// @dep-end ${subpath}`);
+			} catch {
+				chunks.push(`// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`);
+			}
+		}
+
+		// Assemble final bundle
+		const header = `// @dep-bundle ${depHash}\n// @dep-manifest ${JSON.stringify(manifest)}\n// @dep-count ${chunks.length}\n`;
+		const bundle = header + chunks.join("\n") + "\n";
+
+		// Cache
+		fs.writeFileSync(cacheFile, bundle);
+		console.log(`[bundle-deps] Cached ${chunks.length} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB)`);
+
+		res.header("Cache-Control", "public, max-age=31536000, immutable");
+		res.type("application/javascript").send(bundle);
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		console.error(`[bundle-deps error]`, message);
+		if (!res.headersSent) {
+			res.status(500).json({ error: message });
+		}
+	} finally {
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+// ============================================================
+// Individual package endpoint (backward compatible)
+// ============================================================
 
 // GET /pkg/* - unpkg-style URLs:
 //   /pkg/lodash           -> lodash@latest

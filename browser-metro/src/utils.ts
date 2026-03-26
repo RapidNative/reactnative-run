@@ -2,6 +2,9 @@ const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 // Matches lines that are single-line comments or JSDoc/block comment continuations
 const COMMENT_LINE_RE = /^\s*(?:\/\/|\/?\*)/;
 const EXTERNALS_RE = /^\/\/ @externals (.+)$/m;
+const DEP_MANIFEST_RE = /^\/\/ @dep-manifest (.+)$/m;
+const DEP_START_RE = /^\/\/ @dep-start (.+)$/gm;
+const DEP_END_RE = /^\/\/ @dep-end (.+)$/gm;
 
 /** Parse externals metadata from a package bundle body.
  *  Looks for a `// @externals {...}` comment line near the top.
@@ -229,4 +232,36 @@ export function hashString(str: string): string {
     hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
   }
   return (hash >>> 0).toString(36);
+}
+
+/** Hash a dependencies object to a stable cache key */
+export function hashDeps(deps: Record<string, string>): string {
+  const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
+  return hashString(sorted);
+}
+
+/** Parse a dep bundle response into individual package code chunks.
+ *  Format: `// @dep-start <name>\n..code..\n// @dep-end <name>` */
+export function parseDepBundle(code: string): { manifest: Record<string, string>; packages: Record<string, string> } {
+  let manifest: Record<string, string> = {};
+  const manifestMatch = DEP_MANIFEST_RE.exec(code);
+  if (manifestMatch) {
+    try { manifest = JSON.parse(manifestMatch[1]); } catch {}
+  }
+
+  const packages: Record<string, string> = {};
+  const startRe = /^\/\/ @dep-start (.+)$/gm;
+  let match: RegExpExecArray | null;
+
+  while ((match = startRe.exec(code)) !== null) {
+    const name = match[1];
+    const startIdx = match.index + match[0].length + 1; // skip newline
+    const endMarker = `// @dep-end ${name}`;
+    const endIdx = code.indexOf(endMarker, startIdx);
+    if (endIdx !== -1) {
+      packages[name] = code.slice(startIdx, endIdx).trimEnd();
+    }
+  }
+
+  return { manifest, packages };
 }

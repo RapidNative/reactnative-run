@@ -8,13 +8,14 @@ import {
   shiftSourceMapOrigLines,
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
-import { findRequires, rewriteRequires, buildBundlePreamble, parseExternalsFromBody } from "./utils.js";
+import { findRequires, rewriteRequires, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
   private resolver: Resolver;
   private config: BundlerConfig;
   private plugins: BundlerPlugin[];
+  private prefetchedPackages: Record<string, string> = {};
 
   constructor(fs: VirtualFS, config: BundlerConfig) {
     this.fs = fs;
@@ -22,6 +23,39 @@ export class Bundler {
     const paths = Bundler.readTsconfigPaths(fs);
     this.resolver = new Resolver(fs, { ...config.resolver, ...(paths && { paths }) });
     this.plugins = config.plugins ?? [];
+  }
+
+  /** Prefetch all dependencies in a single batch request */
+  private async prefetchDependencies(): Promise<void> {
+    const versions = this.getPackageVersions();
+    if (Object.keys(versions).length === 0) return;
+
+    const hash = hashDeps(versions);
+    const baseUrl = this.config.server.packageServerUrl;
+
+    try {
+      // Try GET first (CDN cacheable)
+      const getRes = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+      if (getRes.ok) {
+        const { packages } = parseDepBundle(await getRes.text());
+        this.prefetchedPackages = packages;
+        return;
+      }
+
+      // POST to build
+      const postRes = await fetch(`${baseUrl}/bundle-deps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hash, dependencies: versions }),
+      });
+      if (postRes.ok) {
+        const { packages } = parseDepBundle(await postRes.text());
+        this.prefetchedPackages = packages;
+      }
+    } catch (err) {
+      // Silently fall back to individual fetches
+      console.warn("[prefetch] Failed, falling back to individual fetches:", err);
+    }
   }
 
   /** Read tsconfig.json "compilerOptions.paths" from the VirtualFS */
@@ -176,6 +210,23 @@ export class Bundler {
 
   /** Fetch a pre-bundled npm package from the package server */
   private async fetchPackage(specifier: string): Promise<{ code: string; externals: Record<string, string> }> {
+    // Check prefetched registry first (extract base package name from versioned specifier)
+    // specifier is like "react@19.1.0" or "react-dom@19.1.0/client"
+    let baseName = specifier;
+    const atIdx = specifier.indexOf("@", specifier.startsWith("@") ? 1 : 0);
+    if (atIdx > 0) {
+      baseName = specifier.slice(0, atIdx);
+      const afterVersion = specifier.indexOf("/", atIdx + 1);
+      if (afterVersion > 0) {
+        baseName = specifier.slice(0, atIdx) + specifier.slice(afterVersion);
+      }
+    }
+
+    if (this.prefetchedPackages[baseName]) {
+      return { code: this.prefetchedPackages[baseName], externals: {} };
+    }
+
+    // Fallback to individual fetch
     const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
     const res = await fetch(url);
     if (!res.ok) {
@@ -191,6 +242,9 @@ export class Bundler {
   private async buildModuleMap(
     entryFile: string,
   ): Promise<{ moduleMap: ModuleMap; sourceMapMap: Record<string, RawSourceMap> }> {
+    // Prefetch all deps in a single batch request
+    await this.prefetchDependencies();
+
     const moduleMap: ModuleMap = {};
     const sourceMapMap: Record<string, RawSourceMap> = {};
     const visited: { [key: string]: boolean } = {};
