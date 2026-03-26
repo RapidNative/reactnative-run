@@ -234,10 +234,27 @@ export function hashString(str: string): string {
   return (hash >>> 0).toString(36);
 }
 
-/** Hash a dependencies object to a stable cache key */
-export function hashDeps(deps: Record<string, string>): string {
+// Must match SERVER_VERSION in reactnative-esm/src/index.ts
+const DEPS_HASH_VERSION = "2";
+
+/** Hash a dependencies object to a stable cache key.
+ *  Uses SHA-256 (via Web Crypto or Node crypto) truncated to 16 hex chars
+ *  for collision resistance while keeping URLs short.
+ *  Includes a version prefix so cache is invalidated when bundling logic changes. */
+export async function hashDeps(deps: Record<string, string>): Promise<string> {
   const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
-  return hashString(sorted);
+  const input = `v${DEPS_HASH_VERSION}:${sorted}`;
+
+  // Web Crypto API (works in browsers and workers)
+  if (typeof globalThis.crypto?.subtle?.digest === "function") {
+    const data = new TextEncoder().encode(input);
+    const buf = await crypto.subtle.digest("SHA-256", data);
+    const arr = Array.from(new Uint8Array(buf));
+    return arr.map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+  }
+
+  // Fallback: djb2 (Node.js without crypto, shouldn't normally happen)
+  return hashString(input);
 }
 
 /** Parse a dep bundle response into individual package code chunks.

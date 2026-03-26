@@ -30,7 +30,7 @@ export class Bundler {
     const versions = this.getPackageVersions();
     if (Object.keys(versions).length === 0) return;
 
-    const hash = hashDeps(versions);
+    const hash = await hashDeps(versions);
     const baseUrl = this.config.server.packageServerUrl;
 
     try {

@@ -2,8 +2,12 @@ import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import crypto from "crypto";
 import { execSync } from "child_process";
 import esbuild from "esbuild";
+
+// Bump this when the bundling logic changes to invalidate all caches
+const SERVER_VERSION = "2";
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
@@ -360,11 +364,8 @@ const BUNDLE_DEPS_PREFIX = "bundle-deps-";
 
 function hashDepsServer(deps: Record<string, string>): string {
 	const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
-	let hash = 5381;
-	for (let i = 0; i < sorted.length; i++) {
-		hash = ((hash << 5) + hash + sorted.charCodeAt(i)) | 0;
-	}
-	return (hash >>> 0).toString(36);
+	const input = `v${SERVER_VERSION}:${sorted}`;
+	return crypto.createHash("sha256").update(input).digest("hex").slice(0, 16);
 }
 
 // GET /bundle-deps/:hash - serve cached dep bundle (CDN cacheable)
