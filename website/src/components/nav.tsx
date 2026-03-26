@@ -85,7 +85,7 @@ export function Footer() {
             </a>
           </div>
           <p className="text-xs text-zinc-600">
-            This project is not affiliated with Meta, Facebook, or the React Native team.
+            Not affiliated with Meta, the React Native team, or React Foundation. React Native is a trademark of Meta Platforms, Inc.
           </p>
         </div>
         <div className="flex items-center gap-6">

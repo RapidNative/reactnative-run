@@ -201,4 +201,4 @@ MIT
 
 ## Disclaimer
 
-This project is not affiliated with, endorsed by, or associated with Meta, Facebook, or the React Native team. React Native is a trademark of Meta Platforms, Inc. The domain name "reactnative.run" is simply a descriptive name for this open-source tool.
+This project is not affiliated with, endorsed by, or associated with Meta, Facebook, the React Native team, or the React Foundation. React Native is a trademark of Meta Platforms, Inc. The domain name "reactnative.run" is simply a descriptive name for this open-source tool.

@@ -107,7 +107,7 @@ function FAQ() {
   const faqs = [
     {
       q: "Is this an official React Native project?",
-      a: "No. reactnative.run is not affiliated with, endorsed by, or associated with Meta, Facebook, or the React Native team. The domain name is simply a descriptive name for this open-source tool. It's built and maintained by RapidNative.",
+      a: "No. reactnative.run is an independent open-source project built by RapidNative. It is not affiliated with, endorsed by, or associated with Meta, Facebook, the React Native team, or the React Foundation. The domain name is simply a descriptive name for this tool. React Native is a trademark of Meta Platforms, Inc.",
     },
     {
       q: "Can I preview on iOS or Android?",

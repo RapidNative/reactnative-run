@@ -67,7 +67,8 @@ export function HeroWithPaths() {
         >
           <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-1.5 text-sm text-zinc-400 mb-8">
             <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            Powered by <code className="text-cyan-400 font-mono">browser-metro</code> &mdash; Metro bundler that runs in the browser
+            <span className="hidden sm:inline">Powered by <code className="text-cyan-400 font-mono">browser-metro</code> &mdash; a Metro-like bundler for the browser</span>
+            <span className="sm:hidden">Powered by <code className="text-cyan-400 font-mono">browser-metro</code></span>
           </div>
 
           <h1 className="text-5xl sm:text-7xl md:text-8xl font-bold mb-6 tracking-tighter">
