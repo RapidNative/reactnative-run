@@ -719,6 +719,27 @@ export function App() {
     setMobileTab("editor");
   }
 
+  function handleCreateFile(path: string, content: string) {
+    const efs = editorFSRef.current;
+    if (!efs) return;
+    efs.write(path, content);
+    setFileList(efs.list());
+    switchTab(path);
+  }
+
+  function handleDeleteFile(path: string) {
+    const efs = editorFSRef.current;
+    if (!efs) return;
+    efs.delete(path);
+    setFileList(efs.list());
+    if (activeFile === path) {
+      const remaining = efs.list();
+      if (remaining.length > 0) {
+        switchTab(remaining[0]);
+      }
+    }
+  }
+
   function handleEditorChange(value: string) {
     setEditorValue(value);
     editorFSRef.current?.write(activeFile, value);
@@ -1120,6 +1141,8 @@ export default function TabLayout() {
               files={fileList}
               activeFile={activeFile}
               onSelect={mobileSelectFile}
+              onCreateFile={handleCreateFile}
+              onDeleteFile={handleDeleteFile}
               theme={theme}
             />
           </div>
@@ -1198,6 +1221,8 @@ export default function TabLayout() {
             files={fileList}
             activeFile={activeFile}
             onSelect={switchTab}
+            onCreateFile={handleCreateFile}
+            onDeleteFile={handleDeleteFile}
             theme={theme}
           />
         </Panel>
