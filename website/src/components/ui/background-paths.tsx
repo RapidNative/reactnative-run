@@ -67,7 +67,7 @@ export function HeroWithPaths() {
         >
           <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-1.5 text-sm text-zinc-400 mb-8">
             <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            Open source browser-based bundler
+            Powered by <code className="text-cyan-400 font-mono">browser-metro</code> &mdash; Metro bundler that runs in the browser
           </div>
 
           <h1 className="text-5xl sm:text-7xl md:text-8xl font-bold mb-6 tracking-tighter">
@@ -79,9 +79,9 @@ export function HeroWithPaths() {
           </h1>
 
           <p className="text-base md:text-lg text-zinc-400 max-w-2xl mx-auto leading-relaxed mb-10">
-            Write, bundle, and preview React Native apps instantly. No installs,
-            no setup, no waiting. Full HMR, Expo Router, and npm support -
-            everything runs client-side.
+            Write, bundle, and preview React Native apps instantly.
+            browser-metro brings Metro&apos;s architecture to the browser &mdash;
+            full HMR, Expo Router, npm support, all client-side.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-3 justify-center">

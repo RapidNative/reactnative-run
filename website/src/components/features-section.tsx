@@ -15,8 +15,8 @@ export function FeaturesSection() {
         <div className="text-center mb-16">
           <h2 className="text-3xl font-bold text-white">Everything you need</h2>
           <p className="mt-3 text-zinc-400 max-w-lg mx-auto">
-            A complete React Native development environment that runs entirely
-            in your browser.
+            <code className="text-cyan-400 font-mono text-sm">browser-metro</code> brings the Metro bundler experience to the browser.
+            Full HMR, Expo Router, and any npm package.
           </p>
         </div>
         <div className="relative">
@@ -44,7 +44,7 @@ export function FeaturesSection() {
                   Zero Setup
                 </h2>
                 <p className="mt-2 text-center text-sm text-zinc-400">
-                  No CLI, no Xcode, no Android Studio
+                  browser-metro runs in a Web Worker. No CLI, no Xcode, no Android Studio
                 </p>
               </CardContent>
             </Card>
