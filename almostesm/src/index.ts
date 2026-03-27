@@ -15,7 +15,10 @@ fs.mkdirSync(CACHE_DIR, { recursive: true });
 // CORS for browser access
 app.use((req: Request, res: Response, next: NextFunction) => {
 	res.header("Access-Control-Allow-Origin", "*");
-	res.header("Access-Control-Expose-Headers", "X-Externals");
+	res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+	res.header("Access-Control-Allow-Headers", "Content-Type");
+	res.header("Access-Control-Expose-Headers", "X-Externals, X-Resolved-Version");
+	if (req.method === "OPTIONS") { res.sendStatus(204); return; }
 	next();
 });
 
@@ -266,7 +269,14 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		});
 
 		const bundled = fs.readFileSync(outFile, "utf-8");
-		const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
+		// When esbuild bundles an ESM package as IIFE, __toCommonJS wraps the
+		// exports with __esModule: true and a .default getter.  If we pass this
+		// wrapper through as-is, consuming esbuild bundles apply __toESM which
+		// tries to chain getters across two separate IIFE closures — this breaks
+		// for packages like color-convert where the .default getter never
+		// resolves correctly.  Fix: unwrap the .default so consumers get the
+		// actual value directly (CJS-style), which __toESM always handles.
+		const wrapped = `// Bundled: ${requireSpecifier}@${version}\n// Externals: ${externals.join(", ") || "none"}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = (__module && __module.__esModule && __module.default !== undefined) ? __module.default : __module; }\n`;
 
 		fs.writeFileSync(cacheFile, wrapped);
 		const externalsJson = JSON.stringify(externalizedMap);
