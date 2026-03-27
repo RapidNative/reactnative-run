@@ -74,6 +74,10 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
       // Compute hook signature for this module — changes when hooks are added/removed
       const hookSig = extractHookSignature(params.src + result.code);
 
+      // Check if module uses createContext (needs HMR identity preservation)
+      const usesCreateContext =
+        params.src.includes('createContext') || result.code.includes('createContext');
+
       // Preamble: set up refresh hooks scoped to this module + signature vars per component
       let preamble =
         'var _prevRefreshReg = window.$RefreshReg$;\n' +
@@ -95,6 +99,30 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
         preamble += 'var _s_' + name + ' = $RefreshSig$();\n';
       }
 
+      // Context identity preservation: patch React.createContext so that on HMR
+      // re-executions the same context object is returned instead of a new one.
+      // Without this, Provider uses a new context reference while consumers still
+      // hold the old one → useContext() returns null → "must be used within Provider".
+      // Contexts are keyed by moduleId + call-order index and stored in
+      // window.__HMR_CONTEXTS__ which persists across re-executions.
+      if (usesCreateContext) {
+        preamble +=
+          'var _hmrCtxIdx = 0;\n' +
+          'var _hmrOrigCC;\n' +
+          'try {\n' +
+          '  var _hmrReact = require("react");\n' +
+          '  _hmrOrigCC = _hmrReact.createContext;\n' +
+          '  if (!window.__HMR_CONTEXTS__) window.__HMR_CONTEXTS__ = {};\n' +
+          '  _hmrReact.createContext = function(defaultValue) {\n' +
+          '    var key = _refreshModuleId + ":ctx:" + (_hmrCtxIdx++);\n' +
+          '    if (window.__HMR_CONTEXTS__[key]) return window.__HMR_CONTEXTS__[key];\n' +
+          '    var ctx = _hmrOrigCC(defaultValue);\n' +
+          '    window.__HMR_CONTEXTS__[key] = ctx;\n' +
+          '    return ctx;\n' +
+          '  };\n' +
+          '} catch(_e) {}\n';
+      }
+
       // Postamble: register each component and accept HMR
       let postamble = '\n';
       for (const name of components) {
@@ -102,6 +130,13 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
           'if (typeof ' + name + ' === "function") {\n' +
           '  _s_' + name + '(' + name + ', ' + JSON.stringify(hookSig) + ');\n' +
           '  $RefreshReg$(' + name + ', ' + JSON.stringify(name) + ');\n' +
+          '}\n';
+      }
+      // Restore original React.createContext after module body runs
+      if (usesCreateContext) {
+        postamble +=
+          'if (_hmrOrigCC) {\n' +
+          '  try { require("react").createContext = _hmrOrigCC; } catch(_e) {}\n' +
           '}\n';
       }
       postamble +=
