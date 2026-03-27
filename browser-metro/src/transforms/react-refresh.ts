@@ -7,18 +7,27 @@ function isJsxFile(filename: string): boolean {
 }
 
 /**
- * Extract a hook signature string from source — sorted unique hook names joined
- * by newline. Used by $RefreshSig$ so React Refresh can detect when hook count/
- * order changes and force a full remount instead of an in-place update.
+ * Extract a hook signature string from source.
+ *
+ * Returns the full ordered sequence of hook calls (with duplicates), joined by
+ * newline. This is passed to $RefreshSig$ so React Refresh can detect ANY change
+ * that affects the hook fiber chain — including adding a second call to an
+ * already-present hook (e.g. a second useMutation).
+ *
+ * Why NOT deduplicate: if we used a Set, adding a second `useMutation` would
+ * leave the signature unchanged → React Refresh would attempt an in-place update
+ * → "Rendered more hooks than during the previous render" crash. The full
+ * ordered sequence changes whenever hook count or order changes, so React
+ * Refresh always forces a clean remount instead.
  */
 function extractHookSignature(src: string): string {
-  const seen = new Set<string>();
+  const hooks: string[] = [];
   const re = /\buse[A-Z][a-zA-Z0-9]*/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
-    seen.add(m[0]);
+    hooks.push(m[0]);
   }
-  return [...seen].sort().join('\n');
+  return hooks.join('\n');
 }
 
 /**
