@@ -247,6 +247,31 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			},
 		};
 
+		// Stub Node.js built-ins that some RN packages import but don't
+		// actually need on web (e.g. react-native-svg imports "buffer")
+		const nodeBuiltins = new Set([
+			"buffer", "stream", "path", "fs", "os", "crypto", "util",
+			"events", "http", "https", "net", "tls", "zlib", "url",
+			"querystring", "assert", "child_process", "cluster",
+			"dgram", "dns", "domain", "readline", "tty", "v8", "vm",
+			"worker_threads", "perf_hooks", "string_decoder",
+		]);
+		const stubNodeBuiltinsPlugin: esbuild.Plugin = {
+			name: "stub-node-builtins",
+			setup(build) {
+				build.onResolve({ filter: /.*/ }, (args) => {
+					if (nodeBuiltins.has(args.path) || args.path.startsWith("node:")) {
+						return { path: args.path, namespace: "node-stub" };
+					}
+					return null;
+				});
+				build.onLoad({ filter: /.*/, namespace: "node-stub" }, () => ({
+					contents: "module.exports = {};",
+					loader: "js",
+				}));
+			},
+		};
+
 		const selectiveExternalPlugin: esbuild.Plugin = {
 			name: "selective-external",
 			setup(build) {
@@ -329,7 +354,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				},
 			}),
 			plugins: [
-				...(isReactNative ? [filterNativePlatformsPlugin] : []),
+				...(isReactNative ? [filterNativePlatformsPlugin, stubNodeBuiltinsPlugin] : []),
 				selectiveExternalPlugin,
 			],
 		});
