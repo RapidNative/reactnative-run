@@ -7,6 +7,21 @@ function isJsxFile(filename: string): boolean {
 }
 
 /**
+ * Extract a hook signature string from source — sorted unique hook names joined
+ * by newline. Used by $RefreshSig$ so React Refresh can detect when hook count/
+ * order changes and force a full remount instead of an in-place update.
+ */
+function extractHookSignature(src: string): string {
+  const seen = new Set<string>();
+  const re = /\buse[A-Z][a-zA-Z0-9]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    seen.add(m[0]);
+  }
+  return [...seen].sort().join('\n');
+}
+
+/**
  * Detect React component names from source code.
  * Heuristic: any function or const/let with an uppercase first letter.
  * We scan BOTH original source (catches `export default function App`)
@@ -56,8 +71,11 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
         return result;
       }
 
-      // Preamble: set up refresh hooks scoped to this module
-      const preamble =
+      // Compute hook signature for this module — changes when hooks are added/removed
+      const hookSig = extractHookSignature(params.src + result.code);
+
+      // Preamble: set up refresh hooks scoped to this module + signature vars per component
+      let preamble =
         'var _prevRefreshReg = window.$RefreshReg$;\n' +
         'var _prevRefreshSig = window.$RefreshSig$;\n' +
         'var _refreshModuleId = ' + JSON.stringify(params.filename) + ';\n' +
@@ -72,12 +90,17 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
         '  }\n' +
         '  return function(type) { return type; };\n' +
         '};\n';
+      // One signature function per component — enables hooks-change detection
+      for (const name of components) {
+        preamble += 'var _s_' + name + ' = $RefreshSig$();\n';
+      }
 
       // Postamble: register each component and accept HMR
       let postamble = '\n';
       for (const name of components) {
         postamble +=
           'if (typeof ' + name + ' === "function") {\n' +
+          '  _s_' + name + '(' + name + ', ' + JSON.stringify(hookSig) + ');\n' +
           '  $RefreshReg$(' + name + ', ' + JSON.stringify(name) + ');\n' +
           '}\n';
       }
