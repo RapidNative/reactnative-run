@@ -69,8 +69,53 @@ function parseSpecifier(raw: string) {
 }
 
 // Bundle and serve an npm package
-// Resolve a semver range to an exact version via npm view (no install needed)
-function resolveVersionQuick(pkgName: string, range: string): string | null {
+
+// Dist-tag / range → exact version cache with TTL (default 5 min).
+// Prevents repeated npm registry lookups for the same "latest" request.
+const DIST_TAG_TTL_MS = 5 * 60 * 1000;
+const distTagCache = new Map<string, { version: string; ts: number }>();
+
+// Check whether a version string is a semver range or dist-tag.
+// Anything that isn't a plain x.y.z(-pre)? is treated as needing resolution.
+function needsResolution(version: string): boolean {
+	return /[~^<>=*| ]/.test(version) || !/^\d+\.\d+\.\d+/.test(version);
+}
+
+// Check if a version string is a dist-tag (e.g. "latest", "next", "beta")
+// as opposed to a semver range (e.g. "^1.0.0", "~2.3.0", ">=1.0.0")
+function isDistTag(version: string): boolean {
+	return /^[a-zA-Z]/.test(version) && !/[~^<>=*| ]/.test(version);
+}
+
+// Resolve a semver range or dist-tag to an exact version.
+// For dist-tags: uses the npm registry HTTP API (async, ~200-500ms) with a TTL cache.
+// For semver ranges: falls back to sync `npm view` (slower but handles complex ranges).
+async function resolveVersionAsync(pkgName: string, range: string): Promise<string | null> {
+	const cacheKey = `${pkgName}@${range}`;
+	const cached = distTagCache.get(cacheKey);
+	if (cached && Date.now() - cached.ts < DIST_TAG_TTL_MS) {
+		return cached.version;
+	}
+
+	// Fast path for dist-tags: hit npm registry HTTP API directly
+	if (isDistTag(range)) {
+		try {
+			const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(pkgName).replace("%40", "@")}/${encodeURIComponent(range)}`;
+			const resp = await fetch(registryUrl, {
+				headers: { Accept: "application/json" },
+				signal: AbortSignal.timeout(5000),
+			});
+			if (resp.ok) {
+				const data = await resp.json() as { version?: string };
+				if (data.version) {
+					distTagCache.set(cacheKey, { version: data.version, ts: Date.now() });
+					return data.version;
+				}
+			}
+		} catch { /* fall through to npm view fallback */ }
+	}
+
+	// Fallback: npm view (handles semver ranges and dist-tags if HTTP failed)
 	try {
 		const result = execSync(`npm view ${pkgName}@${range} version`, {
 			stdio: ["pipe", "pipe", "pipe"],
@@ -78,7 +123,11 @@ function resolveVersionQuick(pkgName: string, range: string): string | null {
 		}).toString().trim();
 		// npm view can return multiple lines for ranges; take the last (highest)
 		const lines = result.split("\n");
-		return lines[lines.length - 1].replace(/^'|'$/g, "").trim();
+		const resolved = lines[lines.length - 1].replace(/^'|'$/g, "").trim();
+		if (resolved) {
+			distTagCache.set(cacheKey, { version: resolved, ts: Date.now() });
+		}
+		return resolved || null;
 	} catch {
 		return null;
 	}
@@ -107,13 +156,12 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 	const exactExternals = path.join(CACHE_DIR, `${exactKey}.externals.json`);
 	if (serveCached(res, exactCache, exactExternals, `${requireSpecifier}@${version}`)) return;
 
-	// 2. For semver ranges, quick-resolve to exact version and check cache
+	// 2. For semver ranges / dist-tags, resolve to exact version and check cache
 	let resolvedVersion = version;
-	const isRange = /[~^<>=*|]/.test(version) || version === "latest";
-	if (isRange) {
-		const quick = resolveVersionQuick(pkgName, version);
-		if (quick && quick !== version) {
-			resolvedVersion = quick;
+	if (needsResolution(version)) {
+		const resolved = await resolveVersionAsync(pkgName, version);
+		if (resolved && resolved !== version) {
+			resolvedVersion = resolved;
 			const resolvedKey = cacheKeyFor(pkgName, resolvedVersion, subpath);
 			const resolvedCache = path.join(CACHE_DIR, `${resolvedKey}.js`);
 			const resolvedExternals = path.join(CACHE_DIR, `${resolvedKey}.externals.json`);
