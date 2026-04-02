@@ -208,6 +208,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
 			isReactNative =
 				pkgName.startsWith("@expo/") ||
+				pkgName.startsWith("@expo-google-fonts/") ||
 				pkgName.includes("react-native") ||
 				keywords.some((k: string) => k === "react-native" || k === "expo");
 
