@@ -16,6 +16,9 @@ const PORT = 5200;
 // Ensure cache dir exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
+// Trust proxy headers (X-Forwarded-Proto, X-Forwarded-For) from nginx/Cloudflare
+app.set("trust proxy", true);
+
 // JSON body parser for POST endpoints
 app.use(express.json({ limit: "1mb" }));
 
