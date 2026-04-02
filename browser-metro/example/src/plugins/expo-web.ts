@@ -181,12 +181,41 @@ exports.createStyleSheet = function createStyleSheet(styles) {
 `;
 
 /**
+ * Expo Constants shim: reads app.json from the VFS and exposes expoConfig.
+ */
+const EXPO_CONSTANTS_SHIM = `
+var _expoConfig = null;
+try {
+  var _appJson = require("/app.json");
+  _expoConfig = _appJson.expo || _appJson;
+} catch(e) {}
+
+var _constants = {
+  expoConfig: _expoConfig,
+  manifest: _expoConfig,
+  executionEnvironment: "storeClient",
+  appOwnership: null,
+  sessionId: "browser-metro",
+  isDevice: false,
+  platform: { ios: {}, android: {}, web: {} },
+  getWebViewUserAgentAsync: function() { return Promise.resolve(typeof navigator !== "undefined" ? navigator.userAgent : ""); },
+  installationId: "browser-metro-shim",
+  statusBarHeight: 0,
+  systemFonts: [],
+};
+module.exports = _constants;
+module.exports.__esModule = true;
+module.exports.default = _constants;
+`;
+
+/**
  * Expo web plugin:
  * - Aliases react-native → react-native-web
  * - Injects __DEV__ and global for react-native-web compatibility
  * - Auto-injects React import for JSX files
  * - Patches React.createElement to pass className as $$css style
  * - Shims nativewind for web (useColorScheme, vars)
+ * - Shims expo-constants for web
  */
 function isJSX(filename: string): boolean {
   return filename.endsWith(".tsx") || filename.endsWith(".jsx");
@@ -227,6 +256,7 @@ export const expoWebPlugin: BundlerPlugin = {
       "__classname-patch__": CLASSNAME_PATCH_MODULE,
       nativewind: NATIVEWIND_SHIM,
       "react-native-css-interop": "module.exports = {};",
+      "expo-constants": EXPO_CONSTANTS_SHIM,
     };
   },
 };
