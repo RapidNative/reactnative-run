@@ -147,7 +147,7 @@ function serveCached(res: Response, cacheFile: string, externalsFile: string, la
 	return true;
 }
 
-async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string) {
+async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, baseUrl?: string) {
 	const requireSpecifier = pkgName + subpath;
 
 	// 1. Check exact cache (works for exact versions like "6.0.12")
@@ -376,16 +376,20 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		};
 
 		const outFile = path.join(tmpDir, "__out.js");
+		const isFont = pkgName.startsWith("@expo-google-fonts/");
+		const outdir = isFont ? path.join(tmpDir, "__outdir") : undefined;
 		await esbuild.build({
 			entryPoints: [entryFile],
 			bundle: true,
 			format: "iife",
 			globalName: "__module",
-			outfile: outFile,
+			// For font packages: use outdir so esbuild can emit asset files alongside the JS.
+			// For everything else: use outfile as before.
+			...(isFont ? { outdir } : { outfile: outFile }),
 			platform: "browser",
 			target: "es2020",
 			// For RN/Expo packages: prioritize .web.* extensions, handle JSX in .js,
-			// and inline font/image assets as data URLs.
+			// and serve font assets as static files instead of inlining as data URLs.
 			...(isReactNative && {
 				resolveExtensions: [
 					".web.tsx", ".web.ts", ".web.js",
@@ -393,8 +397,14 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				],
 				loader: {
 					".js": "jsx",
-					".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl",
+					".ttf": isFont ? "file" : "dataurl",
+					".otf": isFont ? "file" : "dataurl",
+					".png": "dataurl",
 				},
+				...(isFont && {
+					publicPath: `${baseUrl || `http://localhost:${PORT}`}/assets`,
+					assetNames: "[name]-[hash]",
+				}),
 				banner: {
 					js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');",
 				},
@@ -407,6 +417,25 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				selectiveExternalPlugin,
 			],
 		});
+
+		// For font packages: move asset files to cache/assets/ for static serving,
+		// and read the JS output from the outdir.
+		if (isFont && outdir) {
+			const ASSETS_DIR = path.join(CACHE_DIR, "assets");
+			fs.mkdirSync(ASSETS_DIR, { recursive: true });
+			const outFiles = fs.readdirSync(outdir);
+			for (const f of outFiles) {
+				if (!f.endsWith(".js")) {
+					// Move font files to cache/assets/
+					fs.copyFileSync(path.join(outdir, f), path.join(ASSETS_DIR, f));
+				}
+			}
+			// Copy the JS output to the expected outFile path
+			const jsFile = outFiles.find(f => f.endsWith(".js"));
+			if (jsFile) {
+				fs.copyFileSync(path.join(outdir, jsFile), outFile);
+			}
+		}
 
 		const bundled = fs.readFileSync(outFile, "utf-8");
 		const externalsJson = JSON.stringify(externalizedMap);
@@ -788,6 +817,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 // Individual package endpoint (backward compatible)
 // ============================================================
 
+// Serve font asset files (cache/assets/*.ttf, *.otf)
+app.use("/assets", express.static(path.join(CACHE_DIR, "assets"), {
+	maxAge: "1y",
+	immutable: true,
+}));
+
 // GET /pkg/* - unpkg-style URLs:
 //   /pkg/lodash           -> lodash@latest
 //   /pkg/lodash@4.17.21   -> lodash@4.17.21
@@ -802,7 +837,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 	const parsed = parseSpecifier(raw);
 	if (!parsed) { res.status(400).send("// Invalid package specifier\n"); return; }
 
-	handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath).catch(
+	const baseUrl = `${req.protocol}://${req.get("host")}`;
+	handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath, baseUrl).catch(
 		(err) => {
 			console.error("[unhandled]", err);
 			if (!res.headersSent) res.status(500).send("// Internal error\n");
