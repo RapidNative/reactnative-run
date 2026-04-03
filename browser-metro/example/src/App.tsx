@@ -878,10 +878,10 @@ export function App() {
   }
 
   async function downloadNativeBundle() {
-    if (!editorFsRef.current) return;
+    if (!editorFSRef.current) return;
     try {
       const { Bundler, VirtualFS, typescriptTransformer } = await import("browser-metro");
-      const files = editorFsRef.current.getFiles();
+      const files = editorFSRef.current.getFiles();
       const vfs = new VirtualFS(files);
 
       // Find entry file
