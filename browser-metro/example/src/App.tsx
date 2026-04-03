@@ -877,89 +877,64 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
-  async function downloadNativeBundle() {
-    if (!editorFSRef.current) {
-      alert("No project loaded.");
+  function downloadNativeBundle() {
+    const webBundle = lastBundleRef.current;
+    if (!webBundle) {
+      alert("Run the bundler first (click Run or Build), then download the native bundle.");
       return;
     }
 
-    try {
-      const { Bundler, VirtualFS, typescriptTransformer } = await import("browser-metro");
-      const allFiles = editorFSRef.current.toFileMap();
-      const sourceExts = [".ts", ".tsx", ".js", ".jsx"];
-      const files: typeof allFiles = {};
-      for (const [p, entry] of Object.entries(allFiles)) {
-        if (p.includes("/.") || p.includes("/node_modules/")) continue; // skip hidden dirs
-        if (sourceExts.some(ext => p.endsWith(ext))) files[p] = entry;
-      }
-      const vfs = new VirtualFS(files);
-      const entryFile = findEntryFile(files);
+    // Take the already-built web bundle and re-wrap in Metro __d/__r format.
+    // The web bundle has all modules already resolved and transformed.
+    // We just change the wrapper from IIFE to Metro's module system,
+    // and let require() fall through to Expo Go's runtime for packages
+    // like react and react-native that are built into Expo Go.
 
-      // Bundle with externals: react, react-native, etc. are NOT bundled.
-      // They resolve at runtime from Expo Go's built-in modules.
-      const bundler = new Bundler(vfs, {
-        transformer: typescriptTransformer,
-        resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
-        server: { packageServerUrl: PACKAGE_SERVER_URL },
-        externals: [
-          "react", "react-native", "react-dom",
-          "react/jsx-runtime", "react/jsx-dev-runtime",
-          "expo", "expo-router", "expo-status-bar",
-          "react-native-web", "react-native-safe-area-context",
-          "react-native-screens", "react-native-gesture-handler",
-          "@react-navigation",
-        ],
-      });
+    const modulesStart = webBundle.indexOf("})({\n");
+    const modulesEnd = webBundle.lastIndexOf("\n});");
 
-      // Use the standard web bundle format (same module bodies)
-      const webBundle = await bundler.bundle(entryFile);
-
-      // Re-wrap in Metro __d/__r format for Expo Go
-      const modulesStart = webBundle.indexOf("})({\n");
-      const modulesEnd = webBundle.lastIndexOf("\n});");
-
-      if (modulesStart === -1 || modulesEnd === -1) {
-        alert("Could not parse bundle for native conversion.");
-        return;
-      }
-
-      const modulesStr = webBundle.slice(modulesStart + 4, modulesEnd + 1);
-      const entryMatch = webBundle.match(/require\(("[^"]+"|'[^']+')\);/);
-      const entryId = entryMatch ? entryMatch[1] : JSON.stringify(entryFile);
-
-      let native =
-        "var __BUNDLE_START_TIME__=this.nativePerformanceNow?nativePerformanceNow():Date.now()," +
-        "__DEV__=true,process={env:{NODE_ENV:\"development\"}},__METRO_GLOBAL_PREFIX__='';\n\n" +
-        "(function(global){\n" +
-        "  var modules={};\n" +
-        "  function define(f,id){modules[id]={f:f,init:false,m:{exports:{}}};}\n" +
-        "  function req(id){\n" +
-        "    var m=modules[id];\n" +
-        "    if(!m)return require(id);\n" + // Fall through to Expo Go's require for externals
-        "    if(m.init)return m.m.exports;\n" +
-        "    m.init=true;\n" +
-        "    m.f.call(m.m.exports,m.m,m.m.exports,req);\n" +
-        "    return m.m.exports;\n" +
-        "  }\n" +
-        "  global.__d=define;global.__r=req;global.__c={};\n" +
-        "})(typeof globalThis!=='undefined'?globalThis:typeof global!=='undefined'?global:this);\n\n" +
-        "(function(){\n" +
-        "  var mods={" + modulesStr + "};\n" +
-        "  for(var id in mods){(function(id,fn){__d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);})(id,mods[id]);}\n" +
-        "})();\n\n" +
-        "__r(" + entryId + ");\n";
-
-      const blob = new Blob([native], { type: "application/javascript" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "expo-test-bundle.js";
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e: any) {
-      console.error("Native bundle failed:", e);
-      alert("Native bundle failed: " + e.message);
+    if (modulesStart === -1 || modulesEnd === -1) {
+      alert("Could not parse web bundle. Make sure you've run the bundler first.");
+      return;
     }
+
+    const modulesStr = webBundle.slice(modulesStart + 4, modulesEnd + 1);
+    const entryMatch = webBundle.match(/require\(("[^"]+"|'[^']+')\);/);
+    const entryId = entryMatch ? entryMatch[1] : '"/index.ts"';
+
+    const native =
+      "var __BUNDLE_START_TIME__=this.nativePerformanceNow?nativePerformanceNow():Date.now()," +
+      "__DEV__=true,process={env:{NODE_ENV:\"development\"}},__METRO_GLOBAL_PREFIX__='';\n\n" +
+      // Metro module system - falls through to native require() for unknown modules
+      "(function(global){\n" +
+      "  var modules={};\n" +
+      "  function define(f,id){modules[id]={f:f,init:false,m:{exports:{}}};}\n" +
+      "  function req(id){\n" +
+      "    var m=modules[id];\n" +
+      "    if(!m)return require(id);\n" +
+      "    if(m.init)return m.m.exports;\n" +
+      "    m.init=true;\n" +
+      "    m.f.call(m.m.exports,m.m,m.m.exports,req);\n" +
+      "    return m.m.exports;\n" +
+      "  }\n" +
+      "  global.__d=define;global.__r=req;global.__c={};\n" +
+      "})(typeof globalThis!=='undefined'?globalThis:typeof global!=='undefined'?global:this);\n\n" +
+      // Register all modules from the web bundle
+      "(function(){\n" +
+      "  var mods={" + modulesStr + "};\n" +
+      "  for(var id in mods){(function(id,fn){\n" +
+      "    __d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);\n" +
+      "  })(id,mods[id]);}\n" +
+      "})();\n\n" +
+      "__r(" + entryId + ");\n";
+
+    const blob = new Blob([native], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "expo-test-bundle.js";
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const projectNames = Object.keys(projects);
