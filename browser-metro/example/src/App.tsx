@@ -884,12 +884,7 @@ export function App() {
       const files = editorFSRef.current.toFileMap();
       const vfs = new VirtualFS(files);
 
-      // Find entry file
-      const entryFile = vfs.exists("/App.tsx") ? "/App.tsx"
-        : vfs.exists("/App.jsx") ? "/App.jsx"
-        : vfs.exists("/index.tsx") ? "/index.tsx"
-        : vfs.exists("/index.ts") ? "/index.ts"
-        : "/App.tsx";
+      const entryFile = findEntryFile(files);
 
       const bundler = new Bundler(vfs, {
         transformer: typescriptTransformer,
