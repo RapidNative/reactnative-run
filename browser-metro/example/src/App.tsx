@@ -919,12 +919,15 @@ export function App() {
       "  }\n" +
       "  global.__d=define;global.__r=req;global.__c={};\n" +
       "})(typeof globalThis!=='undefined'?globalThis:typeof global!=='undefined'?global:this);\n\n" +
-      // Register all modules from the web bundle
+      // Register only local modules (skip npm packages - they resolve from Expo Go)
       "(function(){\n" +
       "  var mods={" + modulesStr + "};\n" +
-      "  for(var id in mods){(function(id,fn){\n" +
-      "    __d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);\n" +
-      "  })(id,mods[id]);}\n" +
+      "  for(var id in mods){\n" +
+      "    if(id.charAt(0)!=='/') continue;\n" + // Only register local modules (start with /)
+      "    (function(id,fn){\n" +
+      "      __d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);\n" +
+      "    })(id,mods[id]);\n" +
+      "  }\n" +
       "})();\n\n" +
       "__r(" + entryId + ");\n";
 
