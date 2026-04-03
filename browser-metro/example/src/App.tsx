@@ -881,7 +881,7 @@ export function App() {
     if (!editorFSRef.current) return;
     try {
       const { Bundler, VirtualFS, typescriptTransformer } = await import("browser-metro");
-      const files = editorFSRef.current.getFiles();
+      const files = editorFSRef.current.toFileMap();
       const vfs = new VirtualFS(files);
 
       // Find entry file
