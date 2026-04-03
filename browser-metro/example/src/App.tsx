@@ -877,113 +877,6 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
-  function downloadNativeBundle() {
-    const webBundle = lastBundleRef.current;
-    if (!webBundle) {
-      alert("Run the bundler first (click Run or Build), then download the native bundle.");
-      return;
-    }
-
-    // Take the already-built web bundle and re-wrap in Metro __d/__r format.
-    // The web bundle has all modules already resolved and transformed.
-    // We just change the wrapper from IIFE to Metro's module system,
-    // and let require() fall through to Expo Go's runtime for packages
-    // like react and react-native that are built into Expo Go.
-
-    const modulesStart = webBundle.indexOf("})({\n");
-    const modulesEnd = webBundle.lastIndexOf("\n});");
-
-    if (modulesStart === -1 || modulesEnd === -1) {
-      alert("Could not parse web bundle. Make sure you've run the bundler first.");
-      return;
-    }
-
-    const fullModulesStr = webBundle.slice(modulesStart + 4, modulesEnd + 1);
-    const entryMatch = webBundle.match(/require\(("[^"]+"|'[^']+')\);/);
-    const entryId = entryMatch ? entryMatch[1] : '"/index.ts"';
-
-    // Parse out only local modules (IDs starting with /) by extracting them
-    // from the modules object. This removes web-only npm code entirely.
-    const moduleRegex = /((?:"\/[^"]*"|'\/[^']*'))\s*:\s*function\s*\(module,\s*exports,\s*require\)\s*\{/g;
-    const localModules: string[] = [];
-    let match: RegExpExecArray | null;
-    let lastNpmEnd = 0;
-
-    // Split the modules string to extract only local file modules
-    // Strategy: find each module boundary and keep only /... ones
-    const moduleEntries: string[] = [];
-    const modStr = "{" + fullModulesStr + "}";
-    // Use Function constructor to safely extract keys (these are just string keys)
-    // Actually, let's do string parsing instead - find "/<path>": function(module, exports, require) { ... }
-    // by tracking brace depth
-    const keys: { id: string; start: number; end: number }[] = [];
-    let i = 0;
-    while (i < fullModulesStr.length) {
-      // Find next key: "..." or '...'
-      const qMatch = fullModulesStr.slice(i).match(/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*:\s*function\s*\(module,\s*exports,\s*require\)\s*\{/);
-      if (!qMatch) { i++; continue; }
-
-      const id = JSON.parse(qMatch[1].replace(/^'|'$/g, '"'));
-      const bodyStart = i + qMatch[0].length;
-
-      // Track brace depth to find the end of this function body
-      let depth = 1;
-      let j = bodyStart;
-      while (j < fullModulesStr.length && depth > 0) {
-        if (fullModulesStr[j] === '{') depth++;
-        else if (fullModulesStr[j] === '}') depth--;
-        j++;
-      }
-
-      if (id.startsWith('/')) {
-        // Local module - include it
-        const entry = qMatch[1] + ": function(module, exports, require) {" +
-          fullModulesStr.slice(bodyStart, j - 1) + "}";
-        moduleEntries.push(entry);
-      }
-
-      // Skip past this module + any comma/whitespace
-      i = j;
-      while (i < fullModulesStr.length && /[\s,]/.test(fullModulesStr[i])) i++;
-    }
-
-    const modulesStr = moduleEntries.join(",\n\n");
-
-    const native =
-      "var __BUNDLE_START_TIME__=this.nativePerformanceNow?nativePerformanceNow():Date.now()," +
-      "__DEV__=true,process={env:{NODE_ENV:\"development\"}},__METRO_GLOBAL_PREFIX__='';\n\n" +
-      // Metro module system - falls through to native require() for unknown modules
-      "(function(global){\n" +
-      "  var modules={};\n" +
-      "  function define(f,id){modules[id]={f:f,init:false,m:{exports:{}}};}\n" +
-      "  function req(id){\n" +
-      "    var m=modules[id];\n" +
-      "    if(!m)return require(id);\n" +
-      "    if(m.init)return m.m.exports;\n" +
-      "    m.init=true;\n" +
-      "    m.f.call(m.m.exports,m.m,m.m.exports,req);\n" +
-      "    return m.m.exports;\n" +
-      "  }\n" +
-      "  global.__d=define;global.__r=req;global.__c={};\n" +
-      "})(typeof globalThis!=='undefined'?globalThis:typeof global!=='undefined'?global:this);\n\n" +
-      // Register local modules only (npm packages stripped, resolved from Expo Go)
-      "(function(){\n" +
-      "  var mods={" + modulesStr + "};\n" +
-      "  for(var id in mods){(function(id,fn){\n" +
-      "    __d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);\n" +
-      "  })(id,mods[id]);}\n" +
-      "})();\n\n" +
-      "__r(" + entryId + ");\n";
-
-    const blob = new Blob([native], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "expo-test-bundle.js";
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
   const projectNames = Object.keys(projects);
 
   // --- HMR test: dynamically add a third tab to expo ---
@@ -1184,22 +1077,13 @@ export default function TabLayout() {
             </>
           )}
           {hasBundle && (
-            <>
-              <button
-                onClick={downloadBundle}
-                title="Download web bundle"
-                className={`flex items-center h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
-              >
-                <Download size={12} />
-              </button>
-              <button
-                onClick={downloadNativeBundle}
-                title="Download native bundle (for Expo Go)"
-                className={`flex items-center gap-1 h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-orange-400 hover:text-orange-200 border-orange-700 hover:border-orange-500 bg-orange-500/10" : "text-orange-600 hover:text-orange-700 border-orange-300 hover:border-orange-400 bg-orange-50"}`}
-              >
-                <Smartphone size={12} />
-              </button>
-            </>
+            <button
+              onClick={downloadBundle}
+              title="Download bundle"
+              className={`flex items-center h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
+            >
+              <Download size={12} />
+            </button>
           )}
           {isExpoReal && watchMode && hmrReady && (
             <div className="relative">
