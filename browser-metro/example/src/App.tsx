@@ -886,9 +886,10 @@ export function App() {
     try {
       const { Bundler, VirtualFS, typescriptTransformer } = await import("browser-metro");
       const allFiles = editorFSRef.current.toFileMap();
-      const sourceExts = [".ts", ".tsx", ".js", ".jsx", ".json"];
+      const sourceExts = [".ts", ".tsx", ".js", ".jsx"];
       const files: typeof allFiles = {};
       for (const [p, entry] of Object.entries(allFiles)) {
+        if (p.includes("/.") || p.includes("/node_modules/")) continue; // skip hidden dirs
         if (sourceExts.some(ext => p.endsWith(ext))) files[p] = entry;
       }
       const vfs = new VirtualFS(files);
