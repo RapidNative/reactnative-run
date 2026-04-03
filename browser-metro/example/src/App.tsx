@@ -898,9 +898,56 @@ export function App() {
       return;
     }
 
-    const modulesStr = webBundle.slice(modulesStart + 4, modulesEnd + 1);
+    const fullModulesStr = webBundle.slice(modulesStart + 4, modulesEnd + 1);
     const entryMatch = webBundle.match(/require\(("[^"]+"|'[^']+')\);/);
     const entryId = entryMatch ? entryMatch[1] : '"/index.ts"';
+
+    // Parse out only local modules (IDs starting with /) by extracting them
+    // from the modules object. This removes web-only npm code entirely.
+    const moduleRegex = /((?:"\/[^"]*"|'\/[^']*'))\s*:\s*function\s*\(module,\s*exports,\s*require\)\s*\{/g;
+    const localModules: string[] = [];
+    let match: RegExpExecArray | null;
+    let lastNpmEnd = 0;
+
+    // Split the modules string to extract only local file modules
+    // Strategy: find each module boundary and keep only /... ones
+    const moduleEntries: string[] = [];
+    const modStr = "{" + fullModulesStr + "}";
+    // Use Function constructor to safely extract keys (these are just string keys)
+    // Actually, let's do string parsing instead - find "/<path>": function(module, exports, require) { ... }
+    // by tracking brace depth
+    const keys: { id: string; start: number; end: number }[] = [];
+    let i = 0;
+    while (i < fullModulesStr.length) {
+      // Find next key: "..." or '...'
+      const qMatch = fullModulesStr.slice(i).match(/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*:\s*function\s*\(module,\s*exports,\s*require\)\s*\{/);
+      if (!qMatch) { i++; continue; }
+
+      const id = JSON.parse(qMatch[1].replace(/^'|'$/g, '"'));
+      const bodyStart = i + qMatch[0].length;
+
+      // Track brace depth to find the end of this function body
+      let depth = 1;
+      let j = bodyStart;
+      while (j < fullModulesStr.length && depth > 0) {
+        if (fullModulesStr[j] === '{') depth++;
+        else if (fullModulesStr[j] === '}') depth--;
+        j++;
+      }
+
+      if (id.startsWith('/')) {
+        // Local module - include it
+        const entry = qMatch[1] + ": function(module, exports, require) {" +
+          fullModulesStr.slice(bodyStart, j - 1) + "}";
+        moduleEntries.push(entry);
+      }
+
+      // Skip past this module + any comma/whitespace
+      i = j;
+      while (i < fullModulesStr.length && /[\s,]/.test(fullModulesStr[i])) i++;
+    }
+
+    const modulesStr = moduleEntries.join(",\n\n");
 
     const native =
       "var __BUNDLE_START_TIME__=this.nativePerformanceNow?nativePerformanceNow():Date.now()," +
@@ -919,15 +966,12 @@ export function App() {
       "  }\n" +
       "  global.__d=define;global.__r=req;global.__c={};\n" +
       "})(typeof globalThis!=='undefined'?globalThis:typeof global!=='undefined'?global:this);\n\n" +
-      // Register only local modules (skip npm packages - they resolve from Expo Go)
+      // Register local modules only (npm packages stripped, resolved from Expo Go)
       "(function(){\n" +
       "  var mods={" + modulesStr + "};\n" +
-      "  for(var id in mods){\n" +
-      "    if(id.charAt(0)!=='/') continue;\n" + // Only register local modules (start with /)
-      "    (function(id,fn){\n" +
-      "      __d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);\n" +
-      "    })(id,mods[id]);\n" +
-      "  }\n" +
+      "  for(var id in mods){(function(id,fn){\n" +
+      "    __d(function(g,require,module,exports){fn.call(exports,module,exports,require);},id);\n" +
+      "  })(id,mods[id]);}\n" +
       "})();\n\n" +
       "__r(" + entryId + ");\n";
 
