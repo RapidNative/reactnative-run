@@ -894,7 +894,7 @@ export function App() {
       const bundler = new Bundler(vfs, {
         transformer: typescriptTransformer,
         resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
-        packageServerUrl: packageServerUrl,
+        packageServerUrl: PACKAGE_SERVER_URL,
       });
 
       const nativeCode = await bundler.bundleNative(entryFile);
