@@ -69,6 +69,8 @@ export interface BundlerConfig {
   routerShim?: boolean;
   /** URL prefix for external assets, e.g. "/projects/expo-real" */
   assetPublicPath?: string;
+  /** Packages to exclude from bundling (resolved by the host runtime instead) */
+  externals?: string[];
 }
 
 export interface FileChange {

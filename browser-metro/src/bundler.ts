@@ -305,11 +305,27 @@ export class Bundler {
 
     await walk(entryFile);
 
+    // Remove externals from npm packages (they're provided by the host runtime)
+    const externals = new Set(this.config.externals ?? []);
+    for (const name of externals) {
+      delete npmPackages[name];
+    }
+    // Also remove any package that starts with an external prefix (e.g. "react-native/..." if "react-native" is external)
+    for (const name of Object.keys(npmPackages)) {
+      for (const ext of externals) {
+        if (name === ext || name.startsWith(ext + "/")) {
+          delete npmPackages[name];
+        }
+      }
+    }
+
     // Process module aliases: swap sources for targets in the fetch list
     const aliases = this.getModuleAliases();
     for (const [from, to] of Object.entries(aliases)) {
       delete npmPackages[from];
-      npmPackages[to] = true;
+      if (!externals.has(to)) {
+        npmPackages[to] = true;
+      }
     }
 
     // Collect shims: these replace npm packages with inline code
