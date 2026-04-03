@@ -437,4 +437,92 @@ export class Bundler {
 
     return bundle;
   }
+
+  /**
+   * Emit a Metro-compatible native bundle using __d/__r module system.
+   * This format is understood by Expo Go and React Native runtime.
+   */
+  private emitNativeBundle(
+    moduleMap: ModuleMap,
+    entryFile: string,
+  ): string {
+    const ids = Object.keys(moduleMap);
+
+    // Assign numeric IDs (Metro uses numbers, not strings)
+    const idMap: Record<string, number> = {};
+    ids.forEach((id, i) => { idMap[id] = i; });
+
+    // Metro preamble
+    let bundle =
+      "var __BUNDLE_START_TIME__=this.nativePerformanceNow?nativePerformanceNow():Date.now()," +
+      "__DEV__=true,process={env:{NODE_ENV:\"development\"}},__METRO_GLOBAL_PREFIX__='';\n\n";
+
+    // Metro module system
+    bundle +=
+      "(function (global) {\n" +
+      "  'use strict';\n" +
+      "  var modules = Object.create(null);\n" +
+      "  function define(factory, moduleId, dependencyMap) {\n" +
+      "    modules[moduleId] = {\n" +
+      "      factory: factory, dependencyMap: dependencyMap || [],\n" +
+      "      isInitialized: false, publicModule: { exports: {} }\n" +
+      "    };\n" +
+      "  }\n" +
+      "  function metroRequire(moduleId) {\n" +
+      "    if (typeof moduleId === 'string') {\n" +
+      "      // String require - try global require (Expo Go's modules)\n" +
+      "      try { return global.require ? global.require(moduleId) : require(moduleId); } catch(e) {}\n" +
+      "    }\n" +
+      "    var module = modules[moduleId];\n" +
+      "    if (!module) throw new Error('Module not found: ' + moduleId);\n" +
+      "    if (module.isInitialized) return module.publicModule.exports;\n" +
+      "    module.isInitialized = true;\n" +
+      "    var _require = function(id) {\n" +
+      "      if (typeof id === 'number') return metroRequire(id);\n" +
+      "      return metroRequire(id);\n" +
+      "    };\n" +
+      "    module.factory(global, _require, module, module.publicModule.exports, module.dependencyMap);\n" +
+      "    return module.publicModule.exports;\n" +
+      "  }\n" +
+      "  global.__d = define;\n" +
+      "  global.__r = metroRequire;\n" +
+      "  global.__c = Object.create(null);\n" +
+      "  global.__registerSegment = function() {};\n" +
+      "})(typeof globalThis !== 'undefined' ? globalThis : typeof global !== 'undefined' ? global : this);\n\n";
+
+    // Emit each module as __d(factory, numericId, [depIds])
+    for (const id of ids) {
+      const numId = idMap[id];
+      const code = moduleMap[id];
+
+      // Rewrite require("name") calls to use numeric IDs where possible
+      const rewrittenCode = code.replace(
+        /require\((['"]((?:\.\/|\.\.\/|\/)[^'"]+)['"])\)/g,
+        (_match: string, _full: string, dep: string) => {
+          if (idMap[dep] !== undefined) {
+            return `require(${idMap[dep]})`;
+          }
+          return _match;
+        }
+      );
+
+      bundle += `__d(function(global, require, module, exports, _dependencyMap) {\n`;
+      bundle += rewrittenCode + "\n";
+      bundle += `}, ${numId}, []);\n\n`;
+    }
+
+    // Start the entry module
+    bundle += `__r(${idMap[entryFile]});\n`;
+
+    return bundle;
+  }
+
+  /**
+   * Bundle for native (Metro __d/__r format for Expo Go).
+   * Same as bundle() but outputs Metro-compatible format.
+   */
+  async bundleNative(entryFile: string): Promise<string> {
+    const { moduleMap } = await this.buildModuleMap(entryFile);
+    return this.emitNativeBundle(moduleMap, entryFile);
+  }
 }

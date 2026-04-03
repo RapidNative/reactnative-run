@@ -1,6 +1,8 @@
 const express = require('express');
 const os = require('os');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = 8088;
@@ -227,6 +229,21 @@ app.get('/index.exp', handleManifest);
 app.get(/\.bundle$/, async (req, res) => {
   const platform = req.query.platform || 'ios';
   console.log(`[bundle] path=${req.path}, platform=${platform}`);
+
+  // FILE MODE: Serve a bundle from a local file
+  const bundleFile = process.env.BUNDLE_FILE;
+  if (bundleFile) {
+    const filePath = path.resolve(bundleFile);
+    if (fs.existsSync(filePath)) {
+      const body = fs.readFileSync(filePath, 'utf-8');
+      console.log(`[bundle] serving from file: ${filePath} (${(body.length / 1024).toFixed(0)}KB)`);
+      res.set({ 'Content-Type': 'application/javascript' });
+      res.send(body);
+      return;
+    } else {
+      console.log(`[bundle] file not found: ${filePath}`);
+    }
+  }
 
   // PROXY MODE: Forward to real Metro if METRO_PROXY is set
   const metroProxy = process.env.METRO_PROXY;

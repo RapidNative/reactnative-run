@@ -877,6 +877,40 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function downloadNativeBundle() {
+    if (!editorFsRef.current) return;
+    try {
+      const { Bundler, VirtualFS, typescriptTransformer } = await import("browser-metro");
+      const files = editorFsRef.current.getFiles();
+      const vfs = new VirtualFS(files);
+
+      // Find entry file
+      const entryFile = vfs.exists("/App.tsx") ? "/App.tsx"
+        : vfs.exists("/App.jsx") ? "/App.jsx"
+        : vfs.exists("/index.tsx") ? "/index.tsx"
+        : vfs.exists("/index.ts") ? "/index.ts"
+        : "/App.tsx";
+
+      const bundler = new Bundler(vfs, {
+        transformer: typescriptTransformer,
+        resolver: { sourceExts: ["ts", "tsx", "js", "jsx"] },
+        packageServerUrl: packageServerUrl,
+      });
+
+      const nativeCode = await bundler.bundleNative(entryFile);
+      const blob = new Blob([nativeCode], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "expo-test-bundle.js";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      console.error("Native bundle failed:", e);
+      alert("Native bundle failed: " + e.message);
+    }
+  }
+
   const projectNames = Object.keys(projects);
 
   // --- HMR test: dynamically add a third tab to expo ---
@@ -1077,13 +1111,22 @@ export default function TabLayout() {
             </>
           )}
           {hasBundle && (
-            <button
-              onClick={downloadBundle}
-              title="Download bundle"
-              className={`flex items-center h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
-            >
-              <Download size={12} />
-            </button>
+            <>
+              <button
+                onClick={downloadBundle}
+                title="Download web bundle"
+                className={`flex items-center h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-zinc-400 hover:text-zinc-200 border-zinc-700 hover:border-zinc-500" : "text-zinc-500 hover:text-zinc-700 border-zinc-300 hover:border-zinc-400"}`}
+              >
+                <Download size={12} />
+              </button>
+              <button
+                onClick={downloadNativeBundle}
+                title="Download native bundle (for Expo Go)"
+                className={`flex items-center gap-1 h-7 px-2 text-xs rounded transition-colors border ${theme === "dark" ? "text-orange-400 hover:text-orange-200 border-orange-700 hover:border-orange-500 bg-orange-500/10" : "text-orange-600 hover:text-orange-700 border-orange-300 hover:border-orange-400 bg-orange-50"}`}
+              >
+                <Smartphone size={12} />
+              </button>
+            </>
           )}
           {isExpoReal && watchMode && hmrReady && (
             <div className="relative">
