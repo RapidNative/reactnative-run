@@ -1,3 +1,5 @@
+import { parse as acornParse } from "acorn";
+
 const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 // Dynamic `import("x")`. Use a negative lookbehind to avoid matching `.import(`
 // (e.g. method calls) and require `import` to be a standalone keyword.
@@ -57,30 +59,103 @@ export function rewriteRequires(
       return 'require("' + resolved + '")';
     },
   );
-  // Lower dynamic `import("x")` → `Promise.resolve().then(function(){return require("x");})`
-  // so it flows through the same module registry as static requires. The
-  // microtask-deferred form preserves async semantics for callers that rely on it.
-  return requireRewritten.replace(
-    DYNAMIC_IMPORT_RE,
-    (full: string, target: string): string => {
-      const resolved = resolveTarget(target);
-      const id = resolved === null ? target : resolved;
-      return 'Promise.resolve().then(function(){return require("' + id + '");})';
-    },
+  // Lower dynamic `import("x")` so it flows through the same module registry
+  // as static requires. Wrap the result with __esModule interop so callers
+  // like React.lazy — which expect a module namespace with `.default` —
+  // work for plain CJS modules whose `module.exports` is the value itself.
+  return rewriteDynamicImports(requireRewritten, (target) => {
+    const resolved = resolveTarget(target);
+    return resolved === null ? target : resolved;
+  });
+}
+
+/**
+ * Lower dynamic `import("x")` without rewriting require targets. Used for
+ * prebundled npm package code where specifiers are already registry keys.
+ */
+export function lowerDynamicImports(source: string): string {
+  return rewriteDynamicImports(source, (target) => target);
+}
+
+function loweredDynamicImport(id: string): string {
+  return (
+    'Promise.resolve().then(function(){var m=require("' +
+    id +
+    '");return m&&m.__esModule?m:{default:m};})'
   );
 }
 
 /**
- * Lower dynamic `import("x")` to `Promise.resolve().then(()=>require("x"))`
- * without rewriting require targets. Used for prebundled npm package code
- * where specifiers are already registry keys and must not be resolved.
+ * AST-based lowering of `import("x")` calls using acorn. Walks the parsed
+ * tree and only rewrites real `ImportExpression` nodes whose argument is a
+ * string literal, so source that merely *mentions* `import(...)` inside
+ * strings, template literals, regex literals, or comments (e.g. React's
+ * "lazy: Expected the result of a dynamic import()" error message) is
+ * left untouched. Falls back to returning the source unchanged if parsing
+ * fails — the regex-based passes that consume this output handle the rest.
  */
-export function lowerDynamicImports(source: string): string {
-  return source.replace(
-    DYNAMIC_IMPORT_RE,
-    (_full: string, target: string): string =>
-      'Promise.resolve().then(function(){return require("' + target + '");})',
-  );
+function rewriteDynamicImports(
+  source: string,
+  resolveId: (target: string) => string,
+): string {
+  let ast: AcornNode;
+  try {
+    ast = acornParse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      allowImportExportEverywhere: true,
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+      allowHashBang: true,
+    }) as unknown as AcornNode;
+  } catch {
+    return source;
+  }
+
+  const edits: { start: number; end: number; target: string }[] = [];
+  const visit = (node: AcornNode | null | undefined): void => {
+    if (!node || typeof node !== "object" || typeof node.type !== "string") return;
+    if (
+      node.type === "ImportExpression" &&
+      node.source &&
+      node.source.type === "Literal" &&
+      typeof (node.source as { value?: unknown }).value === "string"
+    ) {
+      edits.push({
+        start: node.start as number,
+        end: node.end as number,
+        target: (node.source as unknown as { value: string }).value,
+      });
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+      const v = (node as Record<string, unknown>)[key];
+      if (Array.isArray(v)) {
+        for (const item of v) visit(item as AcornNode);
+      } else if (v && typeof v === "object" && typeof (v as AcornNode).type === "string") {
+        visit(v as AcornNode);
+      }
+    }
+  };
+  visit(ast);
+
+  if (edits.length === 0) return source;
+  edits.sort((a, b) => b.start - a.start);
+  let out = source;
+  for (const e of edits) {
+    const id = resolveId(e.target);
+    out = out.slice(0, e.start) + loweredDynamicImport(id) + out.slice(e.end);
+  }
+  return out;
+}
+
+interface AcornNode {
+  type: string;
+  start?: number;
+  end?: number;
+  source?: AcornNode;
+  [key: string]: unknown;
 }
 
 const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];

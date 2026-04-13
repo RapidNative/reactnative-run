@@ -7,6 +7,12 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Link } from 'expo-router';
 
+const LazyLinkRow = () => (
+  <Link href="/items/42">
+    <ThemedText type="link">Open lazy item route →</ThemedText>
+  </Link>
+);
+
 export default function HomeScreen() {
   return (
     <ParallaxScrollView
@@ -20,6 +26,9 @@ export default function HomeScreen() {
       <ThemedView style={styles.titleContainer}>
         <ThemedText type="title">Welcome!</ThemedText>
         <HelloWave />
+      </ThemedView>
+      <ThemedView style={styles.stepContainer}>
+        <LazyLinkRow />
       </ThemedView>
       <ThemedView style={styles.stepContainer}>
         <ThemedText type="subtitle">Step 1: Try it</ThemedText>
