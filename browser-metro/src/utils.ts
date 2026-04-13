@@ -1,4 +1,7 @@
 const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+// Dynamic `import("x")`. Use a negative lookbehind to avoid matching `.import(`
+// (e.g. method calls) and require `import` to be a standalone keyword.
+const DYNAMIC_IMPORT_RE = /(?<![.$\w])import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 // Matches lines that are single-line comments or JSDoc/block comment continuations
 const COMMENT_LINE_RE = /^\s*(?:\/\/|\/?\*)/;
 const EXTERNALS_RE = /^\/\/ @externals (.+)$/m;
@@ -15,7 +18,7 @@ export function parseExternalsFromBody(code: string): Record<string, string> {
   try { return JSON.parse(match[1]); } catch { return {}; }
 }
 
-/** Extract all require('...') call targets from source */
+/** Extract all require('...') and dynamic import('...') call targets from source */
 export function findRequires(source: string): string[] {
   if (!source) return [];
   const requires: string[] = [];
@@ -24,9 +27,13 @@ export function findRequires(source: string): string[] {
     const line = lines[i];
     // Skip comment lines to avoid picking up require() in JSDoc examples
     if (COMMENT_LINE_RE.test(line)) continue;
-    const re = new RegExp(REQUIRE_RE.source, REQUIRE_RE.flags);
+    const reqRe = new RegExp(REQUIRE_RE.source, REQUIRE_RE.flags);
     let match: RegExpExecArray | null;
-    while ((match = re.exec(line)) !== null) {
+    while ((match = reqRe.exec(line)) !== null) {
+      requires.push(match[1]);
+    }
+    const impRe = new RegExp(DYNAMIC_IMPORT_RE.source, DYNAMIC_IMPORT_RE.flags);
+    while ((match = impRe.exec(line)) !== null) {
       requires.push(match[1]);
     }
   }
@@ -42,12 +49,23 @@ export function rewriteRequires(
   fromFile: string,
   resolveTarget: (target: string) => string | null,
 ): string {
-  return source.replace(
+  const requireRewritten = source.replace(
     REQUIRE_RE,
     (full: string, target: string): string => {
       const resolved = resolveTarget(target);
       if (resolved === null) return full;
       return 'require("' + resolved + '")';
+    },
+  );
+  // Lower dynamic `import("x")` → `Promise.resolve().then(function(){return require("x");})`
+  // so it flows through the same module registry as static requires. The
+  // microtask-deferred form preserves async semantics for callers that rely on it.
+  return requireRewritten.replace(
+    DYNAMIC_IMPORT_RE,
+    (full: string, target: string): string => {
+      const resolved = resolveTarget(target);
+      const id = resolved === null ? target : resolved;
+      return 'Promise.resolve().then(function(){return require("' + id + '");})';
     },
   );
 }
