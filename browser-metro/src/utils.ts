@@ -70,6 +70,19 @@ export function rewriteRequires(
   );
 }
 
+/**
+ * Lower dynamic `import("x")` to `Promise.resolve().then(()=>require("x"))`
+ * without rewriting require targets. Used for prebundled npm package code
+ * where specifiers are already registry keys and must not be resolved.
+ */
+export function lowerDynamicImports(source: string): string {
+  return source.replace(
+    DYNAMIC_IMPORT_RE,
+    (_full: string, target: string): string =>
+      'Promise.resolve().then(function(){return require("' + target + '");})',
+  );
+}
+
 const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
 
 /**
