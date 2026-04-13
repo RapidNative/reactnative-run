@@ -57,30 +57,190 @@ export function rewriteRequires(
       return 'require("' + resolved + '")';
     },
   );
-  // Lower dynamic `import("x")` → `Promise.resolve().then(function(){return require("x");})`
-  // so it flows through the same module registry as static requires. The
-  // microtask-deferred form preserves async semantics for callers that rely on it.
-  return requireRewritten.replace(
-    DYNAMIC_IMPORT_RE,
-    (full: string, target: string): string => {
-      const resolved = resolveTarget(target);
-      const id = resolved === null ? target : resolved;
-      return 'Promise.resolve().then(function(){return require("' + id + '");})';
-    },
+  // Lower dynamic `import("x")` so it flows through the same module registry
+  // as static requires. Wrap the result with __esModule interop so callers
+  // like React.lazy — which expect a module namespace with `.default` —
+  // work for plain CJS modules whose `module.exports` is the value itself.
+  return rewriteDynamicImports(requireRewritten, (target) => {
+    const resolved = resolveTarget(target);
+    return resolved === null ? target : resolved;
+  });
+}
+
+/**
+ * Lower dynamic `import("x")` without rewriting require targets. Used for
+ * prebundled npm package code where specifiers are already registry keys.
+ */
+export function lowerDynamicImports(source: string): string {
+  return rewriteDynamicImports(source, (target) => target);
+}
+
+function loweredDynamicImport(id: string): string {
+  return (
+    'Promise.resolve().then(function(){var m=require("' +
+    id +
+    '");return m&&m.__esModule?m:{default:m};})'
   );
 }
 
 /**
- * Lower dynamic `import("x")` to `Promise.resolve().then(()=>require("x"))`
- * without rewriting require targets. Used for prebundled npm package code
- * where specifiers are already registry keys and must not be resolved.
+ * Tokenizer-aware lowering of `import("x")` calls. Skips string literals,
+ * template literals, regex literals, and comments so we never corrupt source
+ * that merely *mentions* dynamic imports inside text (e.g. React's own
+ * "lazy: Expected the result of a dynamic import()" error message).
  */
-export function lowerDynamicImports(source: string): string {
-  return source.replace(
-    DYNAMIC_IMPORT_RE,
-    (_full: string, target: string): string =>
-      'Promise.resolve().then(function(){return require("' + target + '");})',
-  );
+function rewriteDynamicImports(
+  source: string,
+  resolveId: (target: string) => string,
+): string {
+  let out = "";
+  let i = 0;
+  const n = source.length;
+  // Track the last non-whitespace code character so we can disambiguate
+  // `/` as the start of a regex literal vs. division.
+  let lastCode = "";
+
+  const isIdent = (c: string) => /[\w$]/.test(c);
+  // Chars that, when seen as the previous significant token, mean a `/` next
+  // begins a regex literal, not division.
+  const REGEX_PREV = new Set([
+    "", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+",
+    "-", "*", "/", "%", "^", "~", "<", ">",
+  ]);
+  // Identifier keywords that allow a following regex.
+  const REGEX_KEYWORDS = new Set([
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "case", "do", "else", "yield", "await",
+  ]);
+
+  const prevIdent = (): string => {
+    let j = out.length - 1;
+    while (j >= 0 && isIdent(out[j])) j--;
+    return out.slice(j + 1);
+  };
+
+  while (i < n) {
+    const c = source[i];
+    const c2 = source[i + 1];
+
+    // Line comment
+    if (c === "/" && c2 === "/") {
+      const end = source.indexOf("\n", i);
+      const stop = end === -1 ? n : end;
+      out += source.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    // Block comment
+    if (c === "/" && c2 === "*") {
+      const end = source.indexOf("*/", i + 2);
+      const stop = end === -1 ? n : end + 2;
+      out += source.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    // String literal
+    if (c === '"' || c === "'") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n) {
+        const ch = source[i];
+        out += ch;
+        i++;
+        if (ch === "\\" && i < n) { out += source[i]; i++; continue; }
+        if (ch === quote) break;
+      }
+      lastCode = quote;
+      continue;
+    }
+    // Template literal — naive: skip nested ${...} by depth tracking.
+    if (c === "`") {
+      out += c;
+      i++;
+      let depth = 0;
+      while (i < n) {
+        const ch = source[i];
+        if (ch === "\\" && i + 1 < n) { out += ch + source[i + 1]; i += 2; continue; }
+        if (depth === 0 && ch === "`") { out += ch; i++; break; }
+        if (depth === 0 && ch === "$" && source[i + 1] === "{") {
+          out += "${"; i += 2; depth++; continue;
+        }
+        if (depth > 0 && ch === "{") { depth++; out += ch; i++; continue; }
+        if (depth > 0 && ch === "}") { depth--; out += ch; i++; continue; }
+        out += ch; i++;
+      }
+      lastCode = "`";
+      continue;
+    }
+    // Regex literal — only if `/` is in a position where regex is allowed.
+    if (c === "/") {
+      const ident = prevIdent();
+      const allowRegex = REGEX_PREV.has(lastCode) || REGEX_KEYWORDS.has(ident);
+      if (allowRegex) {
+        out += c;
+        i++;
+        let inClass = false;
+        while (i < n) {
+          const ch = source[i];
+          out += ch;
+          i++;
+          if (ch === "\\" && i < n) { out += source[i]; i++; continue; }
+          if (ch === "[") inClass = true;
+          else if (ch === "]") inClass = false;
+          else if (ch === "/" && !inClass) break;
+        }
+        // consume regex flags
+        while (i < n && /[gimsuy]/.test(source[i])) { out += source[i]; i++; }
+        lastCode = "/";
+        continue;
+      }
+    }
+
+    // Try to match dynamic `import(...)` here.
+    // Boundary: previous code char must not be part of an identifier/member.
+    if (
+      c === "i" &&
+      source.startsWith("import", i) &&
+      !isIdent(out[out.length - 1] || "") &&
+      out[out.length - 1] !== "." &&
+      out[out.length - 1] !== "$"
+    ) {
+      let j = i + 6;
+      while (j < n && (source[j] === " " || source[j] === "\t")) j++;
+      if (source[j] === "(") {
+        let k = j + 1;
+        while (k < n && /\s/.test(source[k])) k++;
+        const q = source[k];
+        if (q === '"' || q === "'") {
+          let m = k + 1;
+          let target = "";
+          let bad = false;
+          while (m < n && source[m] !== q) {
+            if (source[m] === "\\") { bad = true; break; }
+            target += source[m];
+            m++;
+          }
+          if (!bad && source[m] === q) {
+            let p = m + 1;
+            while (p < n && /\s/.test(source[p])) p++;
+            if (source[p] === ")") {
+              const id = resolveId(target);
+              out += loweredDynamicImport(id);
+              i = p + 1;
+              lastCode = ")";
+              continue;
+            }
+          }
+        }
+      }
+    }
+
+    out += c;
+    if (!/\s/.test(c)) lastCode = c;
+    i++;
+  }
+  return out;
 }
 
 const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
