@@ -10,7 +10,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle } from "./utils.js";
 import type {
   BundlerConfig,
   BundlerPlugin,
@@ -249,7 +249,7 @@ export class IncrementalBundler {
     }
 
     if (this.prefetchedPackages[baseName]) {
-      return { code: this.prefetchedPackages[baseName], externals: {} };
+      return { code: lowerDynamicImports(this.prefetchedPackages[baseName]), externals: {} };
     }
 
     // Fallback to individual fetch
@@ -259,8 +259,12 @@ export class IncrementalBundler {
       const body = await res.text().catch(() => "");
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
     }
-    const code = await res.text();
-    const externals = parseExternalsFromBody(code);
+    const raw = await res.text();
+    const externals = parseExternalsFromBody(raw);
+    // Lower dynamic `import("x")` left behind by esbuild for externalized
+    // specifiers — these otherwise hit the browser's native module loader
+    // instead of our `require` registry.
+    const code = lowerDynamicImports(raw);
     return { code, externals };
   }
 
