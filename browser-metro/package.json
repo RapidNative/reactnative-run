@@ -1,6 +1,6 @@
 {
   "name": "browser-metro",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "A browser-based JavaScript/TypeScript bundler with HMR support, inspired by Metro. Runs entirely client-side.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,7 +21,7 @@
   "homepage": "https://reactnative.run",
   "repository": {
     "type": "git",
-    "url": "https://github.com/RapidNative/reactnative-run"
+    "url": "git+https://github.com/RapidNative/reactnative-run.git"
   },
   "author": "Sanket Sahu <sanket@rapidnative.com> (https://github.com/sanketsahu)",
   "scripts": {
