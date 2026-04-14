@@ -71,7 +71,82 @@ function isJsxContext(src: string, pos: number): boolean {
   return true;
 }
 
+/**
+ * Scan import statements and return a map of imported binding name → source path.
+ * Handles: named, default, namespace, and mixed imports.
+ *   import { A, B as C } from "foo"     -> A→foo, C→foo
+ *   import D from "foo"                  -> D→foo
+ *   import * as N from "foo"             -> N→foo
+ *   import D, { A } from "foo"           -> D→foo, A→foo
+ */
+function extractImports(src: string): Map<string, string> {
+  const map = new Map<string, string>();
+  // Match `import ... from "source"` (handles single & double quotes)
+  const importRe = /import\s+([^"';]+?)\s+from\s+["']([^"']+)["']/g;
+  let m: RegExpExecArray | null;
+  while ((m = importRe.exec(src)) !== null) {
+    const clause = m[1].trim();
+    const source = m[2];
+    // Default + named: `D, { A, B as C }` or just `D` or just `{ A, B }` or `* as N`
+    // Split off default first
+    let rest = clause;
+    // Namespace: `* as Name`
+    const nsMatch = /^\*\s+as\s+([A-Za-z_$][\w$]*)$/.exec(rest);
+    if (nsMatch) {
+      map.set(nsMatch[1], source);
+      continue;
+    }
+    // Default + optional named: `Name` or `Name, { ... }`
+    const defaultMatch = /^([A-Za-z_$][\w$]*)\s*(?:,\s*(\{[^}]*\}))?$/.exec(rest);
+    if (defaultMatch) {
+      map.set(defaultMatch[1], source);
+      if (defaultMatch[2]) rest = defaultMatch[2];
+      else continue;
+    }
+    // Named only: `{ A, B as C }`
+    const namedMatch = /^\{([^}]*)\}$/.exec(rest);
+    if (namedMatch) {
+      const items = namedMatch[1].split(",");
+      for (const item of items) {
+        const trimmed = item.trim();
+        if (!trimmed) continue;
+        // Handle `A as B`
+        const asMatch = /^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/.exec(trimmed);
+        if (asMatch) {
+          map.set(asMatch[2], source);
+        } else {
+          const nameMatch = /^([A-Za-z_$][\w$]*)$/.exec(trimmed);
+          if (nameMatch) map.set(nameMatch[1], source);
+        }
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * Decide whether to inject `dataSet` for a component imported from `source`.
+ * - Local imports (./, ../, /, @/) → inject
+ * - react-native, react-native-web → inject
+ * - gluestack-ui packages (@gluestack-ui/*, @gluestack-style/*) → inject
+ * - Anything else (third-party packages) → skip to avoid prop collisions
+ *   (e.g. `react-native-gifted-charts` uses `dataSet` as its own prop)
+ */
+function shouldInjectForSource(source: string): boolean {
+  if (source.startsWith(".") || source.startsWith("/") || source.startsWith("@/")) {
+    return true;
+  }
+  if (source === "react-native" || source === "react-native-web") {
+    return true;
+  }
+  if (source.startsWith("@gluestack-ui/") || source.startsWith("@gluestack-style/")) {
+    return true;
+  }
+  return false;
+}
+
 function injectDataBxPath(src: string, filename: string): string {
+  const imports = extractImports(src);
   const len = src.length;
   let result = "";
   let i = 0;
@@ -151,11 +226,21 @@ function injectDataBxPath(src: string, filename: string): string {
             const pathVal = filename + ":" + tagLine + ":" + tagCol;
             const firstChar = tagName.charCodeAt(0);
             // Lowercase tags (HTML elements): use data- attribute (React passes it to DOM)
-            // Uppercase/dotted tags (components): use dataSet (RNW renders as data-* on host element)
             if (firstChar >= 97 && firstChar <= 122) {
               result += ' data-bx-path="' + pathVal + '"';
             } else {
-              result += ' dataSet={{"bx-path":"' + pathVal + '"}}';
+              // Uppercase/dotted tags (components): inject `dataSet` only for
+              // local imports and react-native(-web) components. Third-party
+              // packages may use `dataSet` as their own prop (e.g. gifted-charts).
+              // For dotted tags like `Motion.View`, check the root identifier.
+              const rootName = tagName.split(".")[0];
+              const importSource = imports.get(rootName);
+              // If not in import map, it's a local definition (function in the
+              // same file) or React.X — safe to inject.
+              const isLocal = importSource === undefined || shouldInjectForSource(importSource);
+              if (isLocal) {
+                result += ' dataSet={{"bx-path":"' + pathVal + '"}}';
+              }
             }
           }
 
