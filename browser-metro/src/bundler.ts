@@ -8,6 +8,7 @@ import {
   shiftSourceMapOrigLines,
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
+import { formatTransformError } from "./transform-error.js";
 import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle } from "./utils.js";
 
 export class Bundler {
@@ -84,6 +85,7 @@ export class Bundler {
     filename: string,
     src: string,
   ): { code: string; sourceMap?: RawSourceMap } {
+    const originalSrc = src;
     const originalLines = countNewlines(src);
 
     // Pre-transform hooks
@@ -97,7 +99,14 @@ export class Bundler {
     const preTransformAddedLines = countNewlines(src) - originalLines;
 
     // Core transform (Sucrase)
-    const transformResult = this.config.transformer.transform({ src, filename });
+    let transformResult: { code: string; sourceMap?: RawSourceMap };
+    try {
+      transformResult = this.config.transformer.transform({ src, filename });
+    } catch (err: unknown) {
+      throw formatTransformError(err, filename, originalSrc, src, (s) =>
+        this.config.transformer.transform({ src: s, filename }),
+      );
+    }
     let code = transformResult.code;
     let sourceMap = transformResult.sourceMap;
 
