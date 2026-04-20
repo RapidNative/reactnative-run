@@ -12,7 +12,8 @@
   "license": "ISC",
   "dependencies": {
     "esbuild": "^0.27.3",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "flow-remove-types": "^2.309.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

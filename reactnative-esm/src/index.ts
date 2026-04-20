@@ -5,6 +5,8 @@ import os from "os";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import esbuild from "esbuild";
+// @ts-ignore - no type declarations
+import flowRemoveTypes from "flow-remove-types";
 
 // Bump this when the bundling logic changes to invalidate all caches
 const SERVER_VERSION = "2";
@@ -287,6 +289,21 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		// contains a version check against require("react").version).
 		const alwaysExternalSubpaths = new Set(["react", "react-dom", "react-native"]);
 
+		// Strip Flow type annotations from .js files that use @flow pragma.
+		// Some RN packages (e.g. @react-native-community/datetimepicker) ship
+		// raw Flow source that esbuild can't parse.
+		const stripFlowPlugin: esbuild.Plugin = {
+			name: "strip-flow",
+			setup(build) {
+				build.onLoad({ filter: /\.jsx?$/ }, async (args) => {
+					const src = await fs.promises.readFile(args.path, "utf8");
+					if (!src.includes("@flow")) return undefined;
+					const stripped = flowRemoveTypes(src);
+					return { contents: stripped.toString(), loader: "jsx" };
+				});
+			},
+		};
+
 		// Filter out native platform files (.android.*, .ios.*, .windows.*)
 		// so esbuild only bundles .web.* or plain .js/.ts files for the browser.
 		const filterNativePlatformsPlugin: esbuild.Plugin = {
@@ -416,7 +433,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				},
 			}),
 			plugins: [
-				...(isReactNative ? [filterNativePlatformsPlugin, stubNodeBuiltinsPlugin] : []),
+				...(isReactNative ? [stripFlowPlugin, filterNativePlatformsPlugin, stubNodeBuiltinsPlugin] : []),
 				selectiveExternalPlugin,
 			],
 		});
@@ -607,6 +624,18 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		const chunks: string[] = [];
 		const errors: string[] = [];
 
+		const stripFlow: esbuild.Plugin = {
+			name: "strip-flow",
+			setup(build) {
+				build.onLoad({ filter: /\.jsx?$/ }, async (args) => {
+					const src = await fs.promises.readFile(args.path, "utf8");
+					if (!src.includes("@flow")) return undefined;
+					const stripped = flowRemoveTypes(src);
+					return { contents: stripped.toString(), loader: "jsx" };
+				});
+			},
+		};
+
 		for (const [pkgName, info] of allPackages) {
 			try {
 				const entryFile = path.join(tmpDir, `__entry_${pkgName.replace(/\//g, "__")}.js`);
@@ -673,7 +702,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						define: { "__DEV__": "false" },
 					}),
 					plugins: [
-						...(info.isRN ? [filterNative] : []),
+						...(info.isRN ? [stripFlow, filterNative] : []),
 						pkgExternalPlugin,
 					],
 					logLevel: "silent",
@@ -781,7 +810,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						define: { "__DEV__": "false" },
 					}),
 					plugins: [
-						...(info?.isRN ? [filterNative] : []),
+						...(info?.isRN ? [stripFlow, filterNative] : []),
 						subExternalPlugin,
 					],
 					logLevel: "silent",
