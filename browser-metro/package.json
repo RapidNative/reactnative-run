@@ -1,6 +1,6 @@
 {
   "name": "browser-metro",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "description": "A browser-based JavaScript/TypeScript bundler with HMR support, inspired by Metro. Runs entirely client-side.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
