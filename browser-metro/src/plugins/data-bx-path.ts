@@ -220,9 +220,12 @@ function injectDataBxPath(src: string, filename: string): string {
           const nextCc = i < len ? src.charCodeAt(i) : 0;
           const isFragment =
             tagName === "Fragment" || tagName === "React.Fragment";
-          const isGeneric = nextCc === 60; // followed by <
+          // Generic arrow functions: <T,>, <T extends X>, <T = Default>
+          const isGeneric = nextCc === 60 || nextCc === 44; // followed by < or ,
+          const isExtendsGeneric = !isGeneric && nextCc === 32 &&
+            src.startsWith("extends ", i + 1);
 
-          if (!isFragment && !isGeneric && tagName.length > 0) {
+          if (!isFragment && !isGeneric && !isExtendsGeneric && tagName.length > 0) {
             const pathVal = filename + ":" + tagLine + ":" + tagCol;
             const firstChar = tagName.charCodeAt(0);
             // Lowercase tags (HTML elements): use data- attribute (React passes it to DOM)
