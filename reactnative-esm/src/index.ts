@@ -528,19 +528,34 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 	}
 
 	console.log(`[bundle-deps] Building for ${Object.keys(dependencies).length} deps (hash: ${depHash})`);
+	const buildStart = Date.now();
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-deps-"));
 
 	try {
-		// Install ALL deps in one go
+		// Install ALL deps in one go (bun install — ~6-7x faster than npm)
 		const installArgs = Object.entries(dependencies)
-			.map(([name, ver]) => `${name}@${ver}`)
+			.map(([name, ver]) => `'${name}@${ver}'`)
 			.join(" ");
-		execSync("npm init -y", { cwd: tmpDir, stdio: "ignore" });
-		execSync(`npm install ${installArgs} --legacy-peer-deps`, {
-			cwd: tmpDir,
-			stdio: "ignore",
-			timeout: 120000,
-		});
+		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "bundle-deps-tmp", version: "1.0.0" }));
+		const installStart = Date.now();
+		try {
+			execSync(`bun install ${installArgs}`, {
+				cwd: tmpDir,
+				stdio: ["ignore", "pipe", "pipe"],
+				timeout: 120000,
+			});
+			console.log(`[bundle-deps] bun install completed in ${Date.now() - installStart}ms`);
+		} catch (installErr: unknown) {
+			const e = installErr as { stderr?: Buffer; stdout?: Buffer; message?: string };
+			const stderr = e.stderr?.toString() || "";
+			const stdout = e.stdout?.toString() || "";
+			console.error(`[bundle-deps install FAILED in ${Date.now() - installStart}ms] tmpDir=${tmpDir}`);
+			console.error(`[bundle-deps install stderr]\n${stderr}`);
+			console.error(`[bundle-deps install stdout]\n${stdout}`);
+			throw new Error(
+				`bun install failed: ${e.message || "unknown"}\n---STDERR---\n${stderr.slice(-4000)}`
+			);
+		}
 
 		// Discover all packages to bundle: direct deps + their transitive deps
 		const allPackages = new Map<string, { version: string; isRN: boolean }>();
@@ -830,7 +845,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 
 		// Cache
 		fs.writeFileSync(cacheFile, bundle);
-		console.log(`[bundle-deps] Cached ${chunks.length} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB)`);
+		console.log(`[bundle-deps] Cached ${chunks.length} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB, total: ${Date.now() - buildStart}ms)`);
 
 		res.header("Cache-Control", "public, max-age=31536000, immutable");
 		res.type("application/javascript").send(bundle);
