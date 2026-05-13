@@ -9,7 +9,7 @@ import esbuild from "esbuild";
 import flowRemoveTypes from "flow-remove-types";
 
 // Bump this when the bundling logic changes to invalidate all caches
-const SERVER_VERSION = "2";
+const SERVER_VERSION = "3";
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
@@ -472,7 +472,8 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		const message = err instanceof Error ? err.message : String(err);
 		console.error(`[error] ${requireSpecifier}@${version}:`, message);
 		if (!res.headersSent) {
-			res.status(500).send(`// Error bundling ${requireSpecifier}@${version}\n// ${message}\n`);
+			const safeMessage = message.replace(/[\r\n\t]+/g, " ");
+			res.status(500).send(`// Error bundling ${requireSpecifier}@${version}\n// ${safeMessage}\n`);
 		}
 	} finally {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -538,23 +539,69 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			.join(" ");
 		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "bundle-deps-tmp", version: "1.0.0" }));
 		const installStart = Date.now();
-		try {
-			execSync(`bun install ${installArgs}`, {
-				cwd: tmpDir,
-				stdio: ["ignore", "pipe", "pipe"],
-				timeout: 120000,
-			});
-			console.log(`[bundle-deps] bun install completed in ${Date.now() - installStart}ms`);
-		} catch (installErr: unknown) {
-			const e = installErr as { stderr?: Buffer; stdout?: Buffer; message?: string };
-			const stderr = e.stderr?.toString() || "";
-			const stdout = e.stdout?.toString() || "";
-			console.error(`[bundle-deps install FAILED in ${Date.now() - installStart}ms] tmpDir=${tmpDir}`);
-			console.error(`[bundle-deps install stderr]\n${stderr}`);
-			console.error(`[bundle-deps install stdout]\n${stdout}`);
-			throw new Error(
-				`bun install failed: ${e.message || "unknown"}\n---STDERR---\n${stderr.slice(-4000)}`
-			);
+
+		// bun install is all-or-nothing — one unsatisfiable version range fails
+		// the entire batch. We retry with offending packages dropped so the rest
+		// of the deps still install. Dropped packages get a `module.exports = {}`
+		// stub later so `require()` doesn't crash at runtime (the offending dep
+		// just silently no-ops, same as a missing import).
+		const droppedPackages = new Set<string>();
+		let workingDeps: Record<string, string> = { ...dependencies };
+		const MAX_RETRIES = 3;
+		let installed = false;
+		for (let attempt = 0; attempt < MAX_RETRIES && !installed; attempt++) {
+			const args = Object.entries(workingDeps)
+				.map(([n, v]) => `'${n}@${v}'`)
+				.join(" ");
+			try {
+				execSync(`bun install ${args}`, {
+					cwd: tmpDir,
+					stdio: ["ignore", "pipe", "pipe"],
+					timeout: 120000,
+				});
+				installed = true;
+				console.log(
+					`[bundle-deps] bun install completed in ${Date.now() - installStart}ms` +
+					(droppedPackages.size > 0 ? ` (dropped: ${[...droppedPackages].join(", ")})` : "")
+				);
+			} catch (installErr: unknown) {
+				const e = installErr as { stderr?: Buffer; stdout?: Buffer; message?: string };
+				const stderr = e.stderr?.toString() || "";
+				const stdout = e.stdout?.toString() || "";
+
+				// Parse bun's "No version matching ... found for specifier ..."
+				// lines and remove those packages, then retry.
+				const unsatisfiable = new Set<string>();
+				const re = /No version matching "[^"]+" found for specifier "([^"]+)"/g;
+				let m: RegExpExecArray | null;
+				while ((m = re.exec(stderr)) !== null) unsatisfiable.add(m[1]);
+
+				const removed: string[] = [];
+				for (const name of unsatisfiable) {
+					if (name in workingDeps) {
+						removed.push(`${name}@${workingDeps[name]}`);
+						delete workingDeps[name];
+						droppedPackages.add(name);
+					}
+				}
+
+				if (removed.length === 0) {
+					// No recoverable cause — surface the original error
+					console.error(`[bundle-deps install FAILED in ${Date.now() - installStart}ms] tmpDir=${tmpDir}`);
+					console.error(`[bundle-deps install stderr]\n${stderr}`);
+					console.error(`[bundle-deps install stdout]\n${stdout}`);
+					throw new Error(
+						`bun install failed: ${e.message || "unknown"}\n---STDERR---\n${stderr.slice(-4000)}`
+					);
+				}
+
+				console.warn(
+					`[bundle-deps] attempt ${attempt + 1}: bun rejected ${removed.length} unsatisfiable spec(s) — retrying without them: ${removed.join(", ")}`
+				);
+			}
+		}
+		if (!installed) {
+			throw new Error(`bun install failed after ${MAX_RETRIES} retries`);
 		}
 
 		// Discover all packages to bundle: direct deps + their transitive deps
@@ -571,6 +618,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			const meta = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
 			const keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
 			const isRN = pkgName.startsWith("@expo/") ||
+				pkgName.startsWith("@expo-google-fonts/") ||
 				pkgName.includes("react-native") ||
 				keywords.some((k: string) => k === "react-native" || k === "expo");
 
@@ -735,8 +783,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				const msg = err instanceof Error ? err.message : String(err);
 				errors.push(`${pkgName}: ${msg}`);
 				console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 200));
-				// Add a stub so require() doesn't fail
-				chunks.push(`// @dep-start ${pkgName}\n// Error bundling: ${msg.slice(0, 100)}\nmodule.exports = {};\n// @dep-end ${pkgName}`);
+				// Add a stub so require() doesn't fail. Collapse whitespace/newlines —
+				// a multi-line esbuild error after a single `//` leaves later lines as
+				// live JS (e.g. a relative path starting with `.` → SyntaxError that
+				// breaks the whole bundle).
+				const safeMsg = msg.replace(/[\r\n\t]+/g, " ").slice(0, 200);
+				chunks.push(`// @dep-start ${pkgName}\n// Error bundling: ${safeMsg}\nmodule.exports = {};\n// @dep-end ${pkgName}`);
 			}
 		}
 
@@ -837,6 +889,15 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			} catch {
 				chunks.push(`// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`);
 			}
+		}
+
+		// Emit stubs for packages dropped during install (unsatisfiable version
+		// ranges). Runtime `require("<name>")` returns {} instead of crashing.
+		for (const name of droppedPackages) {
+			chunks.push(
+				`// @dep-start ${name}\n// Dropped: install spec unsatisfiable\nmodule.exports = {};\n// @dep-end ${name}`
+			);
+			manifest[name] = "stub";
 		}
 
 		// Assemble final bundle
