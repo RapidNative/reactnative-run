@@ -205,6 +205,50 @@ function createPermissionHook(descriptor) {
   };
 }
 
+// ----- Refs ------------------------------------------------------------
+// expo-image's Image/ImageBackground call createSnapshotFriendlyRef() in their
+// constructors. Upstream it is literally React.createRef() (see Refs.ts) — the
+// "snapshot friendly" part only affects how the ref prints in test snapshots.
+function createSnapshotFriendlyRef() {
+  return require("react").createRef();
+}
+
+// ----- Native view manager ---------------------------------------------
+// On native this returns the platform-backed view component. There is no native
+// view in browser preview; packages that support web ship a .web impl and never
+// reach this. We still return a forwardRef View stub (not undefined) so that
+// packages which call requireNativeViewManager() at module-eval time don't crash
+// the whole bundle — they render an empty container instead.
+function requireNativeViewManager(_viewName) {
+  var React = require("react");
+  var View = require("react-native").View;
+  return React.forwardRef(function NativeViewStub(props, ref) {
+    return React.createElement(View, Object.assign({ ref: ref }, props));
+  });
+}
+
+// ----- Releasing shared object hook ------------------------------------
+// useReleasingSharedObject(factory, deps) returns a SharedObject and releases it
+// on unmount / dep change. SharedObjects don't hold native resources on web, so
+// memoizing the factory output gives correct semantics without a release step.
+function useReleasingSharedObject(factory, dependencies) {
+  return require("react").useMemo(factory, dependencies);
+}
+
+// ----- App reload ------------------------------------------------------
+// Native reloadAppAsync() restarts the JS runtime. The honest web equivalent is
+// a full page reload of the preview iframe.
+function reloadAppAsync() {
+  if (typeof window !== "undefined" && window.location && window.location.reload) {
+    window.location.reload();
+  }
+  return Promise.resolve();
+}
+
+// ----- Worklets --------------------------------------------------------
+// No UI worklet runtime exists in the browser; installing onto it is a no-op.
+function installOnUIRuntime() {}
+
 var NativeModulesProxy = typeof Proxy !== "undefined"
   ? new Proxy({}, { get: function (_, k) { return k === "__esModule" ? true : undefined; } })
   : {};
@@ -255,8 +299,13 @@ exports.NativeModulesProxy = NativeModulesProxy;
 exports.Platform = Platform;
 exports.requireNativeModule = requireNativeModule;
 exports.requireOptionalNativeModule = requireOptionalNativeModule;
+exports.requireNativeViewManager = requireNativeViewManager;
 exports.registerWebModule = registerWebModule;
 exports.createPermissionHook = createPermissionHook;
+exports.createSnapshotFriendlyRef = createSnapshotFriendlyRef;
+exports.useReleasingSharedObject = useReleasingSharedObject;
+exports.reloadAppAsync = reloadAppAsync;
+exports.installOnUIRuntime = installOnUIRuntime;
 exports.uuid = { v4: _uuidv4 };
 exports.default = exports;
 exports.__esModule = true;
