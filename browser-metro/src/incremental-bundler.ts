@@ -186,19 +186,55 @@ export class IncrementalBundler {
     }
   }
 
+  /** Extract the package base name from an npm specifier (handles @scope and subpaths) */
+  private npmBaseName(specifier: string): string {
+    if (specifier.startsWith("@")) {
+      const parts = specifier.split("/");
+      return parts[0] + "/" + parts[1];
+    }
+    return specifier.split("/")[0];
+  }
+
+  /**
+   * Enforce that direct imports from user source are declared in package.json.
+   *
+   * Mirrors Metro: an undeclared dependency is a hard resolution error, not an
+   * implicit `@latest` fetch. Only `processFile` (which walks local VFS files)
+   * calls this, so it applies exclusively to the user's own imports. Transitive
+   * deps — discovered via findTransitiveNpmDeps by scanning fetched packages —
+   * never pass through here and keep auto-fetching.
+   *
+   * Packages handled client-side (aliases/shims) count as declared since they
+   * resolve without a registry fetch.
+   */
+  private assertDeclaredNpmDeps(filePath: string, npmDeps: string[]): void {
+    if (npmDeps.length === 0) return;
+    const aliases = this.getModuleAliases();
+    const shims = this.getShimModules();
+    for (const dep of npmDeps) {
+      const base = this.npmBaseName(dep);
+      const declared =
+        base in this.packageVersions ||
+        base in aliases || dep in aliases ||
+        base in shims || dep in shims;
+      if (!declared) {
+        const from = filePath.replace(/^\//, "");
+        throw new Error(
+          `Unable to resolve "${dep}" from "${from}"\n` +
+            `  "${base}" is not listed in package.json "dependencies". ` +
+            `Add it to package.json to install it.`,
+        );
+      }
+    }
+  }
+
   /** Resolve an npm specifier to a versioned form.
    *  Priority: user's package.json > transitive dep versions from manifests > bare name */
   private resolveNpmSpecifier(
     specifier: string,
     versions: Record<string, string>,
   ): string {
-    let baseName: string;
-    if (specifier.startsWith("@")) {
-      const parts = specifier.split("/");
-      baseName = parts[0] + "/" + parts[1];
-    } else {
-      baseName = specifier.split("/")[0];
-    }
+    const baseName = this.npmBaseName(specifier);
     const version = versions[baseName] || this.transitiveDepsVersions[baseName];
     if (!version) return specifier;
     const subpath = specifier.slice(baseName.length);
@@ -306,6 +342,10 @@ export class IncrementalBundler {
     // Check cache validity
     if (this.cache.isValid(filePath, sourceHash)) {
       const cached = this.cache.getModule(filePath)!;
+      // Re-validate even on cache hit: a package.json edit triggers a full
+      // rebuild that re-walks unchanged (cached) files, so a now-undeclared
+      // dep must still be caught here.
+      this.assertDeclaredNpmDeps(filePath, cached.npmDeps);
       this.moduleMap[filePath] = cached.rewrittenCode;
       if (cached.sourceMap) this.sourceMapMap[filePath] = cached.sourceMap;
       return {
@@ -335,6 +375,9 @@ export class IncrementalBundler {
         localDeps.push(dep);
       }
     }
+
+    // Fail fast on undeclared direct imports (Metro parity) before caching.
+    this.assertDeclaredNpmDeps(filePath, npmDeps);
 
     // Update cache
     this.cache.setModule(filePath, {
