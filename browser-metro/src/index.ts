@@ -11,11 +11,7 @@ export {
 } from "./transforms/react-refresh.js";
 export type { RawSourceMap } from "./source-map.js";
 export { createDataBxPathPlugin } from "./plugins/data-bx-path.js";
-export {
-  createExpoWebShimsPlugin,
-  EXPO_MODULES_CORE_SHIM,
-  EXPO_SPEECH_RECOGNITION_SHIM,
-} from "./plugins/expo-web-shims.js";
+export { createExpoWebShimsPlugin } from "./plugins/expo-web-shims.js";
 export type {
   FileEntry,
   FileMap,
