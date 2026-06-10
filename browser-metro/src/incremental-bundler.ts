@@ -636,6 +636,18 @@ export class IncrementalBundler {
       this.moduleMap[name] = code;
     }
 
+    // walkDeps() silently skips files that aren't on the VFS, so a missing or
+    // unreadable entry would otherwise yield a bundle whose entryId is set but
+    // whose module map has no entry factory -- booting into "Module not found:
+    // <entry>" inside the iframe at runtime. Fail here instead, so the caller
+    // (e.g. the worker's watch-start/​update catch) surfaces a clear error and
+    // can recover, rather than shipping a bundle that can't boot.
+    if (this.moduleMap[entryFile] === undefined) {
+      throw new Error(
+        `Entry module "${entryFile}" is missing from the bundle (not found on the virtual filesystem).`,
+      );
+    }
+
     const bundle = this.emitBundle();
     const buildTime = performance.now() - startTime;
 
@@ -793,11 +805,24 @@ export class IncrementalBundler {
     // Phase 4: Orphan cleanup
     const orphans = this.graph.findOrphans(this.entryFile);
     for (const orphan of orphans) {
+      // Never evict the entry module. findOrphans() walks down from the entry
+      // so it shouldn't return it, but guard explicitly: dropping the entry
+      // would emit a bundle that boots into "Module not found: <entry>".
+      if (orphan === this.entryFile) continue;
       this.graph.removeModule(orphan);
       this.cache.invalidateModule(orphan);
       delete this.moduleMap[orphan];
       delete this.sourceMapMap[orphan];
       removedModules.push(orphan);
+    }
+
+    // Safety net: if the entry fell out of the module map during this rebuild
+    // (e.g. it was never re-processed after a VFS reset, or a synthetic entry
+    // wasn't re-injected), don't ship a bundle that can't boot. A fresh full
+    // build re-walks from the entry and re-includes it; build() throws with a
+    // clear message if even that can't find the entry on the VFS.
+    if (this.moduleMap[this.entryFile] === undefined) {
+      return this.build(this.entryFile);
     }
 
     // Phase 5: Emit result
