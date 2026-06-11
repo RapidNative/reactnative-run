@@ -196,6 +196,37 @@ Dependency externalization is critical for two reasons:
 
 The `X-Externals` header enables **version pinning** for transitive dependencies. When the bundler discovers a transitive dep (e.g. `memoize-one` from `react-native-web`), it uses the version from the externals manifest instead of fetching `@latest`. This prevents version mismatches.
 
+#### Combined subpath bundling (shared package internals)
+
+Each batch package is bundled as its own isolated esbuild IIFE. A package's
+**private internal modules** (relative imports, not exposed via its `exports`)
+therefore cannot be externalized and get **duplicated** into every IIFE that
+pulls them in. For most packages this is harmless, but a package with a
+module-level singleton breaks: `expo-router/drawer`, imported only by user code,
+falls through to a standalone `/pkg` fetch that re-bundles `expo-router`'s
+internal `Route.js` — producing a **second** `CurrentRouteContext`. The Drawer
+then reads a context with no Provider and throws *"No filename found. This is
+likely a bug in expo-router."*
+
+The fix is **usage-driven combined bundling**:
+
+1. The client scans VFS source files (excluding `*.config.*`) for bare subpath
+   imports of direct deps (`collectUsedSubpaths` in `utils.ts`) and sends them
+   to `/bundle-deps` as `subpaths` (folded into the dep hash).
+2. For each base package with used subpaths, the server writes **one** combined
+   esbuild entry that `require`s the base *and* each subpath, so they share a
+   single copy of the base's internals. Each subpath's exports are stashed on
+   `globalThis.__rnSubpaths`.
+3. The base is emitted as its combined chunk; each subpath is emitted as a tiny
+   **stub** chunk: `module.exports = (require("<base>"), globalThis.__rnSubpaths["<base>/<sub>"])`.
+   The `require("<base>")` forces the combined chunk to evaluate (populating the
+   registry) before the read.
+
+If the combined build fails, the server falls back to a base-only build (the
+base still works; subpaths resolve via `/pkg` as before). Only subpaths actually
+imported are combined, so nothing is hardcoded per package and unused subpaths
+are never built.
+
 ### 8. Source Maps
 
 browser-metro generates source maps so that browser dev tools and the UI console show original file names and line numbers, not bundle positions.

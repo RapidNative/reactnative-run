@@ -8,8 +8,9 @@ import esbuild from "esbuild";
 // @ts-ignore - no type declarations
 import flowRemoveTypes from "flow-remove-types";
 
-// Bump this when the bundling logic changes to invalidate all caches
-const SERVER_VERSION = "3";
+// Bump this when the bundling logic changes to invalidate all caches.
+// Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
+const SERVER_VERSION = "4";
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
@@ -486,9 +487,10 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
 const BUNDLE_DEPS_PREFIX = "bundle-deps-";
 
-function hashDepsServer(deps: Record<string, string>): string {
+function hashDepsServer(deps: Record<string, string>, subpaths: string[] = []): string {
 	const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
-	const input = `v${SERVER_VERSION}:${sorted}`;
+	const subs = subpaths.length ? `;subpaths:${[...subpaths].sort().join(",")}` : "";
+	const input = `v${SERVER_VERSION}:${sorted}${subs}`;
 	return crypto.createHash("sha256").update(input).digest("hex").slice(0, 16);
 }
 
@@ -509,15 +511,24 @@ app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 
 // POST /bundle-deps - build a dep bundle
 app.post("/bundle-deps", async (req: Request, res: Response) => {
-	const { hash, dependencies } = req.body as { hash?: string; dependencies: Record<string, string> };
+	const { hash, dependencies, subpaths: rawSubpaths } = req.body as { hash?: string; dependencies: Record<string, string>; subpaths?: string[] };
 
 	if (!dependencies || typeof dependencies !== "object") {
 		res.status(400).send("// Missing dependencies\n");
 		return;
 	}
 
+	// Subpaths of direct deps that user code imports (e.g. "expo-router/drawer").
+	// We bundle these combined with their base package so they share the base's
+	// private internals (one CurrentRouteContext, one router store) instead of
+	// each subpath re-bundling a duplicate copy. See the combined-build logic
+	// below and collectUsedSubpaths in browser-metro.
+	const requestedSubpaths = Array.isArray(rawSubpaths)
+		? rawSubpaths.filter((s): s is string => typeof s === "string")
+		: [];
+
 	// Compute hash if not provided
-	const depHash = hash || hashDepsServer(dependencies);
+	const depHash = hash || hashDepsServer(dependencies, requestedSubpaths);
 	const cacheFile = path.join(CACHE_DIR, `${BUNDLE_DEPS_PREFIX}${depHash}.js`);
 
 	// Check cache
@@ -683,6 +694,34 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			manifest[name] = info.version;
 		}
 
+		// Group user-imported subpaths by their base direct-dep package. A base
+		// with subpaths is built ONCE as a combined esbuild entry (base + its
+		// subpaths) so they share the base's private internal modules — fixing
+		// the duplicate-CurrentRouteContext "No filename found" bug for
+		// expo-router/drawer et al. Only subpaths whose base is a bundled direct
+		// dep and that aren't already their own batch entry qualify; the rest
+		// fall through to the standalone subpath pass / runtime /pkg fetch.
+		const sharedSubpathsByBase = new Map<string, string[]>();
+		for (const sub of requestedSubpaths) {
+			let base: string;
+			if (sub.startsWith("@")) {
+				const parts = sub.split("/");
+				if (parts.length < 3) continue;
+				base = parts.slice(0, 2).join("/");
+			} else {
+				const slash = sub.indexOf("/");
+				if (slash === -1) continue;
+				base = sub.slice(0, slash);
+			}
+			if (base === sub || !allPackages.has(base) || allPackages.has(sub)) continue;
+			try { require.resolve(sub, { paths: [tmpDir] }); } catch { continue; }
+			const list = sharedSubpathsByBase.get(base) ?? [];
+			if (!list.includes(sub)) list.push(sub);
+			sharedSubpathsByBase.set(base, list);
+		}
+		// Subpaths emitted as combined stubs — skip them in the standalone pass.
+		const emittedSubpaths = new Set<string>();
+
 		// Bundle each package
 		const chunks: string[] = [];
 		const errors: string[] = [];
@@ -700,10 +739,27 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		};
 
 		for (const [pkgName, info] of allPackages) {
+			const subs = sharedSubpathsByBase.get(pkgName) ?? [];
 			try {
 				const entryFile = path.join(tmpDir, `__entry_${pkgName.replace(/\//g, "__")}.js`);
 				const outFile = path.join(tmpDir, `__out_${pkgName.replace(/\//g, "__")}.js`);
-				fs.writeFileSync(entryFile, `module.exports = require("${pkgName}");\n`);
+				// Combined entry stashes each subpath's exports on a global registry
+				// so the per-subpath stub (emitted below) reads the SAME instance
+				// the base built. The subpaths (pkgName + "/...") stay internal to
+				// this esbuild run via pkgExternalPlugin, so internals are shared.
+				const writeEntry = (withSubs: boolean) => {
+					if (withSubs && subs.length) {
+						const lines = [
+							`var __rn = (globalThis.__rnSubpaths = globalThis.__rnSubpaths || {});`,
+							...subs.map((s) => `__rn[${JSON.stringify(s)}] = require(${JSON.stringify(s)});`),
+							`module.exports = require(${JSON.stringify(pkgName)});`,
+						];
+						fs.writeFileSync(entryFile, lines.join("\n") + "\n");
+					} else {
+						fs.writeFileSync(entryFile, `module.exports = require("${pkgName}");\n`);
+					}
+				};
+				writeEntry(true);
 
 				// Create selective external plugin for this package
 				const pkgExternalPlugin: esbuild.Plugin = {
@@ -750,7 +806,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					},
 				};
 
-				await esbuild.build({
+				const runBuild = () => esbuild.build({
 					entryPoints: [entryFile],
 					bundle: true,
 					format: "iife",
@@ -771,14 +827,35 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					logLevel: "silent",
 				});
 
+				// If the combined build fails, fall back to base-only so the base
+				// package still works (subpaths then resolve via /pkg fetches).
+				let emitStubs = subs.length > 0;
+				try {
+					await runBuild();
+				} catch (combinedErr: unknown) {
+					if (subs.length === 0) throw combinedErr;
+					const m = combinedErr instanceof Error ? combinedErr.message : String(combinedErr);
+					console.warn(`[bundle-deps] combined build for ${pkgName} (+${subs.length} subpath(s)) failed, retrying base-only: ${m.slice(0, 160)}`);
+					writeEntry(false);
+					emitStubs = false;
+					await runBuild();
+				}
+
 				const bundled = fs.readFileSync(outFile, "utf-8");
 				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
 				chunks.push(`// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`);
 
-				// Also check for common subpath variants
-				const subpathVariants: string[] = [];
-				// Scan the bundled code for require("pkgName/...") patterns from OTHER packages
-				// We'll handle subpaths in a second pass if needed
+				// Emit a tiny stub chunk per combined subpath. It forces the base
+				// chunk to evaluate (populating the registry) then returns the
+				// subpath's exports — backed by the base's shared internals.
+				if (emitStubs) {
+					for (const sub of subs) {
+						const stub = `module.exports = (require(${JSON.stringify(pkgName)}), (globalThis.__rnSubpaths || {})[${JSON.stringify(sub)}]);`;
+						chunks.push(`// @dep-start ${sub}\n${stub}\n// @dep-end ${sub}`);
+						manifest[sub] = info.version;
+						emittedSubpaths.add(sub);
+					}
+				}
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				errors.push(`${pkgName}: ${msg}`);
@@ -807,7 +884,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			} else {
 				basePkg = req.split("/")[0];
 			}
-			if (batchSet.has(basePkg) && req !== basePkg && !allPackages.has(req)) {
+			if (batchSet.has(basePkg) && req !== basePkg && !allPackages.has(req) && !emittedSubpaths.has(req)) {
 				subpathRequires.add(req);
 			}
 		}

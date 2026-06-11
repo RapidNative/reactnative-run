@@ -341,15 +341,19 @@ export function hashString(str: string): string {
 }
 
 // Must match SERVER_VERSION in reactnative-esm/src/index.ts
-const DEPS_HASH_VERSION = "2";
+const DEPS_HASH_VERSION = "4";
 
 /** Hash a dependencies object to a stable cache key.
  *  Uses SHA-256 (via Web Crypto or Node crypto) truncated to 16 hex chars
  *  for collision resistance while keeping URLs short.
- *  Includes a version prefix so cache is invalidated when bundling logic changes. */
-export async function hashDeps(deps: Record<string, string>): Promise<string> {
+ *  Includes a version prefix so cache is invalidated when bundling logic changes.
+ *  `subpaths` (e.g. "expo-router/drawer") are folded in because the server
+ *  bundles them combined with their base package — different used subpaths
+ *  produce a different bundle and must not collide on cache key. */
+export async function hashDeps(deps: Record<string, string>, subpaths: string[] = []): Promise<string> {
   const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
-  const input = `v${DEPS_HASH_VERSION}:${sorted}`;
+  const subs = subpaths.length ? `;subpaths:${[...subpaths].sort().join(",")}` : "";
+  const input = `v${DEPS_HASH_VERSION}:${sorted}${subs}`;
 
   // Web Crypto API (works in browsers and workers)
   if (typeof globalThis.crypto?.subtle?.digest === "function") {
@@ -361,6 +365,51 @@ export async function hashDeps(deps: Record<string, string>): Promise<string> {
 
   // Fallback: djb2 (Node.js without crypto, shouldn't normally happen)
   return hashString(input);
+}
+
+/** Scan source files for bare subpath imports of direct dependencies
+ *  (e.g. `expo-router/drawer`, `react-dom/client`). Returns the unique set.
+ *
+ *  Why: the dep-bundle server bundles each direct dep as its own isolated
+ *  esbuild IIFE. A subpath imported only by *user* code (never by a dep) is
+ *  not in that bundle, so it falls through to a standalone `/pkg` fetch that
+ *  re-bundles the base package's private internals — producing a SECOND copy
+ *  of module-level singletons like expo-router's `CurrentRouteContext`. The
+ *  Drawer then reads a context with no Provider → "No filename found".
+ *
+ *  By reporting used subpaths up front, the server can bundle them together
+ *  with their base in one esbuild run (shared internals → one context). This
+ *  is usage-driven: only subpaths actually imported are combined, so unused
+ *  ones are never built (fast) and nothing is hardcoded per package. */
+export function collectUsedSubpaths(
+  files: Array<{ content: string }>,
+  depNames: Set<string>,
+): string[] {
+  const found = new Set<string>();
+  // Match the string literal of: `from "x"`, `require("x")`, `import("x")`,
+  // and bare `import "x"`. Captures the specifier.
+  const re = /(?:\bfrom|\brequire\s*\(|\bimport\s*\(|\bimport)\s*["']([^"']+)["']/g;
+  for (const { content } of files) {
+    let m: RegExpExecArray | null;
+    re.lastIndex = 0;
+    while ((m = re.exec(content)) !== null) {
+      const spec = m[1];
+      if (spec[0] === "." || spec[0] === "/") continue; // relative/absolute
+      // Derive the base package (handle scoped @scope/name/sub).
+      let base: string;
+      if (spec[0] === "@") {
+        const parts = spec.split("/");
+        if (parts.length < 3) continue; // @scope/name has no subpath
+        base = parts.slice(0, 2).join("/");
+      } else {
+        const slash = spec.indexOf("/");
+        if (slash === -1) continue; // bare package, no subpath
+        base = spec.slice(0, slash);
+      }
+      if (depNames.has(base) && spec !== base) found.add(spec);
+    }
+  }
+  return [...found];
 }
 
 /** Parse a dep bundle response into individual package code chunks.
