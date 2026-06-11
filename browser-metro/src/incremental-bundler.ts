@@ -10,7 +10,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths } from "./utils.js";
 import { formatTransformError } from "./transform-error.js";
 import type {
   BundlerConfig,
@@ -242,6 +242,24 @@ export class IncrementalBundler {
   }
 
   /** Prefetch all dependencies in a single batch request */
+  /** Scan VFS source files for bare subpath imports of direct deps so the
+   *  server can bundle them combined with their base (shared internals). See
+   *  collectUsedSubpaths for the duplicate-context rationale. */
+  private collectSubpaths(depNames: Set<string>): string[] {
+    const SRC = /\.(tsx?|jsx?|mjs|cjs)$/;
+    // Build-tooling config files (metro/babel/tailwind/eslint/app.config) import
+    // Node-side subpaths (e.g. expo/metro-config) that aren't part of the RN
+    // bundle — exclude them so we don't ask the server to combine-build those.
+    const CONFIG = /(?:^|\/)[^/]*\.config\.[cm]?[jt]sx?$/;
+    const files: Array<{ content: string }> = [];
+    for (const path of this.fs.list()) {
+      if (!SRC.test(path) || CONFIG.test(path)) continue;
+      const content = this.fs.read(path);
+      if (content !== undefined) files.push({ content });
+    }
+    return collectUsedSubpaths(files, depNames);
+  }
+
   private async prefetchDependencies(): Promise<void> {
     if (Object.keys(this.prefetchedPackages).length > 0) return; // already prefetched
 
@@ -255,7 +273,8 @@ export class IncrementalBundler {
     for (const name of Object.keys(shims)) delete versions[name];
     if (Object.keys(versions).length === 0) return;
 
-    const hash = await hashDeps(versions);
+    const subpaths = this.collectSubpaths(new Set(Object.keys(versions)));
+    const hash = await hashDeps(versions, subpaths);
     const baseUrl = this.config.server.packageServerUrl;
 
     try {
@@ -269,7 +288,7 @@ export class IncrementalBundler {
       const postRes = await fetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hash, dependencies: versions }),
+        body: JSON.stringify({ hash, dependencies: versions, subpaths }),
       });
       if (postRes.ok) {
         const { packages } = parseDepBundle(await postRes.text());
