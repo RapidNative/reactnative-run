@@ -190,6 +190,7 @@ export const HMR_RUNTIME_TEMPLATE = `(function(modules, reverseDeps, entryId, re
   // Expose HMR API globally
   window.__BUNDLER_HMR__ = {
     applyUpdate: applyUpdate,
+    require: require,
     modules: modules,
     cache: cache,
     hotState: hotState

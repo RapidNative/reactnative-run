@@ -27,6 +27,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "tsc && node --test \"test/**/*.test.mjs\"",
     "prepublishOnly": "tsc"
   },
   "license": "MIT",
