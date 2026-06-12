@@ -46,10 +46,24 @@ export const HMR_RUNTIME_TEMPLATE = `(function(modules, reverseDeps, entryId, re
   }
 
   function require(id) {
-    if (cache[id]) return cache[id].exports;
+    var module = cache[id];
+    if (module) {
+      // Metro-compatible: a module that threw during evaluation re-throws its
+      // original error on every subsequent require, instead of silently
+      // returning a half-built {} (which masks the root cause behind downstream
+      // errors like "No QueryClient set").
+      if (module.hasError) throw module.error;
+      return module.exports;
+    }
     if (!modules[id]) throw new Error('Module not found: ' + id);
-    var module = cache[id] = { exports: {}, hot: createHotAPI(id) };
-    modules[id].call(module.exports, module, module.exports, require);
+    module = cache[id] = { exports: {}, hot: createHotAPI(id) };
+    try {
+      modules[id].call(module.exports, module, module.exports, require);
+    } catch (err) {
+      module.hasError = true;
+      module.error = err;
+      throw err;
+    }
     return module.exports;
   }
 
