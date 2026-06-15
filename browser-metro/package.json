@@ -1,6 +1,6 @@
 {
   "name": "browser-metro",
-  "version": "1.0.26",
+  "version": "1.0.27",
   "description": "A browser-based JavaScript/TypeScript bundler with HMR support, inspired by Metro. Runs entirely client-side.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -27,6 +27,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "tsc && node --test \"test/**/*.test.mjs\"",
     "prepublishOnly": "tsc"
   },
   "license": "MIT",

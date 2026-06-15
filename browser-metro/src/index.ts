@@ -12,6 +12,11 @@ export {
 export type { RawSourceMap } from "./source-map.js";
 export { createDataBxPathPlugin } from "./plugins/data-bx-path.js";
 export { createExpoWebShimsPlugin } from "./plugins/expo-web-shims.js";
+export {
+  createUnsupportedWebPackagesPlugin,
+  UNSUPPORTED_WEB_PACKAGES,
+} from "./plugins/unsupported-web-packages.js";
+export type { UnsupportedPackageEntry } from "./plugins/unsupported-web-packages.js";
 export type {
   FileEntry,
   FileMap,
