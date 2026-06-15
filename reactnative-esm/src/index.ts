@@ -10,7 +10,89 @@ import flowRemoveTypes from "flow-remove-types";
 
 // Bump this when the bundling logic changes to invalidate all caches.
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
-const SERVER_VERSION = "4";
+const SERVER_VERSION = "5";
+
+/**
+ * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
+ * Metro/expo-web leniency.
+ *
+ * Some RN/Expo packages re-export names from a module that doesn't actually
+ * export them — most often a `.web` build that omits exports the index
+ * re-exports (e.g. expo-speech-recognition's `index.js` re-exports
+ * `ExpoWebSpeechGrammar` from `./ExpoWebSpeechRecognition`, but the resolved
+ * `ExpoWebSpeechRecognition.web.js` doesn't define it). Metro just makes the
+ * binding `undefined` (it's never used on web); esbuild hard-errors with
+ * "No matching export in X for import Y" and fails the ENTIRE package bundle,
+ * which then never registers in browser-metro → runtime "Cannot read
+ * properties of undefined (reading 'call')".
+ *
+ * We reproduce Metro's behavior: on that error, inject `export var <name> =
+ * undefined;` into the offending module via an onLoad plugin and rebuild,
+ * looping until the build is clean (or the error is something else).
+ */
+async function buildTolerant(
+  options: esbuild.BuildOptions,
+): Promise<esbuild.BuildResult> {
+  // last-3-path-segments suffix -> set of export names to stub as undefined
+  const stubs = new Map<string, Set<string>>();
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const suffix = (p: string) =>
+    norm(p).split("/").filter(Boolean).slice(-3).join("/");
+
+  const stubPlugin: esbuild.Plugin = {
+    name: "tolerate-missing-reexports",
+    setup(build) {
+      build.onLoad({ filter: /\.([cm]?jsx?|tsx?)$/ }, async (args) => {
+        let names: Set<string> | undefined;
+        const p = norm(args.path);
+        for (const [key, set] of stubs) {
+          if (p === key || p.endsWith("/" + key)) {
+            names = set;
+            break;
+          }
+        }
+        if (!names || names.size === 0) return undefined; // let default/other plugins handle
+        let src = await fs.promises.readFile(args.path, "utf8");
+        if (src.includes("@flow")) src = flowRemoveTypes(src).toString();
+        for (const n of names) src += `\nexport var ${n} = undefined;`;
+        const ext = path.extname(args.path);
+        const loader: esbuild.Loader =
+          ext === ".ts" ? "ts" : ext === ".tsx" ? "tsx" : "jsx";
+        return { contents: src, loader };
+      });
+    },
+  };
+
+  const MAX_RETRIES = 16;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await esbuild.build({
+        ...options,
+        logLevel: "silent",
+        plugins: [stubPlugin, ...(options.plugins ?? [])],
+      });
+    } catch (e: unknown) {
+      const errs: esbuild.Message[] = (e as esbuild.BuildFailure)?.errors ?? [];
+      let progressed = false;
+      for (const er of errs) {
+        const m = /No matching export in "([^"]+)" for import "([^"]+)"/.exec(
+          er.text ?? "",
+        );
+        if (!m) continue;
+        const key = suffix(m[1]);
+        const name = m[2];
+        if (!stubs.has(key)) stubs.set(key, new Set());
+        const set = stubs.get(key)!;
+        if (!set.has(name)) {
+          set.add(name);
+          progressed = true;
+        }
+      }
+      // Unrelated error, no new stubs to add, or we've looped too long.
+      if (!progressed || attempt >= MAX_RETRIES) throw e;
+    }
+  }
+}
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
@@ -399,7 +481,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		const outFile = path.join(tmpDir, "__out.js");
 		const isFont = pkgName.startsWith("@expo-google-fonts/");
 		const outdir = isFont ? path.join(tmpDir, "__outdir") : undefined;
-		await esbuild.build({
+		await buildTolerant({
 			entryPoints: [entryFile],
 			bundle: true,
 			format: "iife",
@@ -806,7 +888,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					},
 				};
 
-				const runBuild = () => esbuild.build({
+				const runBuild = () => buildTolerant({
 					entryPoints: [entryFile],
 					bundle: true,
 					format: "iife",
@@ -939,7 +1021,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					},
 				};
 
-				await esbuild.build({
+				await buildTolerant({
 					entryPoints: [entryFile],
 					bundle: true,
 					format: "iife",
