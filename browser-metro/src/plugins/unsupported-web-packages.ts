@@ -189,6 +189,191 @@ export const UNSUPPORTED_WEB_PACKAGES: Record<string, UnsupportedPackageEntry> =
       module.exports = MapView;
     `,
   },
+  // Multi-export native module: `import { RTCView, RTCPeerConnection, mediaDevices }
+  // from 'react-native-webrtc'`. The browser already provides RTCPeerConnection /
+  // MediaStream / navigator.mediaDevices, so the call APIs pass straight through;
+  // the only visual surface, RTCView, renders the stream into a <video>. We patch
+  // MediaStream.toURL (native-only, used by RTCView's streamURL) and expose RTCView
+  // as the module's component so the degraded wrapper posts the on-mount banner.
+  // The non-visual API hangs off RTCView as named exports; RTCView/default keys are
+  // intentionally omitted so those imports fall through to the mount-wrapped
+  // component (see degradedWrapper).
+  "react-native-webrtc": {
+    mode: "degraded",
+    note: "Live camera and mic preview shown here. Real-time calls, peer connections, and camera switching work fully once your app runs on a device.",
+    stub: `
+      var React = require('react');
+      var RN = require('react-native');
+
+      var _win = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : {});
+      var _nav = typeof navigator !== 'undefined' ? navigator : null;
+
+      // Registry of MediaStream objects keyed by stream.id, populated by toURL()
+      // so RTCView can resolve a streamURL string back to the live stream.
+      var _streamRegistry = {};
+      var _STREAM_URL_PREFIX = 'rn-webrtc-stream://';
+
+      // The browser's MediaStream has no toURL(), but native code calls it routinely
+      // (e.g. <RTCView streamURL={stream.toURL()} />). Patch it to return a marker URL.
+      if (_win.MediaStream && !_win.MediaStream.prototype.toURL) {
+        _win.MediaStream.prototype.toURL = function () {
+          _streamRegistry[this.id] = this;
+          return _STREAM_URL_PREFIX + this.id;
+        };
+      }
+
+      // _switchCamera is a react-native-webrtc-specific track method; no-op on web.
+      if (_win.MediaStreamTrack && !_win.MediaStreamTrack.prototype._switchCamera) {
+        _win.MediaStreamTrack.prototype._switchCamera = function () {};
+      }
+
+      function _resolveStream(streamOrUrl) {
+        if (!streamOrUrl) return null;
+        if (typeof streamOrUrl === 'object' && (streamOrUrl.getTracks || streamOrUrl.getVideoTracks)) return streamOrUrl;
+        if (typeof streamOrUrl === 'string' && streamOrUrl.indexOf(_STREAM_URL_PREFIX) === 0) {
+          return _streamRegistry[streamOrUrl.slice(_STREAM_URL_PREFIX.length)] || null;
+        }
+        return null;
+      }
+
+      // Plain function component (NOT forwardRef) so the degraded wrapper sees
+      // module.exports as a component (typeof === 'function') and posts the
+      // on-mount banner. RTCView refs (rare) are not forwarded in this shim.
+      function RTCView(props) {
+        var videoRef = React.useRef(null);
+        React.useEffect(function () {
+          var v = videoRef.current;
+          if (!v) return;
+          var stream = _resolveStream(props.streamURL) || _resolveStream(props.stream);
+          try { v.srcObject = stream || null; } catch (e) {}
+        }, [props.streamURL, props.stream]);
+
+        var flat = (RN.StyleSheet && RN.StyleSheet.flatten) ? RN.StyleSheet.flatten(props.style) : props.style;
+        var containerStyle = Object.assign({ overflow: 'hidden', backgroundColor: '#000' }, flat || {});
+        var objectFit = props.objectFit === 'contain' ? 'contain' : 'cover';
+
+        return React.createElement(RN.View, { style: containerStyle },
+          React.createElement('video', {
+            ref: videoRef,
+            autoPlay: true,
+            playsInline: true,
+            muted: props.muted !== undefined ? !!props.muted : true,
+            style: { width: '100%', height: '100%', objectFit: objectFit, transform: props.mirror ? 'scaleX(-1)' : undefined, backgroundColor: '#000' }
+          })
+        );
+      }
+      RTCView.displayName = 'RTCView';
+
+      var mediaDevices = {
+        getUserMedia: function (c) { return (_nav && _nav.mediaDevices) ? _nav.mediaDevices.getUserMedia(c) : Promise.reject(new Error('mediaDevices unavailable')); },
+        getDisplayMedia: function (c) { return (_nav && _nav.mediaDevices) ? _nav.mediaDevices.getDisplayMedia(c) : Promise.reject(new Error('mediaDevices unavailable')); },
+        enumerateDevices: function () { return (_nav && _nav.mediaDevices) ? _nav.mediaDevices.enumerateDevices() : Promise.resolve([]); },
+        getSupportedConstraints: function () { return (_nav && _nav.mediaDevices && _nav.mediaDevices.getSupportedConstraints) ? _nav.mediaDevices.getSupportedConstraints() : {}; },
+        addEventListener: function (e, h) { if (_nav && _nav.mediaDevices) _nav.mediaDevices.addEventListener(e, h); },
+        removeEventListener: function (e, h) { if (_nav && _nav.mediaDevices) _nav.mediaDevices.removeEventListener(e, h); },
+        ondevicechange: null
+      };
+
+      function registerGlobals() {}
+      var permissions = {
+        request: function () { return Promise.resolve('granted'); },
+        check: function () { return Promise.resolve('granted'); }
+      };
+
+      // Hang the non-visual WebRTC API off RTCView as named exports. NO RTCView or
+      // default keys: those imports fall through the wrapper's proxy to the
+      // mount-wrapped component, so the banner fires wherever a stream renders.
+      RTCView.RTCPeerConnection = _win.RTCPeerConnection;
+      RTCView.RTCIceCandidate = _win.RTCIceCandidate;
+      RTCView.RTCSessionDescription = _win.RTCSessionDescription;
+      RTCView.RTCRtpReceiver = _win.RTCRtpReceiver;
+      RTCView.RTCRtpSender = _win.RTCRtpSender;
+      RTCView.RTCRtpTransceiver = _win.RTCRtpTransceiver;
+      RTCView.RTCErrorEvent = _win.RTCErrorEvent;
+      RTCView.RTCDataChannelEvent = _win.RTCDataChannelEvent;
+      RTCView.RTCTrackEvent = _win.RTCTrackEvent;
+      RTCView.RTCPeerConnectionIceEvent = _win.RTCPeerConnectionIceEvent;
+      RTCView.MediaStream = _win.MediaStream;
+      RTCView.MediaStreamTrack = _win.MediaStreamTrack;
+      RTCView.mediaDevices = mediaDevices;
+      RTCView.registerGlobals = registerGlobals;
+      RTCView.permissions = permissions;
+
+      module.exports = RTCView;
+    `,
+  },
+  // Non-visual native module: routes call audio (speaker/earpiece), drives the
+  // proximity sensor, and plays ringtones — none of which have a browser analogue.
+  // Unsupported tier (no UI, so no banner): replace with a no-op singleton so calls
+  // like InCallManager.start(...) don't crash the preview. Exposed as both a callable
+  // constructor (new InCallManager()) and a static object, since AI-generated code
+  // uses both shapes.
+  "react-native-incall-manager": {
+    mode: "unsupported",
+    stub: `
+      // incall-manager is invoked imperatively (e.g. onPress -> InCallManager.start()),
+      // never rendered, so the mount-based degraded wrapper can't fire. Instead we post
+      // the preview banner the first time any method runs, giving feedback that the call
+      // APIs are no-ops here and work on a real device.
+      var __posted = false;
+      function __postNotice() {
+        if (__posted) return;
+        __posted = true;
+        try {
+          if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+            var route = '';
+            try { route = (window.location.hash || '').replace(/^#/, ''); } catch (e) {}
+            window.parent.postMessage({
+              type: 'iframe.preview.notice',
+              payload: {
+                package: 'react-native-incall-manager',
+                note: 'Call audio (speaker, ringtone, mute, proximity) is a no-op in this preview — it works once your app runs on a device.',
+                route: route
+              }
+            }, '*');
+          }
+        } catch (e) {}
+      }
+
+      function _noop() { __postNotice(); }
+      function _resolveVoid() { __postNotice(); return Promise.resolve(); }
+
+      var _api = {
+        start: _noop,
+        stop: _noop,
+        setKeepScreenOn: _noop,
+        setSpeakerphoneOn: _noop,
+        setForceSpeakerphoneOn: _noop,
+        setMicrophoneMute: _noop,
+        turnScreenOn: _noop,
+        turnScreenOff: _noop,
+        setFlashOn: _noop,
+        startRingtone: _noop,
+        stopRingtone: _noop,
+        startRingback: _noop,
+        stopRingback: _noop,
+        startProximitySensor: _noop,
+        stopProximitySensor: _noop,
+        pokeScreen: _noop,
+        chooseAudioRoute: _noop,
+        requestAudioFocus: _resolveVoid,
+        abandonAudioFocus: _resolveVoid,
+        getAudioUriJS: function () { __postNotice(); return Promise.resolve(null); },
+        getIsWiredHeadsetPluggedIn: function () { __postNotice(); return Promise.resolve({ isWiredHeadsetPluggedIn: false }); }
+      };
+
+      // Callable as both a constructor (new InCallManager()) and a singleton
+      // (InCallManager.start(...)). The constructor returns the shared singleton
+      // so both shapes hit the same no-ops.
+      function InCallManager() { return _api; }
+      Object.assign(InCallManager, _api);
+      InCallManager.prototype = _api;
+
+      module.exports = InCallManager;
+      InCallManager.default = InCallManager;
+      InCallManager.__esModule = true;
+    `,
+  },
   // "react-native-keychain": {
   //   stub: `module.exports = {
   //     getGenericPassword: async () => false,
@@ -335,6 +520,12 @@ export function createUnsupportedWebPackagesPlugin(): BundlerPlugin {
         shims[pkg] = buildShim(pkg, entry);
       }
       return shims;
+    },
+    // These are real native npm packages — the shim keeps the WEB preview working,
+    // but they must still be in package.json for the native build to resolve them.
+    // The bundler fails if one is imported but undeclared (see findUndeclaredNativePackages).
+    nativePackages() {
+      return Object.keys(UNSUPPORTED_WEB_PACKAGES);
     },
   };
 }
