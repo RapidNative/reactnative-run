@@ -57,6 +57,14 @@ export interface BundlerPlugin {
    * Shimmed modules are NOT fetched from the package server.
    */
   shimModules?(): Record<string, string>;
+
+  /**
+   * Native packages this plugin shims for web preview that must STILL be declared
+   * in package.json for the native build to resolve them. If one is imported but
+   * undeclared, the bundle fails (instead of silently shimming it and letting the
+   * native build break later).
+   */
+  nativePackages?(): string[];
 }
 
 export interface BundlerConfig {

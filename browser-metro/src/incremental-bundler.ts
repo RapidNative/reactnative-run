@@ -155,6 +155,15 @@ export class IncrementalBundler {
     return shims;
   }
 
+  /** Native packages plugins shim but which must still be declared in package.json. */
+  private getNativePackages(): string[] {
+    const names: string[] = [];
+    for (const plugin of this.plugins) {
+      if (plugin.nativePackages) names.push(...plugin.nativePackages());
+    }
+    return names;
+  }
+
   /** Scan npm packages in the module map for require calls not yet fetched */
   private findTransitiveNpmDeps(skipNames: Set<string>): Set<string> {
     const newDeps = new Set<string>();
@@ -211,12 +220,18 @@ export class IncrementalBundler {
     if (npmDeps.length === 0) return;
     const aliases = this.getModuleAliases();
     const shims = this.getShimModules();
+    const native = new Set(this.getNativePackages());
     for (const dep of npmDeps) {
       const base = this.npmBaseName(dep);
+      // Native packages are shimmed for the web preview but must STILL be declared in
+      // package.json so the native build resolves them — the shim must NOT exempt them.
+      // Everything else handled client-side (aliases / other shims) counts as declared.
+      const isNative = native.has(base) || native.has(dep);
+      const shimExempt = !isNative && (base in shims || dep in shims);
       const declared =
         base in this.packageVersions ||
         base in aliases || dep in aliases ||
-        base in shims || dep in shims;
+        shimExempt;
       if (!declared) {
         const from = filePath.replace(/^\//, "");
         throw new Error(
