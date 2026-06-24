@@ -195,6 +195,20 @@ export class IncrementalBundler {
     }
   }
 
+  /**
+   * Subpath imports that need EXTRA peer packages declared in package.json,
+   * even though their base package is declared. Expo Router bundles the Stack
+   * and Tabs navigators, but the Drawer is an optional peer: `expo-router/drawer`
+   * requires `@react-navigation/drawer`. When it isn't declared the server still
+   * serves a drawer bundle whose internal `require("@react-navigation/drawer")`
+   * is missing, so the app boots into a cryptic expo-router runtime crash instead
+   * of a clear "module not found". Listing the peer here lets us surface the
+   * Metro-style resolution error attributed to the importing file.
+   */
+  private static readonly SUBPATH_REQUIRED_PEERS: Record<string, string[]> = {
+    "expo-router/drawer": ["@react-navigation/drawer"],
+  };
+
   /** Extract the package base name from an npm specifier (handles @scope and subpaths) */
   private npmBaseName(specifier: string): string {
     if (specifier.startsWith("@")) {
@@ -221,24 +235,47 @@ export class IncrementalBundler {
     const aliases = this.getModuleAliases();
     const shims = this.getShimModules();
     const native = new Set(this.getNativePackages());
+    // True when `spec` resolves without a registry fetch we'd have to declare:
+    // present in package.json, aliased, or shimmed (but native shims must still
+    // be declared so the native build resolves them, so they don't count here).
+    const isDeclared = (spec: string): boolean => {
+      const base = this.npmBaseName(spec);
+      const isNative = native.has(base) || native.has(spec);
+      const shimExempt = !isNative && (base in shims || spec in shims);
+      return (
+        base in this.packageVersions ||
+        base in aliases || spec in aliases ||
+        shimExempt
+      );
+    };
     for (const dep of npmDeps) {
       const base = this.npmBaseName(dep);
       // Native packages are shimmed for the web preview but must STILL be declared in
       // package.json so the native build resolves them — the shim must NOT exempt them.
       // Everything else handled client-side (aliases / other shims) counts as declared.
-      const isNative = native.has(base) || native.has(dep);
-      const shimExempt = !isNative && (base in shims || dep in shims);
-      const declared =
-        base in this.packageVersions ||
-        base in aliases || dep in aliases ||
-        shimExempt;
-      if (!declared) {
+      if (!isDeclared(dep)) {
         const from = filePath.replace(/^\//, "");
         throw new Error(
           `Unable to resolve "${dep}" from "${from}"\n` +
             `  "${base}" is not listed in package.json "dependencies". ` +
             `Add it to package.json to install it.`,
         );
+      }
+      // Some subpaths (e.g. expo-router/drawer) need extra peer packages declared
+      // even though their base IS declared. Surface the missing peer as a normal
+      // resolution error attributed to the importing file, instead of letting the
+      // app boot into a cryptic runtime crash from the missing internal require.
+      const peers = IncrementalBundler.SUBPATH_REQUIRED_PEERS[dep];
+      if (peers) {
+        for (const peer of peers) {
+          if (isDeclared(peer)) continue;
+          const from = filePath.replace(/^\//, "");
+          throw new Error(
+            `Unable to resolve "${peer}" from "${from}"\n` +
+              `  "${peer}" is required by "${dep}" but is not listed in ` +
+              `package.json "dependencies". Add it to package.json to use ${dep}.`,
+          );
+        }
       }
     }
   }
