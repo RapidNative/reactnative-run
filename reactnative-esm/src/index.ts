@@ -267,13 +267,20 @@ async function resolveVersionAsync(pkgName: string, range: string): Promise<stri
 }
 
 function cacheKeyFor(pkgName: string, version: string, subpath: string): string {
-	// SERVER_VERSION is part of the key so bumping it genuinely invalidates these
-	// per-package caches, which is what the comment on SERVER_VERSION promises.
-	// Previously only the multi-package deps hash included it, so a bump left
-	// single-package bundles (the common case) serving pre-change output — a
-	// bundling fix could look deployed while every cached package served the old
-	// build.
-	return `v${SERVER_VERSION}_${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
+	// KNOWN GAP: SERVER_VERSION is deliberately NOT part of this key.
+	//
+	// The comment on SERVER_VERSION says bumping it invalidates all caches, but
+	// only the multi-package deps hash actually includes it — these per-package
+	// bundles (the common case) keep serving pre-change output across a bump. So
+	// after changing bundling logic you must also evict the affected entries from
+	// `cache/` by hand, or the change ships inert.
+	//
+	// Adding the version here was tried and reverted: production's cache is ~12GB,
+	// so prefixing every key orphans all of it at once, forcing every package to
+	// rebuild on demand and roughly doubling disk until the old files are removed.
+	// That is too blunt to carry a small source patch. Fix this properly alongside
+	// a planned cache rebuild, not as a side effect.
+	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
 }
 
 function serveCached(res: Response, cacheFile: string, externalsFile: string, label: string): boolean {
