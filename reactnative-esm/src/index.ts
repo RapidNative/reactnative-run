@@ -114,6 +114,17 @@ async function buildTolerant(
  * Fix mirrors native: treat a missing mode as 'off'. Anchored on the switch's
  * 'off' case; if upstream refactors, this logs instead of silently shipping an
  * unpatched build.
+ *
+ * VERSION BOUNDARY — only needed for react-native-safe-area-context < 5.7.0.
+ * Upstream fixed this in 5.7.0 by reordering the switch so `default` falls in
+ * with 'off'. The patch is a verified no-op on 5.7.0+: the anchor still matches,
+ * but inserting `case undefined:` above a branch that already returns `current`
+ * changes nothing (checked against 5.6.2 / 5.7.0 / 5.8.0 across all four modes —
+ * only 5.6.2 changes behaviour).
+ *
+ * It is kept because existing projects still pin older versions (our templates
+ * pinned 5.6.1, and live traffic spans 4.12.0 through 5.8.0), so they need this
+ * until they upgrade. Safe to delete once nothing below 5.7.0 is in use.
  */
 const patchUpstreamBugsPlugin: esbuild.Plugin = {
 	name: "patch-upstream-bugs",
