@@ -341,7 +341,7 @@ export function hashString(str: string): string {
 }
 
 // Must match SERVER_VERSION in reactnative-esm/src/index.ts
-const DEPS_HASH_VERSION = "7";
+const DEPS_HASH_VERSION = "8";
 
 /** Hash a dependencies object to a stable cache key.
  *  Uses SHA-256 (via Web Crypto or Node crypto) truncated to 16 hex chars

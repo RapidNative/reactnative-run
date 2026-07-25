@@ -10,7 +10,7 @@ import flowRemoveTypes from "flow-remove-types";
 
 // Bump this when the bundling logic changes to invalidate all caches.
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
-const SERVER_VERSION = "7";
+const SERVER_VERSION = "8";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -147,10 +147,9 @@ async function buildTolerant(
  *   - a data attribute on <html>, for the canvas iframe (same-origin, readable)
  *   - a postMessage to the parent, for the Preview browser (cross-origin)
  *
- * Known fidelity gap: native keeps a stack of StatusBar declarations and the
- * focused screen wins. This is last-writer-wins, so navigating away from a
- * screen that set a style leaves that style in place until something sets
- * another. Acceptable for a preview; noted so it is not mistaken for a bug.
+ * Declarations are kept on a stack, as native does: the last mounted StatusBar
+ * wins and unmounting pops back to the screen underneath, so a route change
+ * restores the previous colours instead of leaving the last style stuck.
  */
 const previewShimsPlugin: esbuild.Plugin = {
 	name: "preview-shims",
@@ -179,48 +178,88 @@ import {
   setStatusBarTranslucent,
 } from './NativeStatusBarWrapper';
 
-// Merged so a partial imperative update (style only, or hidden only) does not
-// clear the other field.
-var __rnStatusBarState = { style: null, hidden: false };
+// Declaration stack, mirroring native. React Native keeps every mounted
+// StatusBar's props on a stack and the last one wins, so unmounting restores
+// whatever the screen underneath asked for. Without this, navigating away from a
+// screen that set a style leaves that style stuck — the previous behaviour, and
+// the reason a route change did not restore the chrome's colours.
+var __rnSeq = 0;
+var __rnStack = [];
 
-function __rnPublishStatusBar(next) {
+// Imperative setStatusBar*() calls sit on top of the stack. Cleared whenever the
+// stack changes, so a navigation re-derives from the mounted declarations rather
+// than inheriting an imperative call made on a screen that is gone.
+var __rnImperative = null;
+
+function __rnEffectiveStatusBar() {
+  var top = __rnStack.length ? __rnStack[__rnStack.length - 1] : null;
+  var style = top ? top.style : null;
+  var hidden = top ? top.hidden : false;
+  if (__rnImperative) {
+    if ('style' in __rnImperative) style = __rnImperative.style;
+    if ('hidden' in __rnImperative) hidden = __rnImperative.hidden;
+  }
+  return { style: style, hidden: hidden };
+}
+
+function __rnPublishStatusBar() {
   try {
-    __rnStatusBarState = Object.assign({}, __rnStatusBarState, next);
+    var eff = __rnEffectiveStatusBar();
     if (typeof document === 'undefined') return;
     var root = document.documentElement;
-    if (__rnStatusBarState.style == null) {
+    if (eff.style == null) {
       delete root.dataset.rnStatusBarStyle;
     } else {
-      root.dataset.rnStatusBarStyle = String(__rnStatusBarState.style);
+      root.dataset.rnStatusBarStyle = String(eff.style);
     }
-    root.dataset.rnStatusBarHidden = __rnStatusBarState.hidden ? '1' : '0';
+    root.dataset.rnStatusBarHidden = eff.hidden ? '1' : '0';
     if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
       window.parent.postMessage({
         source: 'rapidnative-preview',
         type: 'status-bar',
-        style: __rnStatusBarState.style,
-        hidden: !!__rnStatusBarState.hidden,
+        style: eff.style,
+        hidden: !!eff.hidden,
       }, '*');
     }
   } catch (e) {}
 }
 
+// Re-registering by id (rather than pushing again) keeps a prop change from
+// growing the stack, while still moving that entry to the top.
+function __rnRegisterStatusBar(id, style, hidden) {
+  __rnStack = __rnStack.filter(function (e) { return e.id !== id; });
+  __rnStack.push({ id: id, style: style, hidden: hidden });
+  __rnImperative = null;
+  __rnPublishStatusBar();
+}
+
+function __rnUnregisterStatusBar(id) {
+  __rnStack = __rnStack.filter(function (e) { return e.id !== id; });
+  __rnImperative = null;
+  __rnPublishStatusBar();
+}
+
 export function StatusBar(props) {
+  var idRef = React.useRef(null);
+  if (idRef.current === null) idRef.current = ++__rnSeq;
   var style = props && props.style != null ? props.style : null;
   var hidden = !!(props && props.hidden);
   React.useEffect(function () {
-    __rnPublishStatusBar({ style: style, hidden: hidden });
+    __rnRegisterStatusBar(idRef.current, style, hidden);
+    return function () { __rnUnregisterStatusBar(idRef.current); };
   }, [style, hidden]);
   return React.createElement(__rnUpstreamStatusBar, props);
 }
 
 export function setStatusBarStyle(style, animated) {
-  __rnPublishStatusBar({ style: style == null ? null : style });
+  __rnImperative = Object.assign({}, __rnImperative, { style: style == null ? null : style });
+  __rnPublishStatusBar();
   return __rnUpstreamSetStyle(style, animated);
 }
 
 export function setStatusBarHidden(hidden, animation) {
-  __rnPublishStatusBar({ hidden: !!hidden });
+  __rnImperative = Object.assign({}, __rnImperative, { hidden: !!hidden });
+  __rnPublishStatusBar();
   return __rnUpstreamSetHidden(hidden, animation);
 }
 
