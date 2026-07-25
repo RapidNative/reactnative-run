@@ -10,7 +10,7 @@ import flowRemoveTypes from "flow-remove-types";
 
 // Bump this when the bundling logic changes to invalidate all caches.
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
-const SERVER_VERSION = "5";
+const SERVER_VERSION = "6";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -93,6 +93,51 @@ async function buildTolerant(
     }
   }
 }
+
+/**
+ * Patch known upstream bugs in package sources as they are loaded.
+ *
+ * react-native-safe-area-context's WEB SafeAreaView mishandles a partial `edges`
+ * prop. The native path normalises missing edges to 'off':
+ *
+ *   const requiredEdges = { top: edgesObj.top ?? 'off', bottom: edgesObj.bottom ?? 'off', ... }
+ *
+ * The web path (SafeAreaView.web.js) skips that step, so `edges={['top']}` yields
+ * `{ top: 'additive' }` with `bottom` undefined. getEdgeValue's switch has no case
+ * for undefined, so it falls through to `default:` — additive — and the bottom
+ * inset is applied anyway. A screen that opted out of the bottom edge still gets
+ * bottom-inset padding, stacking on top of a tab bar that already accounted for it.
+ *
+ * It only shows when insets are non-zero, which is why desktop web (all insets 0)
+ * never revealed it while iOS Safari with viewport-fit=cover does.
+ *
+ * Fix mirrors native: treat a missing mode as 'off'. Anchored on the switch's
+ * 'off' case; if upstream refactors, this logs instead of silently shipping an
+ * unpatched build.
+ */
+const patchUpstreamBugsPlugin: esbuild.Plugin = {
+	name: "patch-upstream-bugs",
+	setup(build) {
+		build.onLoad(
+			{ filter: /react-native-safe-area-context[/\\].*SafeAreaView\.web\.[jt]sx?$/ },
+			async (args) => {
+				const source = await fs.promises.readFile(args.path, "utf8");
+				const anchor = /case\s+(['"])off\1\s*:/;
+				if (!anchor.test(source)) {
+					console.warn(
+						`[patch-upstream-bugs] SafeAreaView.web edges patch did not apply (anchor missing): ${args.path}`
+					);
+					return null;
+				}
+				const patched = source.replace(
+					anchor,
+					(m) => `case undefined:\n    // patched: a missing edge means 'off', as in the native path\n    ${m}`
+				);
+				return { contents: patched, loader: "jsx" };
+			}
+		);
+	},
+};
 
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
@@ -222,7 +267,13 @@ async function resolveVersionAsync(pkgName: string, range: string): Promise<stri
 }
 
 function cacheKeyFor(pkgName: string, version: string, subpath: string): string {
-	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
+	// SERVER_VERSION is part of the key so bumping it genuinely invalidates these
+	// per-package caches, which is what the comment on SERVER_VERSION promises.
+	// Previously only the multi-package deps hash included it, so a bump left
+	// single-package bundles (the common case) serving pre-change output — a
+	// bundling fix could look deployed while every cached package served the old
+	// build.
+	return `v${SERVER_VERSION}_${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
 }
 
 function serveCached(res: Response, cacheFile: string, externalsFile: string, label: string): boolean {
@@ -516,7 +567,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				},
 			}),
 			plugins: [
-				...(isReactNative ? [stripFlowPlugin, filterNativePlatformsPlugin, stubNodeBuiltinsPlugin] : []),
+				...(isReactNative ? [stripFlowPlugin, filterNativePlatformsPlugin, stubNodeBuiltinsPlugin, patchUpstreamBugsPlugin] : []),
 				selectiveExternalPlugin,
 			],
 		});
@@ -903,7 +954,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						define: { "__DEV__": "false" },
 					}),
 					plugins: [
-						...(info.isRN ? [stripFlow, filterNative] : []),
+						...(info.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin] : []),
 						pkgExternalPlugin,
 					],
 					logLevel: "silent",
@@ -1036,7 +1087,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						define: { "__DEV__": "false" },
 					}),
 					plugins: [
-						...(info?.isRN ? [stripFlow, filterNative] : []),
+						...(info?.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin] : []),
 						subExternalPlugin,
 					],
 					logLevel: "silent",
