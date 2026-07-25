@@ -10,7 +10,7 @@ import flowRemoveTypes from "flow-remove-types";
 
 // Bump this when the bundling logic changes to invalidate all caches.
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
-const SERVER_VERSION = "6";
+const SERVER_VERSION = "7";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -126,6 +126,118 @@ async function buildTolerant(
  * pinned 5.6.1, and live traffic spans 4.12.0 through 5.8.0), so they need this
  * until they upgrade. Safe to delete once nothing below 5.7.0 is in use.
  */
+/**
+ * Preview shims — make web builds report state the preview UI needs.
+ *
+ * expo-status-bar does nothing observable on web. That is correct for a real
+ * browser (no OS status bar), but the editor draws a simulated iOS status bar
+ * over the preview, and `<StatusBar style="light" />` is exactly what decides
+ * its ink colour on a device. With nothing in the DOM to observe, the chrome has
+ * to guess from the app's colour scheme, and disagrees whenever an app declares
+ * a style that opposes its theme.
+ *
+ * Target note: the shim wraps `src/StatusBar.ts`, NOT `StatusBar.web.ts`. The
+ * package's `exports` map points at an exact path ("./src/StatusBar.ts"), which
+ * bypasses resolveExtensions entirely — so the `.web.ts` variant is never loaded
+ * and patching it would silently do nothing. StatusBar.ts is a thin barrel over
+ * NativeStatusBarWrapper, so we re-export through it and add the broadcast,
+ * leaving upstream behaviour intact rather than replacing an implementation.
+ *
+ * State is published two ways because the two previews differ in origin:
+ *   - a data attribute on <html>, for the canvas iframe (same-origin, readable)
+ *   - a postMessage to the parent, for the Preview browser (cross-origin)
+ *
+ * Known fidelity gap: native keeps a stack of StatusBar declarations and the
+ * focused screen wins. This is last-writer-wins, so navigating away from a
+ * screen that set a style leaves that style in place until something sets
+ * another. Acceptable for a preview; noted so it is not mistaken for a bug.
+ */
+const previewShimsPlugin: esbuild.Plugin = {
+	name: "preview-shims",
+	setup(build) {
+		build.onLoad(
+			{ filter: /expo-status-bar[/\\]src[/\\]StatusBar\.[jt]sx?$/ },
+			async (args) => {
+				const source = await fs.promises.readFile(args.path, "utf8");
+				// Guard: only wrap the known re-export barrel. If upstream restructures,
+				// leave it alone and say so rather than clobbering real code.
+				if (!source.includes("from './NativeStatusBarWrapper'")) {
+					console.warn(
+						`[preview-shims] expo-status-bar shim skipped — not the expected barrel: ${args.path}`
+					);
+					return null;
+				}
+
+				const contents = `
+import * as React from 'react';
+import {
+  StatusBar as __rnUpstreamStatusBar,
+  setStatusBarStyle as __rnUpstreamSetStyle,
+  setStatusBarHidden as __rnUpstreamSetHidden,
+  setStatusBarBackgroundColor,
+  setStatusBarNetworkActivityIndicatorVisible,
+  setStatusBarTranslucent,
+} from './NativeStatusBarWrapper';
+
+// Merged so a partial imperative update (style only, or hidden only) does not
+// clear the other field.
+var __rnStatusBarState = { style: null, hidden: false };
+
+function __rnPublishStatusBar(next) {
+  try {
+    __rnStatusBarState = Object.assign({}, __rnStatusBarState, next);
+    if (typeof document === 'undefined') return;
+    var root = document.documentElement;
+    if (__rnStatusBarState.style == null) {
+      delete root.dataset.rnStatusBarStyle;
+    } else {
+      root.dataset.rnStatusBarStyle = String(__rnStatusBarState.style);
+    }
+    root.dataset.rnStatusBarHidden = __rnStatusBarState.hidden ? '1' : '0';
+    if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+      window.parent.postMessage({
+        source: 'rapidnative-preview',
+        type: 'status-bar',
+        style: __rnStatusBarState.style,
+        hidden: !!__rnStatusBarState.hidden,
+      }, '*');
+    }
+  } catch (e) {}
+}
+
+export function StatusBar(props) {
+  var style = props && props.style != null ? props.style : null;
+  var hidden = !!(props && props.hidden);
+  React.useEffect(function () {
+    __rnPublishStatusBar({ style: style, hidden: hidden });
+  }, [style, hidden]);
+  return React.createElement(__rnUpstreamStatusBar, props);
+}
+
+export function setStatusBarStyle(style, animated) {
+  __rnPublishStatusBar({ style: style == null ? null : style });
+  return __rnUpstreamSetStyle(style, animated);
+}
+
+export function setStatusBarHidden(hidden, animation) {
+  __rnPublishStatusBar({ hidden: !!hidden });
+  return __rnUpstreamSetHidden(hidden, animation);
+}
+
+export {
+  setStatusBarBackgroundColor,
+  setStatusBarNetworkActivityIndicatorVisible,
+  setStatusBarTranslucent,
+};
+
+export { StatusBarStyle, StatusBarAnimation, StatusBarProps } from './types';
+`;
+				return { contents, loader: "ts" };
+			}
+		);
+	},
+};
+
 const patchUpstreamBugsPlugin: esbuild.Plugin = {
 	name: "patch-upstream-bugs",
 	setup(build) {
@@ -585,7 +697,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				},
 			}),
 			plugins: [
-				...(isReactNative ? [stripFlowPlugin, filterNativePlatformsPlugin, stubNodeBuiltinsPlugin, patchUpstreamBugsPlugin] : []),
+				...(isReactNative ? [stripFlowPlugin, filterNativePlatformsPlugin, stubNodeBuiltinsPlugin, patchUpstreamBugsPlugin, previewShimsPlugin] : []),
 				selectiveExternalPlugin,
 			],
 		});
@@ -972,7 +1084,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						define: { "__DEV__": "false" },
 					}),
 					plugins: [
-						...(info.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin] : []),
+						...(info.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin, previewShimsPlugin] : []),
 						pkgExternalPlugin,
 					],
 					logLevel: "silent",
@@ -1105,7 +1217,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						define: { "__DEV__": "false" },
 					}),
 					plugins: [
-						...(info?.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin] : []),
+						...(info?.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin, previewShimsPlugin] : []),
 						subExternalPlugin,
 					],
 					logLevel: "silent",
