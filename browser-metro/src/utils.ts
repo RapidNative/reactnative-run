@@ -272,8 +272,27 @@ export function buildRouterShim(): string {
 
   function parseUrl(url) {
     var s = String(url);
+    // A blob: URL identifies THIS document, so its path segment is the blob UUID and is
+    // never a route. Take the route from the fragment instead — the same convention the
+    // initial mount uses when it reads location.hash, and what sync() writes back.
+    //
+    // Reading inner.pathname here instead meant any router calling
+    // history.replaceState(state, '', location.href) on init — React Navigation does exactly
+    // that — latched '/<blob-uuid>' as the current route. __ROUTER_SHIM_HASH__ then reported
+    // the UUID, and a host that restores that value on reload (to preserve the in-app route
+    // across a rebuild) remounted at blob:<new-uuid>#<old-uuid>, so Expo Router rendered
+    // "Unmatched Route".
+    //
+    // Only a preview whose route is "/" could hit it: that is the one case where the mount
+    // URL carries no fragment for the shim to read back, so a home screen broke on its own
+    // while sibling routes ("#/explore" and friends) kept working. It was racy too — it only
+    // bit when the router's replaceState ran before the first sync() had written the hash.
     if (s.indexOf('blob:') === 0) {
-      try { var inner = new OrigURL(s.slice(5)); s = inner.pathname + inner.search + inner.hash; } catch(e) {}
+      var fragIdx = s.indexOf('#');
+      // No fragment means the URL says nothing about the route, so stay where we are
+      // rather than adopting the UUID.
+      s = fragIdx >= 0 ? (s.slice(fragIdx + 1) || '/') : (virtualPathname + virtualSearch);
+      if (s.charAt(0) !== '/') s = '/' + s;
     }
     try {
       var u = new OrigURL(s, virtualOrigin);
