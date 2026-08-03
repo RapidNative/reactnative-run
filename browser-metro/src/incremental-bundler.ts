@@ -297,12 +297,16 @@ export class IncrementalBundler {
   /** Scan VFS source files for bare subpath imports of direct deps so the
    *  server can bundle them combined with their base (shared internals). See
    *  collectUsedSubpaths for the duplicate-context rationale. */
+  /** Build-tooling config files (metro/babel/tailwind/eslint/app.config):
+   *  Node-side, never bundled. Shared by collectSubpaths and rebuild(). */
+  private static readonly CONFIG_FILE_RE = /(?:^|\/)[^/]*\.config\.[cm]?[jt]sx?$/;
+
   private collectSubpaths(depNames: Set<string>): string[] {
     const SRC = /\.(tsx?|jsx?|mjs|cjs)$/;
-    // Build-tooling config files (metro/babel/tailwind/eslint/app.config) import
-    // Node-side subpaths (e.g. expo/metro-config) that aren't part of the RN
-    // bundle — exclude them so we don't ask the server to combine-build those.
-    const CONFIG = /(?:^|\/)[^/]*\.config\.[cm]?[jt]sx?$/;
+    // Build-tooling config files import Node-side subpaths (e.g.
+    // expo/metro-config) that aren't part of the RN bundle — exclude them so
+    // we don't ask the server to combine-build those.
+    const CONFIG = IncrementalBundler.CONFIG_FILE_RE;
     const files: Array<{ content: string }> = [];
     for (const path of this.fs.list()) {
       if (!SRC.test(path) || CONFIG.test(path)) continue;
@@ -803,6 +807,14 @@ export class IncrementalBundler {
           filesToReprocess.add(dep);
         }
       } else {
+        // Build-tooling config files (metro/babel/tailwind/eslint/app.config)
+        // are Node-side and never part of the RN bundle — the initial build()
+        // walks from the entry so they naturally stay out of the graph, but a
+        // WRITE to one (AI generation, zip import) lands here and would drag
+        // it through processFile, where its legitimately-undeclared Node-side
+        // imports (e.g. "eslint/config") trip assertDeclaredNpmDeps and kill
+        // the entire rebuild. Same exclusion as collectSubpaths.
+        if (IncrementalBundler.CONFIG_FILE_RE.test(change.path)) continue;
         // Create or update: only reprocess the changed file itself.
         // Dependents don't need re-transformation -- the HMR runtime
         // handles re-execution by walking accept boundaries.

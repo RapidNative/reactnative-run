@@ -133,9 +133,17 @@ function extractTailwindConfig(tailwindConfigContent: string): string {
         let depth = 0;
         let inString = false;
         let stringChar = "";
+        let inLineComment = false;
+        let inBlockComment = false;
         for (let i = braceIndex; i < tailwindConfigContent.length; i++) {
           const char = tailwindConfigContent[i];
           const prevChar = i > 0 ? tailwindConfigContent[i - 1] : "";
+          // Skip comments before quote tracking: an apostrophe in a comment
+          // otherwise opens a phantom string and the theme is silently dropped.
+          if (inLineComment) { if (char === "\n") inLineComment = false; continue; }
+          if (inBlockComment) { if (char === "/" && prevChar === "*") inBlockComment = false; continue; }
+          if (!inString && char === "/" && tailwindConfigContent[i + 1] === "/") { inLineComment = true; i++; continue; }
+          if (!inString && char === "/" && tailwindConfigContent[i + 1] === "*") { inBlockComment = true; i++; continue; }
           if ((char === '"' || char === "'" || char === "`") && prevChar !== "\\") {
             if (!inString) { inString = true; stringChar = char; }
             else if (char === stringChar) { inString = false; stringChar = ""; }
