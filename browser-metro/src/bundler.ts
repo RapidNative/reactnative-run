@@ -9,7 +9,7 @@ import {
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
 import { formatTransformError } from "./transform-error.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -222,7 +222,8 @@ export class Bundler {
   }
 
   /** Resolve an npm specifier to a versioned form using package.json versions.
-   *  Priority: user's package.json > transitive dep versions from manifests > bare name */
+   *  Priority: user's package.json > transitive dep versions from manifests >
+   *  react-native's version for `@react-native/*` > bare name */
   private resolveNpmSpecifier(
     specifier: string,
     versions: Record<string, string>,
@@ -237,7 +238,10 @@ export class Bundler {
       baseName = specifier.split("/")[0];
     }
 
-    const version = versions[baseName] || (transitiveDepsVersions && transitiveDepsVersions[baseName]);
+    const version =
+      versions[baseName] ||
+      (transitiveDepsVersions && transitiveDepsVersions[baseName]) ||
+      rnCoreVersionFor(baseName, versions);
     if (!version) return specifier;
 
     const subpath = specifier.slice(baseName.length); // e.g. "/client" or ""

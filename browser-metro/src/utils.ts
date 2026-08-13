@@ -456,3 +456,36 @@ export function parseDepBundle(code: string): { manifest: Record<string, string>
 
   return { manifest, packages };
 }
+
+/**
+ * The version to fetch a `@react-native/*` package at when nothing else pins it.
+ *
+ * These scoped packages are published in lockstep with `react-native` core — a project on
+ * react-native 0.81.4 gets @react-native/assets-registry 0.81.4 — so core's declared version is
+ * the correct answer, and it is already in package.json.
+ *
+ * WHY THIS EXISTS
+ * They are almost never direct dependencies (they arrive under expo, expo-asset, react-native
+ * itself), and the package server externalizes them WITHOUT reporting a version: for RN/Expo
+ * builds it strips `@react-native/*` out of the externals list before the branch that records
+ * versions ever runs, so `X-Externals` comes back `{}`. With no version from either source the
+ * specifier stayed bare, which the server resolves as `@latest` — silently following whatever
+ * npm tagged most recently, across major RN releases.
+ *
+ * That is not hypothetical. @react-native/assets-registry@0.87.0 (published 2026-08-11) rewrote
+ * `registry.js` from a real implementation into `require('react-native').AssetRegistry.registerAsset`.
+ * On web `react-native` is aliased to react-native-web, which has no top-level `AssetRegistry`, so
+ * every project that rebuilt after that date died on "Cannot read properties of undefined (reading
+ * 'registerAsset')" — with no project change, and a stack pointing only into an anonymous bundled
+ * IIFE. 0.86.2 and every earlier release work fine.
+ *
+ * Ranges pass through unchanged (`~0.81.4` resolves server-side, same as any other dependency), so
+ * this pins to the project's own RN line rather than to an exact release.
+ */
+export function rnCoreVersionFor(
+  baseName: string,
+  versions: Record<string, string>,
+): string | undefined {
+  if (!baseName.startsWith("@react-native/")) return undefined;
+  return versions["react-native"];
+}
