@@ -6,6 +6,7 @@ import { loadProjectConfig } from "../project/config.js";
 import { BundlerSession } from "../bundler/session.js";
 import { VirtualFS } from "browser-metro";
 import { detectNativewind } from "../project/nativewind.js";
+import { resolveWorkletsPlugin } from "../bundler/worklets.js";
 import { startServer, getLanIp, type ServerContext } from "../server/server.js";
 import { createLogger } from "../ui/logger.js";
 import { createCachedFetch } from "../project/pkg-cache.js";
@@ -62,6 +63,14 @@ export async function startCommand(options: StartOptions): Promise<void> {
     const nw = detectNativewind(probeVfs);
     if (nw.reason) log.warn(`[nativewind] ${nw.reason}`);
     if (nw.enabled) log.info(`[${platform}] nativewind detected -- className support enabled`);
+    let projectDeps: Record<string, string> = {};
+    try {
+      projectDeps = JSON.parse(probeVfs.read("/package.json") || "{}").dependencies || {};
+    } catch {
+      /* no deps */
+    }
+    const workletsPluginPath = resolveWorkletsPlugin(rootDir, projectDeps, log.warn);
+    if (workletsPluginPath) log.info(`[${platform}] reanimated detected -- worklets plugin enabled`);
     const native = new BundlerSession(rescan.files, {
       packageServerUrl,
       env: config.env,
@@ -72,6 +81,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       fetch: cachedFetch,
       nativewind: nw.enabled,
       warn: log.warn,
+      workletsPluginPath,
     });
     native.onEvent((e) => {
       if (e.type === "build-error") log.error(`[${platform}] build error:\n${e.message}`);
