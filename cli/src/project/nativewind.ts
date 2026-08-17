@@ -1,0 +1,126 @@
+import type { VirtualFS } from "browser-metro";
+
+/**
+ * nativewind support for native (metro-format) sessions.
+ *
+ * Metro-with-nativewind does two things we replicate:
+ *  1. JSX goes through `nativewind`'s jsx-runtime (automatic runtime with
+ *     jsxImportSource "nativewind") so className props reach css-interop --
+ *     handled in the session's transformer config.
+ *  2. The project's `.css` import compiles (tailwind → cssToReactNativeRuntime)
+ *     into an `injectData(...)` module. The compile runs on the package server
+ *     (POST /nativewind-css); this module builds the request and wraps the
+ *     response into module source served via the bundler's virtualSource hook.
+ */
+
+/** Env override for testing an unreleased server endpoint. */
+const NATIVEWIND_SERVER = process.env.RNRUN_NATIVEWIND_SERVER;
+
+const CONTENT_EXT_RE = /\.(?:tsx?|jsx?|html|mdx)$/;
+
+export interface NativewindDetection {
+  enabled: boolean;
+  reason?: string;
+}
+
+/** nativewind needs: nativewind + tailwindcss + react-native-css-interop declared, and a tailwind config. */
+export function detectNativewind(vfs: VirtualFS): NativewindDetection {
+  let deps: Record<string, string>;
+  try {
+    deps = JSON.parse(vfs.read("/package.json") || "{}").dependencies || {};
+  } catch {
+    return { enabled: false };
+  }
+  if (!("nativewind" in deps)) return { enabled: false };
+  if (!vfs.exists("/tailwind.config.js")) {
+    return { enabled: false, reason: "nativewind declared but no /tailwind.config.js found" };
+  }
+  if (!("tailwindcss" in deps)) {
+    return { enabled: false, reason: "nativewind declared but tailwindcss is not in dependencies" };
+  }
+  if (!("react-native-css-interop" in deps)) {
+    return {
+      enabled: false,
+      reason:
+        "nativewind declared but react-native-css-interop is not in dependencies -- add it for native className support",
+    };
+  }
+  return { enabled: true };
+}
+
+/**
+ * Compile every project `.css` file to an injectData module.
+ * Returns a map of css path → module source, or null on failure (callers keep
+ * the previous modules).
+ */
+export async function compileNativewindCss(opts: {
+  vfs: VirtualFS;
+  platform: string;
+  packageServerUrl: string;
+  fetch?: typeof fetch;
+  warn: (msg: string) => void;
+}): Promise<Map<string, string> | null> {
+  const { vfs, platform, warn } = opts;
+  const doFetch = opts.fetch ?? fetch;
+  const serverUrl = NATIVEWIND_SERVER || opts.packageServerUrl;
+
+  const allPaths = vfs.list();
+  const cssPaths = allPaths.filter((p) => p.endsWith(".css"));
+  if (cssPaths.length === 0) return new Map();
+
+  let deps: Record<string, string> = {};
+  try {
+    deps = JSON.parse(vfs.read("/package.json") || "{}").dependencies || {};
+  } catch {
+    /* handled below by missing versions */
+  }
+  const versions: Record<string, string> = {};
+  for (const name of ["nativewind", "tailwindcss", "react-native-css-interop", "react-native"]) {
+    if (deps[name]) versions[name] = deps[name];
+  }
+
+  const tailwindConfig = vfs.read("/tailwind.config.js");
+  if (!tailwindConfig) return null;
+
+  const content: Record<string, string> = {};
+  for (const p of allPaths) {
+    if (!CONTENT_EXT_RE.test(p)) continue;
+    const src = vfs.read(p);
+    if (src) content[p] = src;
+  }
+
+  const result = new Map<string, string>();
+  for (const cssPath of cssPaths) {
+    const css = vfs.read(cssPath);
+    if (!css) {
+      result.set(cssPath, "module.exports = {};");
+      continue;
+    }
+    try {
+      const res = await doFetch(`${serverUrl}/nativewind-css`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ platform, versions, tailwindConfig, css, content }),
+        signal: AbortSignal.timeout(180_000),
+      });
+      if (!res.ok) {
+        warn(`[nativewind] compile failed for ${cssPath} (HTTP ${res.status}); styles unchanged`);
+        return null;
+      }
+      const { data } = (await res.json()) as { data: unknown };
+      result.set(
+        cssPath,
+        // injectData lives in css-interop's native runtime; requiring the
+        // subpath shares the instance with the components' own chunk via the
+        // combined-subpath machinery.
+        'require("react-native-css-interop/dist/runtime/native/styles").injectData(' +
+          JSON.stringify(data) +
+          ");\nmodule.exports = {};"
+      );
+    } catch (err) {
+      warn(`[nativewind] compile failed for ${cssPath} (${(err as Error).message}); styles unchanged`);
+      return null;
+    }
+  }
+  return result;
+}

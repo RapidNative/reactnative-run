@@ -120,3 +120,26 @@ test('hot update against the REAL metro-runtime prelude re-runs the factory and 
   delete globalThis.__REFRESHED;
   delete globalThis.__ReactRefresh;
 });
+
+test('buildMetroHmrBody orders dependencies before dependents (sync hot-swap safety)', () => {
+  const registry = new ModuleIdRegistry();
+  registry.idFor('/index.ts'); // pre-existing
+  const body = buildMetroHmrBody(
+    {
+      updatedModules: {
+        '/index.ts': 'require("new-pkg"); require("other-new");',
+        'new-pkg': 'require("other-new"); exports.x = 1;',
+        'other-new': 'exports.y = 2;',
+      },
+      removedModules: [],
+      reverseDepsMap: { '/index.ts': [] },
+    },
+    registry,
+    'rev-o'
+  );
+  const order = [...body.added, ...body.modified].map((e) => e.sourceURL);
+  // metro-runtime hot-swaps synchronously at eval, so a dependent evaluated
+  // before its in-payload dependency throws "Requiring unknown module".
+  assert.ok(order.indexOf('other-new') < order.indexOf('new-pkg'), 'other-new before new-pkg');
+  assert.ok(order.indexOf('new-pkg') < order.indexOf('/index.ts'), 'new-pkg before index');
+});

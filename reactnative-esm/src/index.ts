@@ -456,7 +456,9 @@ fs.mkdirSync(CACHE_DIR, { recursive: true });
 app.set("trust proxy", true);
 
 // JSON body parser for POST endpoints
-app.use(express.json({ limit: "1mb" }));
+// 10mb: /nativewind-css posts project source files for tailwind content
+// scanning; /bundle-deps bodies stay tiny.
+app.use(express.json({ limit: "10mb" }));
 
 // CORS for browser access
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -769,7 +771,26 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 						}
 					}
 
-					if (!externalSet.has(pkg)) return null;
+					if (!externalSet.has(pkg)) {
+						// Native leniency: optional peers of inlined transitive deps
+						// (e.g. react-native-reanimated lazily required by
+						// react-native-css-interop) aren't installed here and aren't in
+						// the external set. Externalize instead of failing the build --
+						// the client resolves them from the app's own dependencies.
+						if (platform !== "web") {
+							try {
+								require.resolve(args.path, { paths: [args.resolveDir] });
+								return null; // resolvable locally - inline it
+							} catch {
+								if (!externalizedMap[pkg]) {
+									const version = getInstalledVersion(pkg);
+									if (version) externalizedMap[pkg] = version;
+								}
+								return { path: args.path, external: true };
+							}
+						}
+						return null;
+					}
 
 					// Track installed version for the base package
 					if (!externalizedMap[pkg]) {
@@ -952,6 +973,166 @@ app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 	}
 });
 
+// ============================================================
+// POST /nativewind-css - compile tailwind CSS to css-interop's native
+// runtime data (StyleSheetRegisterCompiledOptions).
+//
+// Body: { platform, versions: { nativewind, tailwindcss,
+//         "react-native-css-interop"? }, tailwindConfig, css,
+//         content: { "<path>": "<source>", ... } }
+//
+// Replicates what nativewind's metro plugin does at bundle time: run
+// tailwind over the project sources with NATIVEWIND_OS set (the preset
+// branches native/web on it), then cssToReactNativeRuntime() the output.
+// The client wraps the returned JSON in an injectData() module for the
+// project's `.css` import. Node envs (node_modules installs) are reused
+// per version set; results are cached by input hash.
+// ============================================================
+const NATIVEWIND_RUNNER = `
+const path = require("path");
+const fs = require("fs");
+const workdir = process.argv[2];
+const platform = process.argv[3] || "ios";
+// The nativewind preset branches native/web on this; must be set BEFORE the
+// config (which requires the preset) is loaded.
+process.env.NATIVEWIND_OS = platform;
+const postcss = require("postcss");
+const tailwind = require("tailwindcss");
+const { cssToReactNativeRuntime } = require("react-native-css-interop/css-to-rn");
+let baseOptions = {};
+try {
+	baseOptions = require("nativewind/dist/metro/common").cssToReactNativeRuntimeOptions || {};
+} catch { /* older nativewind layout; defaults below still apply */ }
+const config = require(path.join(workdir, "tailwind.config.js"));
+// Content globs from the user's config are project-relative; scan everything
+// we materialized instead.
+config.content = [path.join(workdir, "**/*.{html,js,jsx,ts,tsx,mdx}")];
+const cssSrc = fs.readFileSync(path.join(workdir, "__input.css"), "utf8");
+postcss([tailwind(config)])
+	.process(cssSrc, { from: path.join(workdir, "__input.css") })
+	.then((result) => {
+		const data = cssToReactNativeRuntime(result.css, {
+			...baseOptions,
+			inlineRem: 14,
+			selectorPrefix: typeof config.important === "string" ? config.important : undefined,
+		});
+		process.stdout.write(JSON.stringify(data ?? {}));
+	})
+	.catch((err) => {
+		console.error(err && err.stack ? err.stack : String(err));
+		process.exit(1);
+	});
+`;
+
+app.post("/nativewind-css", async (req: Request, res: Response) => {
+	try {
+		const body = req.body || {};
+		const platform = normalizePlatform(String(body.platform || "ios"));
+		const versions: Record<string, string> = body.versions || {};
+		const tailwindConfig: string = String(body.tailwindConfig || "");
+		const css: string = String(body.css || "");
+		const content: Record<string, string> = body.content || {};
+		if (!versions.nativewind || !versions.tailwindcss) {
+			res.status(400).json({ error: "versions.nativewind and versions.tailwindcss are required" });
+			return;
+		}
+		if (!tailwindConfig || !css) {
+			res.status(400).json({ error: "tailwindConfig and css are required" });
+			return;
+		}
+
+		const inputHash = crypto
+			.createHash("sha256")
+			.update(JSON.stringify({ platform, versions, tailwindConfig, css, content }))
+			.digest("hex")
+			.slice(0, 16);
+		const cacheFile = path.join(CACHE_DIR, `nativewind-${inputHash}.json`);
+		if (fs.existsSync(cacheFile)) {
+			console.log(`[nativewind cache hit] ${inputHash}`);
+			res.header("Cache-Control", "public, max-age=31536000, immutable");
+			res.type("application/json").sendFile(cacheFile);
+			return;
+		}
+
+		// Env dir (installed node_modules) reused across requests per version set.
+		const envDeps: Record<string, string> = {
+			nativewind: versions.nativewind,
+			tailwindcss: versions.tailwindcss,
+			postcss: "^8",
+		};
+		if (versions["react-native-css-interop"]) {
+			envDeps["react-native-css-interop"] = versions["react-native-css-interop"];
+		}
+		// css-interop's css-to-rn reads react-native/package.json (semver
+		// feature flags only) -- stub it with the client's RN version instead
+		// of installing all of react-native into the env.
+		const rnVersion = String(versions["react-native"] || "0.81.0").replace(/^[\^~]/, "");
+		const envHash = crypto
+			.createHash("sha256")
+			.update(JSON.stringify({ envDeps, rnVersion }))
+			.digest("hex")
+			.slice(0, 12);
+		const envDir = path.join(CACHE_DIR, `nativewind-env-${envHash}`);
+		if (!fs.existsSync(path.join(envDir, "node_modules", "tailwindcss"))) {
+			console.log(`[nativewind] installing env ${envHash} (${JSON.stringify(envDeps)})`);
+			fs.mkdirSync(envDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(envDir, "package.json"),
+				JSON.stringify({ name: "nativewind-env", version: "1.0.0", dependencies: envDeps })
+			);
+			await execAsync(`npm install --legacy-peer-deps --no-audit --no-fund`, {
+				cwd: envDir,
+				timeout: 180000,
+				maxBuffer: 16 * 1024 * 1024,
+			});
+		}
+		const rnStubDir = path.join(envDir, "node_modules", "react-native");
+		fs.mkdirSync(rnStubDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(rnStubDir, "package.json"),
+			JSON.stringify({ name: "react-native", version: rnVersion, main: "index.js" })
+		);
+		fs.writeFileSync(path.join(envDir, "runner.cjs"), NATIVEWIND_RUNNER);
+
+		// Materialize the request's sources in an isolated workdir inside the
+		// env (so config requires resolve against the env's node_modules).
+		const workdir = fs.mkdtempSync(path.join(envDir, "work-"));
+		try {
+			fs.writeFileSync(path.join(workdir, "tailwind.config.js"), tailwindConfig);
+			fs.writeFileSync(path.join(workdir, "__input.css"), css);
+			for (const [rawPath, source] of Object.entries(content)) {
+				// VFS paths are absolute-ish ("/app/index.tsx"); flatten safely.
+				const rel = rawPath.replace(/^\/+/, "");
+				if (rel.includes("..") || typeof source !== "string") continue;
+				const dest = path.join(workdir, rel);
+				if (!dest.startsWith(workdir + path.sep)) continue;
+				fs.mkdirSync(path.dirname(dest), { recursive: true });
+				fs.writeFileSync(dest, source);
+			}
+
+			const t = Date.now();
+			const { stdout } = await execAsync(
+				`node runner.cjs ${JSON.stringify(workdir)} ${platform}`,
+				{ cwd: envDir, timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
+			);
+			const data = JSON.parse(stdout);
+			console.log(`[nativewind] compiled ${inputHash} (${platform}) in ${Date.now() - t}ms`);
+			const responseBody = JSON.stringify({ data });
+			fs.writeFileSync(cacheFile, responseBody);
+			res.header("Cache-Control", "public, max-age=31536000, immutable");
+			res.type("application/json").send(responseBody);
+		} finally {
+			fs.rmSync(workdir, { recursive: true, force: true });
+		}
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		console.error("[nativewind error]", message.slice(0, 600));
+		if (!res.headersSent) {
+			res.header("Cache-Control", "no-store").status(500).json({ error: message.slice(0, 500) });
+		}
+	}
+});
+
 // GET /bundle-deps/:hash - serve cached dep bundle (CDN cacheable)
 app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 	const hash = req.params.hash;
@@ -964,7 +1145,9 @@ app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 		return;
 	}
 
-	res.status(404).send("// Not found\n");
+	// no-store: Cloudflare negative-caches plain 404s (~5 min), which blocks
+	// the GET path for freshly-built hashes and every client's first warm run.
+	res.header("Cache-Control", "no-store").status(404).send("// Not found\n");
 });
 
 // POST /bundle-deps - build a dep bundle

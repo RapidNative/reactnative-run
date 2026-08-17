@@ -74,10 +74,11 @@ export class Bundler {
 
     const hash = await hashDeps(versions, subpaths, platform ?? undefined);
     const baseUrl = this.config.server.packageServerUrl;
+    const doFetch = this.config.server.fetch ?? fetch;
 
     try {
       // Try GET first (CDN cacheable)
-      const getRes = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+      const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
       if (getRes.ok) {
         const { packages } = parseDepBundle(await getRes.text());
         this.prefetchedPackages = packages;
@@ -85,7 +86,7 @@ export class Bundler {
       }
 
       // POST to build
-      const postRes = await fetch(`${baseUrl}/bundle-deps`, {
+      const postRes = await doFetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -110,7 +111,7 @@ export class Bundler {
         for (let i = 0; i < 40; i++) {
           await new Promise((r) => setTimeout(r, 15000));
           try {
-            const poll = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+            const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
             if (poll.ok) {
               const { packages } = parseDepBundle(await poll.text());
               this.prefetchedPackages = packages;
@@ -313,7 +314,7 @@ export class Bundler {
       "/pkg/" +
       specifier +
       (nativePlat ? "?platform=" + nativePlat : "");
-    const res = await fetch(url);
+    const res = await (this.config.server.fetch ?? fetch)(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
