@@ -166,10 +166,21 @@ export class BundlerSession {
       };
     }
 
+    // nativewind on web: JSX through nativewind's jsx-runtime (css-interop's
+    // web runtime maps className to the DOM) + the project's .css imports
+    // become <style>-injection modules via virtualSource.
+    const webBase = this.options.nativewind
+      ? createTypescriptTransformer({ jsxRuntime: "automatic", jsxImportSource: "nativewind" })
+      : typescriptTransformer;
     return {
       resolver: { sourceExts: platformSourceExts(this.platform) },
       platform: this.platform,
-      transformer: reactRefreshTransformer,
+      transformer: this.options.nativewind
+        ? createReactRefreshTransformer(webBase)
+        : reactRefreshTransformer,
+      virtualSource: this.options.nativewind
+        ? (p: string) => this.nativewindCss.get(p)
+        : undefined,
       server: { packageServerUrl: this.options.packageServerUrl, fetch: this.options.fetch },
       hmr: { enabled: true, reactRefresh: hasReact },
       plugins: [

@@ -143,6 +143,11 @@ export class HmrHub {
     this.broadcast(this.message, { version: 2, method: "reload" });
   }
 
+  /** Toggle the in-app developer menu on connected Expo Go clients. */
+  devMenuAll(): void {
+    this.broadcast(this.message, { version: 2, method: "devMenu" });
+  }
+
   clientCount(): number {
     return this.web.clients.size + this.hot.clients.size + this.message.clients.size;
   }

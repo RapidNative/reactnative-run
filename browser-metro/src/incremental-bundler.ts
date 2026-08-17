@@ -871,6 +871,18 @@ export class IncrementalBundler {
 
     await this.fetchNpmPackages(npmPackagesNeeded);
 
+    // Inject alias stubs + inline shim modules BEFORE resolving transitive
+    // deps: shim code can itself require packages (the web react-native shim
+    // re-exports react-native-web), and only requires visible in the module
+    // map at scan time get fetched. Injecting after the loop shipped bundles
+    // whose shims required packages that were never registered.
+    for (const [from, to] of Object.entries(aliases)) {
+      this.moduleMap[from] = 'module.exports = require("' + to + '");';
+    }
+    for (const [name, code] of Object.entries(shims)) {
+      this.moduleMap[name] = code;
+    }
+
     // Resolve transitive npm deps (subpath requires like react-dom/client)
     const skipNames = new Set([...Object.keys(aliases), ...Object.keys(shims)]);
     let newDeps = this.findTransitiveNpmDeps(skipNames);
@@ -901,15 +913,7 @@ export class IncrementalBundler {
       }
     }
 
-    // Inject alias shim modules
-    for (const [from, to] of Object.entries(aliases)) {
-      this.moduleMap[from] = 'module.exports = require("' + to + '");';
-    }
-
-    // Inject inline shim modules
-    for (const [name, code] of Object.entries(shims)) {
-      this.moduleMap[name] = code;
-    }
+    // (Alias stubs + shims were injected above, before the transitive scan.)
 
     // walkDeps() silently skips files that aren't on the VFS, so a missing or
     // unreadable entry would otherwise yield a bundle whose entryId is set but
@@ -1066,23 +1070,22 @@ export class IncrementalBundler {
       npmPackagesNeeded.add("react-refresh/runtime");
     }
 
-    // Phase 3: Fetch any new npm packages + transitive deps
+    // Phase 3: Fetch any new npm packages + transitive deps. Alias stubs and
+    // shims go in FIRST so requires inside shim code (e.g. the web
+    // react-native shim's require of react-native-web) are visible to the
+    // transitive scan and get fetched.
     await this.fetchNpmPackages(npmPackagesNeeded);
+    for (const [from, to] of Object.entries(aliases)) {
+      this.moduleMap[from] = 'module.exports = require("' + to + '");';
+    }
+    for (const [name, code] of Object.entries(shims)) {
+      this.moduleMap[name] = code;
+    }
     const skipNames = new Set([...Object.keys(aliases), ...Object.keys(shims)]);
     let newDeps = this.findTransitiveNpmDeps(skipNames);
     while (newDeps.size > 0) {
       await this.fetchNpmPackages(newDeps);
       newDeps = this.findTransitiveNpmDeps(skipNames);
-    }
-
-    // Inject alias shim modules
-    for (const [from, to] of Object.entries(aliases)) {
-      this.moduleMap[from] = 'module.exports = require("' + to + '");';
-    }
-
-    // Inject inline shim modules
-    for (const [name, code] of Object.entries(shims)) {
-      this.moduleMap[name] = code;
     }
 
     // Phase 4: Orphan cleanup
