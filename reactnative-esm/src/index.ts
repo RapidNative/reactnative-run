@@ -1089,6 +1089,12 @@ const cssSrc = fs.readFileSync(path.join(workdir, "__input.css"), "utf8");
 postcss([tailwind(config)])
 	.process(cssSrc, { from: path.join(workdir, "__input.css") })
 	.then((result) => {
+		if (platform === "web") {
+			// Web wants the real stylesheet (className hits the DOM via
+			// react-native-web + css-interop's web runtime).
+			process.stdout.write(JSON.stringify({ web: true, css: result.css }));
+			return;
+		}
 		const data = cssToReactNativeRuntime(result.css, {
 			...baseOptions,
 			inlineRem: 14,

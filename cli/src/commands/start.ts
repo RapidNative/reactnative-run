@@ -43,12 +43,16 @@ export async function startCommand(options: StartOptions): Promise<void> {
   for (const p of skippedLarge) log.warn(`Skipped large file (>2MB): ${p}`);
   log.info(`Scanned ${Object.keys(files).length} files in ${Math.round(performance.now() - scanStart)}ms`);
 
+  const webNw = detectNativewind(new VirtualFS(files));
+  if (webNw.reason) log.warn(`[nativewind] ${webNw.reason}`);
   let session = new BundlerSession(files, {
     packageServerUrl,
     env: config.env,
     platform: "web",
     assetPublicPath: "/__bm_assets",
     fetch: cachedFetch,
+    nativewind: webNw.enabled,
+    warn: log.warn,
   });
   void assetMeta;
 
@@ -194,12 +198,15 @@ export async function startCommand(options: StartOptions): Promise<void> {
   async function reinit(): Promise<void> {
     const newConfig = await loadProjectConfig(rootDir, log.warn);
     const rescan = scanProject(rootDir);
+    const freshNw = detectNativewind(new VirtualFS(rescan.files));
     const fresh = new BundlerSession(rescan.files, {
       packageServerUrl,
       env: newConfig.env,
       platform: "web",
       assetPublicPath: "/__bm_assets",
       fetch: cachedFetch,
+      nativewind: freshNw.enabled,
+      warn: log.warn,
     });
     // Swap the session everywhere, rewire hub + terminal logging. Native
     // sessions are dropped and rebuilt lazily on the next device request.

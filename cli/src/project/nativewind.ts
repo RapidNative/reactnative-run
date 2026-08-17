@@ -107,16 +107,33 @@ export async function compileNativewindCss(opts: {
         warn(`[nativewind] compile failed for ${cssPath} (HTTP ${res.status}); styles unchanged`);
         return null;
       }
-      const { data } = (await res.json()) as { data: unknown };
-      result.set(
-        cssPath,
-        // injectData lives in css-interop's native runtime; requiring the
-        // subpath shares the instance with the components' own chunk via the
-        // combined-subpath machinery.
-        'require("react-native-css-interop/dist/runtime/native/styles").injectData(' +
-          JSON.stringify(data) +
-          ");\nmodule.exports = {};"
-      );
+      const { data } = (await res.json()) as { data: { web?: boolean; css?: string } };
+      if (data?.web) {
+        // Web: inject the compiled stylesheet into <head>. Idempotent per css
+        // path so an HMR re-execution replaces the tag instead of stacking.
+        result.set(
+          cssPath,
+          "(function(){" +
+            'if (typeof document === "undefined") return;' +
+            "var id = " + JSON.stringify("rnrun-nw:" + cssPath) + ";" +
+            'var s = document.createElement("style");' +
+            "s.id = id;" +
+            "s.textContent = " + JSON.stringify(data.css ?? "") + ";" +
+            "var prev = document.getElementById(id);" +
+            "if (prev) prev.replaceWith(s); else document.head.appendChild(s);" +
+            "})();\nmodule.exports = {};"
+        );
+      } else {
+        result.set(
+          cssPath,
+          // injectData lives in css-interop's native runtime; requiring the
+          // subpath shares the instance with the components' own chunk via the
+          // combined-subpath machinery.
+          'require("react-native-css-interop/dist/runtime/native/styles").injectData(' +
+            JSON.stringify(data) +
+            ");\nmodule.exports = {};"
+        );
+      }
     } catch (err) {
       warn(`[nativewind] compile failed for ${cssPath} (${(err as Error).message}); styles unchanged`);
       return null;
