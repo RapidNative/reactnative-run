@@ -9,6 +9,7 @@ import { detectNativewind } from "../project/nativewind.js";
 import { resolveWorkletsPlugin } from "../bundler/worklets.js";
 import { startServer, getLanIp, type ServerContext } from "../server/server.js";
 import { createLogger } from "../ui/logger.js";
+import { printStartupBanner, attachInteractiveKeys } from "../ui/interactive.js";
 import { createCachedFetch } from "../project/pkg-cache.js";
 
 export interface StartOptions {
@@ -124,11 +125,12 @@ export async function startCommand(options: StartOptions): Promise<void> {
   const dev = await startServer(ctx, options.host === "localhost" ? "127.0.0.1" : "0.0.0.0");
 
   const lan = getLanIp();
-  log.info("");
-  log.info(`  Web:      http://localhost:${dev.port}`);
-  log.info(`  Network:  http://${lan}:${dev.port}`);
-  log.info(`  Expo Go:  exp://${lan}:${dev.port}`);
-  log.info("");
+  const expUrl = `exp://${lan}:${dev.port}`;
+  const webUrl = `http://localhost:${dev.port}`;
+  const interactive = Boolean(process.stdin.isTTY) && !options.quiet;
+  if (!options.quiet) {
+    printStartupBanner({ rootDir, expUrl, webUrl, interactive });
+  }
 
   const buildStart = performance.now();
   const ok = await session.build();
@@ -222,19 +224,16 @@ export async function startCommand(options: StartOptions): Promise<void> {
     dev.hub.reloadAll();
   }
 
-  // Interactive keys: r = reload all clients, q = quit.
-  if (process.stdin.isTTY && !options.quiet) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
-    log.info("Press r to reload clients, q to quit.");
-    process.stdin.on("data", (key: string) => {
-      if (key === "r") {
-        dev.hub.reloadAll();
-        log.info("Reloaded all clients");
-      } else if (key === "q" || key === "\u0003") {
-        void shutdown();
-      }
+  // expo-cli-style interactive keys (a/i/w/r/m/o/?/q).
+  if (interactive) {
+    attachInteractiveKeys({
+      rootDir,
+      port: dev.port,
+      expUrl,
+      webUrl,
+      hub: dev.hub,
+      log,
+      shutdown: () => void shutdown(),
     });
   }
 

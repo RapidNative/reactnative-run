@@ -44,11 +44,13 @@
     "@babel/plugin-transform-classes": "^7.29.7",
     "browser-metro": "^1.2.1",
     "chokidar": "^4.0.3",
+    "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/babel__core": "^7.20.5",
     "@types/node": "^22.10.0",
+    "@types/qrcode-terminal": "^0.12.2",
     "@types/ws": "^8.5.13",
     "typescript": "^5.7.0"
   }
