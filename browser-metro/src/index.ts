@@ -4,7 +4,7 @@ export { VirtualFS } from "./fs.js";
 export { Resolver, platformSourceExts } from "./resolver.js";
 export { DependencyGraph } from "./dependency-graph.js";
 export { ModuleCache } from "./module-cache.js";
-export { typescriptTransformer } from "./transforms/typescript.js";
+export { typescriptTransformer, createTypescriptTransformer } from "./transforms/typescript.js";
 export {
   reactRefreshTransformer,
   metroReactRefreshTransformer,

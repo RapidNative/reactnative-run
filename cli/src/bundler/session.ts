@@ -4,6 +4,8 @@ import {
   reactRefreshTransformer,
   metroReactRefreshTransformer,
   typescriptTransformer,
+  createTypescriptTransformer,
+  createReactRefreshTransformer,
   createExpoWebShimsPlugin,
   createUnsupportedWebPackagesPlugin,
   ensureEntryFile,
@@ -14,6 +16,7 @@ import {
   NATIVE_POLYFILL_SUBPATHS,
 } from "browser-metro";
 import { hermesLoweringPlugin } from "./hermes-lowering.js";
+import { compileNativewindCss } from "../project/nativewind.js";
 import type {
   BundleLineIndexEntry,
   BundlerConfig,
@@ -33,8 +36,11 @@ const injectReactPlugin = {
   name: "inject-react",
   transformOutput({ code, filename }: { code: string; filename: string }) {
     if (!filename.startsWith("/")) return null;
-    if (!/React\.createElement|React\.Fragment/.test(code)) return null;
-    if (/\brequire\(['"]react['"]\)|\bvar React\b|\bconst React\b|\blet React\b/.test(code)) return null;
+    if (!/\bReact\./.test(code)) return null;
+    // Only a literal `React` BINDING counts -- sucrase's interop for named
+    // imports emits `var _react = require('react')`, which does NOT put
+    // `React` in scope for the classic JSX output.
+    if (/\b(?:var|const|let|function)\s+React\b/.test(code)) return null;
     return { code: 'var React = require("react");\n' + code };
   },
 };
@@ -53,6 +59,16 @@ export interface SessionOptions {
   metroPrelude?: string;
   /** Asset dimensions + hashes from the scanner (native AssetRegistry). */
   assetMeta?: Record<string, { width?: number; height?: number; hash: string }>;
+  /** Custom fetch (the CLI's disk-cached fetch). */
+  fetch?: typeof fetch;
+  /**
+   * nativewind mode (native sessions): JSX routes through nativewind's
+   * jsx-runtime and `.css` imports become compiled injectData modules
+   * supplied via setNativewindCss().
+   */
+  nativewind?: boolean;
+  /** Logger for non-fatal problems (defaults to console.warn). */
+  warn?: (msg: string) => void;
 }
 
 /**
@@ -74,6 +90,11 @@ export class BundlerSession {
   buildError: string | null = null;
   private everBuilt = false;
   private listeners = new Set<(e: SessionEvent) => void>();
+
+  // nativewind: css path → compiled injectData module (virtualSource reads it).
+  private nativewindCss = new Map<string, string>();
+  private nwRefreshing = false;
+  private nwPending = false;
 
   constructor(files: FileMap, options: SessionOptions) {
     this.options = options;
@@ -104,13 +125,24 @@ export class BundlerSession {
       // Native (Expo Go): Metro-format output, InitializeCore before the
       // entry, no web plugins/shims. Fast Refresh and the /hot protocol land
       // with the per-module __d emitter; until then edits are full reloads.
+      // nativewind projects compile JSX through nativewind's jsx-runtime so
+      // className props reach css-interop's wrapped components.
+      const nwBase = this.options.nativewind
+        ? createTypescriptTransformer({ jsxRuntime: "automatic", jsxImportSource: "nativewind" })
+        : typescriptTransformer;
+      const nativeTransformer = this.options.nativewind
+        ? createReactRefreshTransformer(nwBase, "metro")
+        : metroReactRefreshTransformer;
       return {
         resolver: { sourceExts: platformSourceExts(this.platform) },
         platform: this.platform,
         // Metro-convention Fast Refresh registration; metro-runtime supplies
         // $RefreshReg$/$RefreshSig$ during factory execution in DEV.
-        transformer: hasReact ? metroReactRefreshTransformer : typescriptTransformer,
-        server: { packageServerUrl: this.options.packageServerUrl },
+        transformer: hasReact ? nativeTransformer : nwBase,
+        virtualSource: this.options.nativewind
+          ? (p: string) => this.nativewindCss.get(p)
+          : undefined,
+        server: { packageServerUrl: this.options.packageServerUrl, fetch: this.options.fetch },
         // hmr.enabled makes rebuilds produce HmrUpdate payloads (raw module
         // bodies in metro format); the emitter itself ignores this flag.
         hmr: { enabled: !!this.options.metroPrelude },
@@ -133,7 +165,7 @@ export class BundlerSession {
       resolver: { sourceExts: platformSourceExts(this.platform) },
       platform: this.platform,
       transformer: reactRefreshTransformer,
-      server: { packageServerUrl: this.options.packageServerUrl },
+      server: { packageServerUrl: this.options.packageServerUrl, fetch: this.options.fetch },
       hmr: { enabled: true, reactRefresh: hasReact },
       plugins: [
         ...(hasReact ? [injectReactPlugin] : []),
@@ -173,8 +205,68 @@ export class BundlerSession {
     return this.bundler.nativeLineIndex;
   }
 
+  /**
+   * Recompile nativewind CSS from current VFS state. Returns css paths whose
+   * compiled module changed. A failed compile keeps the previous modules.
+   */
+  private async refreshNativewindCss(): Promise<string[]> {
+    if (!this.options.nativewind) return [];
+    const compiled = await compileNativewindCss({
+      vfs: this.vfs,
+      platform: this.platform,
+      packageServerUrl: this.options.packageServerUrl,
+      fetch: this.options.fetch,
+      warn: this.options.warn ?? ((msg) => console.warn(msg)),
+    });
+    if (compiled === null) return [];
+    const changed: string[] = [];
+    for (const [p, code] of compiled) {
+      if (this.nativewindCss.get(p) !== code) {
+        this.nativewindCss.set(p, code);
+        changed.push(p);
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Fast Refresh must not wait on a tailwind round-trip, so rebuilds kick the
+   * recompile in the background; when new classNames change the compiled CSS,
+   * the css module lands as a follow-up HMR update (matching nativewind's own
+   * watcher-driven behavior under Metro). Coalesces concurrent runs.
+   */
+  private scheduleNativewindRefresh(): void {
+    if (!this.options.nativewind) return;
+    if (this.nwRefreshing) {
+      this.nwPending = true;
+      return;
+    }
+    this.nwRefreshing = true;
+    void (async () => {
+      try {
+        do {
+          this.nwPending = false;
+          const changed = await this.refreshNativewindCss();
+          if (changed.length > 0) {
+            await this.applyChanges(
+              changed.map((p) => ({ type: "update" as const, path: p, content: this.vfs.read(p) }))
+            );
+          }
+        } while (this.nwPending);
+      } catch {
+        // refreshNativewindCss already warns; never crash the session.
+      } finally {
+        this.nwRefreshing = false;
+      }
+    })();
+  }
+
   /** Initial build. Returns true on success. */
   async build(): Promise<boolean> {
+    // First bundle should ship styles, so the initial compile is awaited.
+    if (this.options.nativewind && this.nativewindCss.size === 0) {
+      await this.refreshNativewindCss();
+    }
     const entry = ensureEntryFile(this.vfs);
     if (!entry) {
       this.buildError = "No entry file found (looked for /index.*, /App.*, package.json main).";
@@ -238,6 +330,9 @@ export class BundlerSession {
       } else {
         this.emit({ type: "hmr", update: result.hmrUpdate, bundleVersion: this.bundleVersion });
       }
+      // Source/css edits may change tailwind's output; recompile without
+      // blocking this rebuild (self-applies as a follow-up change if so).
+      this.scheduleNativewindRefresh();
     } catch (err) {
       // Keep serving the last good bundle; surface the error and self-heal
       // on the next successful rebuild.

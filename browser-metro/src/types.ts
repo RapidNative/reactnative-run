@@ -78,7 +78,11 @@ export interface BundlerConfig {
    */
   platform?: BundlePlatform;
   transformer: Transformer;
-  server: { packageServerUrl: string };
+  server: {
+    packageServerUrl: string;
+    /** Custom fetch (e.g. the CLI's disk-cached fetch). Defaults to global fetch. */
+    fetch?: typeof fetch;
+  };
   hmr?: { enabled: boolean; reactRefresh?: boolean };
   plugins?: BundlerPlugin[];
   env?: Record<string, string>;
@@ -92,6 +96,15 @@ export interface BundlerConfig {
    * lay out at 0x0 without real width/height.
    */
   assetMeta?: Record<string, { width?: number; height?: number; hash: string }>;
+  /**
+   * Substitute generated JS for a VFS file at build time. Returning a string
+   * makes that string the module source (it still flows through the normal
+   * transform/require-rewrite pipeline and invalidates caches when it
+   * changes); returning undefined keeps default handling. Used by the CLI to
+   * turn `.css` imports into nativewind's compiled injectData module on
+   * native.
+   */
+  virtualSource?: (filePath: string) => string | undefined;
   /**
    * Bundle output format. "iife" (default) is the web CJS-registry IIFE;
    * "metro" wraps the bundle in Metro's __d/__r module system for Expo

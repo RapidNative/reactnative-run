@@ -4,8 +4,11 @@ import { scanProject } from "../project/scan.js";
 import { watchProject } from "../project/watch.js";
 import { loadProjectConfig } from "../project/config.js";
 import { BundlerSession } from "../bundler/session.js";
+import { VirtualFS } from "browser-metro";
+import { detectNativewind } from "../project/nativewind.js";
 import { startServer, getLanIp, type ServerContext } from "../server/server.js";
 import { createLogger } from "../ui/logger.js";
+import { createCachedFetch } from "../project/pkg-cache.js";
 
 export interface StartOptions {
   dir: string;
@@ -29,6 +32,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     packageServerChild = await spawnLocalPackageServer(rootDir, log.info);
   }
 
+  const cachedFetch = createCachedFetch();
   const config = await loadProjectConfig(rootDir, log.warn);
   const title = config.app.name || path.basename(rootDir);
 
@@ -43,6 +47,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     env: config.env,
     platform: "web",
     assetPublicPath: "/__bm_assets",
+    fetch: cachedFetch,
   });
   void assetMeta;
 
@@ -53,13 +58,20 @@ export async function startCommand(options: StartOptions): Promise<void> {
   const makeNativeSession = async (platform: "ios" | "android"): Promise<BundlerSession> => {
     log.info(`Building first ${platform} bundle (Metro format) ...`);
     const rescan = scanProject(rootDir);
+    const probeVfs = new VirtualFS(rescan.files);
+    const nw = detectNativewind(probeVfs);
+    if (nw.reason) log.warn(`[nativewind] ${nw.reason}`);
+    if (nw.enabled) log.info(`[${platform}] nativewind detected -- className support enabled`);
     const native = new BundlerSession(rescan.files, {
       packageServerUrl,
       env: config.env,
       platform,
       assetPublicPath: "/__bm_assets",
-      metroPrelude: await fetchMetroPrelude(packageServerUrl, config, log.warn),
+      metroPrelude: await fetchMetroPrelude(packageServerUrl, config, log.warn, cachedFetch),
       assetMeta: rescan.assetMeta,
+      fetch: cachedFetch,
+      nativewind: nw.enabled,
+      warn: log.warn,
     });
     native.onEvent((e) => {
       if (e.type === "build-error") log.error(`[${platform}] build error:\n${e.message}`);
@@ -177,6 +189,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       env: newConfig.env,
       platform: "web",
       assetPublicPath: "/__bm_assets",
+      fetch: cachedFetch,
     });
     // Swap the session everywhere, rewire hub + terminal logging. Native
     // sessions are dropped and rebuilt lazily on the next device request.
@@ -229,14 +242,15 @@ let metroPreludeCache: string | undefined;
 async function fetchMetroPrelude(
   packageServerUrl: string,
   config: { pkg: Record<string, unknown> },
-  warn: (msg: string) => void
+  warn: (msg: string) => void,
+  doFetch: typeof fetch = fetch
 ): Promise<string | undefined> {
   if (metroPreludeCache !== undefined) return metroPreludeCache || undefined;
   const deps = (config.pkg?.dependencies || {}) as Record<string, string>;
   const rnVersion = deps["react-native"];
   if (!rnVersion) return undefined;
   try {
-    const res = await fetch(
+    const res = await doFetch(
       `${packageServerUrl}/prelude/${encodeURIComponent(rnVersion)}`,
       { signal: AbortSignal.timeout(180_000) }
     );

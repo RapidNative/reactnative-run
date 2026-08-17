@@ -363,18 +363,34 @@ export class IncrementalBundler {
       subpaths.push(INITIALIZE_CORE_SUBPATH);
     }
 
+    // nativewind's jsx-runtime re-exports react-native-css-interop/jsx-runtime.
+    // That require lives inside the nativewind chunk, so it's only DISCOVERED
+    // after the combined build -- which then builds it standalone with a
+    // second copy of css-interop's runtime. injectData() would fill copy A
+    // while components read copy B (styles silently never apply). Request the
+    // subpaths up front so they fold into the shared-instance registry.
+    if (platform && versions["react-native-css-interop"]) {
+      for (const sub of [
+        "react-native-css-interop/jsx-runtime",
+        "react-native-css-interop/dist/runtime/native/styles",
+      ]) {
+        if (!subpaths.includes(sub)) subpaths.push(sub);
+      }
+    }
+
     const hash = await hashDeps(versions, subpaths, platform ?? undefined);
     const baseUrl = this.config.server.packageServerUrl;
+    const doFetch = this.config.server.fetch ?? fetch;
 
     try {
-      const getRes = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+      const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
       if (getRes.ok) {
         const { packages } = parseDepBundle(await getRes.text());
         this.prefetchedPackages = packages;
         return;
       }
 
-      const postRes = await fetch(`${baseUrl}/bundle-deps`, {
+      const postRes = await doFetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -399,7 +415,7 @@ export class IncrementalBundler {
         for (let i = 0; i < 40; i++) {
           await new Promise((r) => setTimeout(r, 15000));
           try {
-            const poll = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+            const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
             if (poll.ok) {
               const { packages } = parseDepBundle(await poll.text());
               this.prefetchedPackages = packages;
@@ -438,7 +454,7 @@ export class IncrementalBundler {
       "/pkg/" +
       specifier +
       (nativePlat ? "?platform=" + nativePlat : "");
-    const res = await fetch(url);
+    const res = await (this.config.server.fetch ?? fetch)(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error("Failed to fetch package '" + specifier + "' (HTTP " + res.status + ")" + (body ? ": " + body.slice(0, 200) : ""));
@@ -460,8 +476,13 @@ export class IncrementalBundler {
     localDeps: string[];
     npmDeps: string[];
   } {
+    // A virtualSource override replaces the file's content entirely (even for
+    // asset-extension paths like `.css`) and flows through the normal
+    // transform pipeline below.
+    const virtualSource = this.config.virtualSource?.(filePath);
+
     // Asset files get a stub module that exports the filename (or a real URL for external assets)
-    if (this.resolver.isAssetFile(filePath)) {
+    if (virtualSource === undefined && this.resolver.isAssetFile(filePath)) {
       // Native: register with RN's AssetRegistry so Image/resolveAssetSource
       // produce a real dev-server URL (/assets/<path>) with dimensions.
       if (this.nativePlatform()) {
@@ -496,7 +517,7 @@ export class IncrementalBundler {
       return { localDeps: [], npmDeps: [] };
     }
 
-    const source = this.fs.read(filePath);
+    const source = virtualSource ?? this.fs.read(filePath);
     if (source === undefined) {
       throw new Error("File not found: " + filePath);
     }
@@ -625,7 +646,25 @@ export class IncrementalBundler {
 
     if (toFetch.length > 0) {
       const results = await Promise.all(
-        toFetch.map(({ specifier }) => this.fetchPackage(specifier)),
+        toFetch.map(async ({ name, specifier }) => {
+          try {
+            return await this.fetchPackage(specifier);
+          } catch (err) {
+            // Metro leniency for TRANSITIVE deps on native: chunks sometimes
+            // carry requires of Node-side tooling (nativewind's preset pulls
+            // metro-config) that can never bundle for a device. Stub those
+            // with {} and warn -- exactly what the server does for its own
+            // chunk failures. Direct project dependencies stay fail-fast.
+            const isDirect = this.packageVersions[name.startsWith("@")
+              ? name.split("/").slice(0, 2).join("/")
+              : name.split("/")[0]] !== undefined;
+            if (this.nativePlatform() && !isDirect) {
+              console.warn(`[bundler] stubbing unbundlable transitive package "${name}":`, (err as Error).message?.slice(0, 160));
+              return { code: "// unavailable on this platform\nmodule.exports = {};", externals: {} };
+            }
+            throw err;
+          }
+        }),
       );
       for (let i = 0; i < toFetch.length; i++) {
         const { name, specifier } = toFetch[i];
