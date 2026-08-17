@@ -116,6 +116,13 @@ export class HmrHub {
         this.broadcast(this.hot, { type: "update-done" });
       } else if (e.type === "reload") {
         this.broadcast(this.message, { version: 2, method: "reload" });
+      } else if (e.type === "build-error") {
+        // Metro parity: a rebuild failure surfaces as a LogBox error on the
+        // device instead of silently keeping stale code running.
+        this.broadcast(this.hot, {
+          type: "error",
+          body: { type: "TransformError", message: e.message, errors: [] },
+        });
       }
     });
   }

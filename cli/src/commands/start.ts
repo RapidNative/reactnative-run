@@ -237,8 +237,14 @@ export async function startCommand(options: StartOptions): Promise<void> {
     });
   }
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    // Second Ctrl+C (or anything wedging the graceful path) exits immediately.
+    if (shuttingDown) process.exit(0);
+    shuttingDown = true;
     log.info("Shutting down ...");
+    const hardExit = setTimeout(() => process.exit(0), 2000);
+    hardExit.unref();
     await watcher.close();
     await dev.close();
     if (packageServerChild) packageServerChild.kill("SIGTERM");
