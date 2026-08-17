@@ -382,6 +382,28 @@ export class IncrementalBundler {
     const baseUrl = this.config.server.packageServerUrl;
     const doFetch = this.config.server.fetch ?? fetch;
 
+    // Native cold builds can exceed both fetch's header timeout AND a CDN's
+    // origin timeout (Cloudflare 524 is a RESPONSE, not a thrown error) while
+    // the server keeps building. Poll the GET (which serves the cache)
+    // instead of falling straight back to individual fetches -- those rebuild
+    // RN internals in separate contexts (duplicate singletons).
+    const pollForBuild = async (): Promise<boolean> => {
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 15000));
+        try {
+          const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
+          if (poll.ok) {
+            const { packages } = parseDepBundle(await poll.text());
+            this.prefetchedPackages = packages;
+            return true;
+          }
+        } catch {
+          // keep polling
+        }
+      }
+      return false;
+    };
+
     try {
       const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
       if (getRes.ok) {
@@ -405,26 +427,15 @@ export class IncrementalBundler {
         this.prefetchedPackages = packages;
         return;
       }
+      if (platform) {
+        console.warn(`[prefetch] POST returned HTTP ${postRes.status}; polling for server-side build to finish`);
+        if (await pollForBuild()) return;
+      }
+      console.warn(`[prefetch] Failed (HTTP ${postRes.status}), falling back to individual fetches`);
     } catch (err) {
-      // Native cold builds can exceed fetch's 300s header timeout while the
-      // server keeps building. Poll the GET (which serves the cache) instead
-      // of falling straight back to individual fetches -- those rebuild RN
-      // internals in separate contexts (duplicate singletons).
       if (platform) {
         console.warn("[prefetch] request failed; polling for server-side build to finish:", err);
-        for (let i = 0; i < 40; i++) {
-          await new Promise((r) => setTimeout(r, 15000));
-          try {
-            const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
-            if (poll.ok) {
-              const { packages } = parseDepBundle(await poll.text());
-              this.prefetchedPackages = packages;
-              return;
-            }
-          } catch {
-            // keep polling
-          }
-        }
+        if (await pollForBuild()) return;
       }
       console.warn("[prefetch] Failed, falling back to individual fetches:", err);
     }
