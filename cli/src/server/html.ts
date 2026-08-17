@@ -18,6 +18,10 @@ export function pageHtml(opts: { title: string; bundleVersion: number }): string
 <title>${escapeHtml(opts.title)}</title>
 <style>
   html, body, #root { height: 100%; margin: 0; padding: 0; }
+  /* Expo web template parity: react-native-web's app container is a flex:1
+     child, which only stretches if #root is itself a flex container --
+     without this every RN layout collapses to 0 height. */
+  #root { display: flex; }
   #__rnrun_overlay {
     position: fixed; inset: 0; z-index: 2147483647; display: none;
     background: rgba(20, 8, 8, 0.96); color: #ffb4b4;
