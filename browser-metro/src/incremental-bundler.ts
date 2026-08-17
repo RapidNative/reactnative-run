@@ -508,8 +508,10 @@ export class IncrementalBundler {
           type,
           hash: meta?.hash ?? "0",
           httpServerLocation: "/assets" + filePath.slice(0, Math.max(0, slash)),
-          scales: [1],
-          fileHashes: [meta?.hash ?? "0"],
+          // Scale variants come pre-grouped by the host's scanner (@2x/@3x);
+          // RN picks the best scale and requests it with the @Nx suffix.
+          scales: meta?.scales ?? [1],
+          fileHashes: meta?.fileHashes ?? [meta?.hash ?? "0"],
           ...(meta?.width !== undefined ? { width: meta.width } : {}),
           ...(meta?.height !== undefined ? { height: meta.height } : {}),
         };

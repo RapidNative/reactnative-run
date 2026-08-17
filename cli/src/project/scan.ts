@@ -4,7 +4,21 @@ import { createHash } from "node:crypto";
 import type { FileMap } from "browser-metro";
 import { isAssetPath, imageDimensions } from "./assets.js";
 
-export type AssetMeta = Record<string, { width?: number; height?: number; hash: string }>;
+export type AssetMeta = Record<
+  string,
+  {
+    width?: number;
+    height?: number;
+    hash: string;
+    /** Scale variants (e.g. [1, 2, 3] when foo.png/foo@2x.png/foo@3x.png exist). */
+    scales?: number[];
+    /** Content hash per scale, aligned with `scales`. */
+    fileHashes?: string[];
+  }
+>;
+
+/** `icon@2x.png` -> { base: "icon.png", scale: 2 } */
+const SCALE_SUFFIX_RE = /^(.*)@(\d+(?:\.\d+)?)x(\.[a-z0-9]+)$/i;
 
 /** Directory names never scanned or watched, anywhere in the tree. */
 const SKIP_DIRS = new Set([
@@ -104,7 +118,49 @@ export function scanProject(rootDir: string): ScanResult {
   };
 
   walk(root);
+  groupScaleVariants(files, assetMeta);
   return { files, skippedLarge, assetMeta };
+}
+
+/**
+ * Metro-style scale grouping: foo.png / foo@2x.png / foo@3x.png are ONE asset.
+ * Code requires the base name; the descriptor advertises the available scales
+ * and RN requests the best one back from /assets with the @Nx suffix (which
+ * maps straight to the on-disk file). The base VFS entry is created even when
+ * only scaled files exist, so `require("./foo.png")` always resolves.
+ * Dimensions are in density-independent units: pixel size / scale.
+ */
+export function groupScaleVariants(files: FileMap, assetMeta: AssetMeta): void {
+  const groups = new Map<string, { scale: number; path: string }[]>();
+  for (const p of Object.keys(assetMeta)) {
+    const m = p.match(SCALE_SUFFIX_RE);
+    if (!m) continue;
+    const base = m[1] + m[3];
+    const list = groups.get(base) ?? [];
+    list.push({ scale: parseFloat(m[2]), path: p });
+    groups.set(base, list);
+  }
+
+  for (const [base, variants] of groups) {
+    if (assetMeta[base]) variants.push({ scale: 1, path: base });
+    variants.sort((a, b) => a.scale - b.scale);
+
+    if (!files[base]) files[base] = { content: "", isExternal: true };
+    const primary = variants[0];
+    const primaryMeta = assetMeta[primary.path];
+    if (!primaryMeta) continue;
+    assetMeta[base] = {
+      hash: primaryMeta.hash,
+      scales: variants.map((v) => v.scale),
+      fileHashes: variants.map((v) => assetMeta[v.path]?.hash ?? primaryMeta.hash),
+      ...(primaryMeta.width !== undefined
+        ? { width: Math.round(primaryMeta.width / primary.scale) }
+        : {}),
+      ...(primaryMeta.height !== undefined
+        ? { height: Math.round(primaryMeta.height / primary.scale) }
+        : {}),
+    };
+  }
 }
 
 /** Convert a VFS path back to the on-disk absolute path. */

@@ -95,7 +95,18 @@ export interface BundlerConfig {
    * (metro-format) builds to emit AssetRegistry registrations -- RN Images
    * lay out at 0x0 without real width/height.
    */
-  assetMeta?: Record<string, { width?: number; height?: number; hash: string }>;
+  assetMeta?: Record<
+    string,
+    {
+      width?: number;
+      height?: number;
+      hash: string;
+      /** Scale variants (Metro @2x/@3x grouping); defaults to [1]. */
+      scales?: number[];
+      /** Content hash per scale, aligned with `scales`; defaults to [hash]. */
+      fileHashes?: string[];
+    }
+  >;
   /**
    * Substitute generated JS for a VFS file at build time. Returning a string
    * makes that string the module source (it still flows through the normal
