@@ -42,7 +42,7 @@
     "@babel/plugin-transform-async-to-generator": "^7.29.7",
     "@babel/plugin-transform-block-scoping": "^7.29.7",
     "@babel/plugin-transform-classes": "^7.29.7",
-    "browser-metro": "^1.0.36",
+    "browser-metro": "^1.1.0",
     "chokidar": "^4.0.3",
     "ws": "^8.18.0"
   },

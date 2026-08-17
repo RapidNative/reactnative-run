@@ -581,6 +581,7 @@ function serveCached(res: Response, cacheFile: string, externalsFile: string, la
 	if (fs.existsSync(externalsFile)) {
 		res.header("X-Externals", fs.readFileSync(externalsFile, "utf-8"));
 	}
+	res.header("Cache-Control", "public, max-age=31536000, immutable");
 	res.type("application/javascript").sendFile(cacheFile);
 	return true;
 }
@@ -881,13 +882,16 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
 		res.header("X-Externals", externalsJson);
 		res.header("X-Resolved-Version", resolvedVersion);
+		res.header("Cache-Control", "public, max-age=31536000, immutable");
 		res.type("application/javascript").send(wrapped);
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
 		console.error(`[error] ${requireSpecifier}@${version}:`, message);
 		if (!res.headersSent) {
 			const safeMessage = message.replace(/[\r\n\t]+/g, " ");
-			res.status(500).send(`// Error bundling ${requireSpecifier}@${version}\n// ${safeMessage}\n`);
+			// no-store: a build failure cached by the CDN (nginx used to add a
+			// blanket immutable header) poisons the URL until a manual purge.
+			res.header("Cache-Control", "no-store").status(500).send(`// Error bundling ${requireSpecifier}@${version}\n// ${safeMessage}\n`);
 		}
 	} finally {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -969,7 +973,7 @@ app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
 		console.error("[prelude error]", message.slice(0, 400));
-		if (!res.headersSent) res.status(500).send(`// Error building prelude\n// ${message.replace(/[\r\n\t]+/g, " ").slice(0, 300)}\n`);
+		if (!res.headersSent) res.header("Cache-Control", "no-store").status(500).send(`// Error building prelude\n// ${message.replace(/[\r\n\t]+/g, " ").slice(0, 300)}\n`);
 	}
 });
 
@@ -1155,7 +1159,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 	const { hash, dependencies, subpaths: rawSubpaths, platform: rawPlatform } = req.body as { hash?: string; dependencies: Record<string, string>; subpaths?: string[]; platform?: string };
 
 	if (!dependencies || typeof dependencies !== "object") {
-		res.status(400).send("// Missing dependencies\n");
+		res.header("Cache-Control", "no-store").status(400).send("// Missing dependencies\n");
 		return;
 	}
 
@@ -1655,7 +1659,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		const message = err instanceof Error ? err.message : String(err);
 		console.error(`[bundle-deps error]`, message);
 		if (!res.headersSent) {
-			res.status(500).json({ error: message });
+			res.header("Cache-Control", "no-store").status(500).json({ error: message });
 		}
 	} finally {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1684,14 +1688,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 	if (!raw) { next(); return; }
 
 	const parsed = parseSpecifier(raw);
-	if (!parsed) { res.status(400).send("// Invalid package specifier\n"); return; }
+	if (!parsed) { res.header("Cache-Control", "no-store").status(400).send("// Invalid package specifier\n"); return; }
 
 	const baseUrl = `${req.protocol}://${req.get("host")}`;
 	const platform = normalizePlatform(req.query.platform);
 	handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath, baseUrl, platform).catch(
 		(err) => {
 			console.error("[unhandled]", err);
-			if (!res.headersSent) res.status(500).send("// Internal error\n");
+			if (!res.headersSent) res.header("Cache-Control", "no-store").status(500).send("// Internal error\n");
 		}
 	);
 });
