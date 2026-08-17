@@ -3,14 +3,25 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
+import { promisify } from "util";
+
+// Async exec for long-running installs: execSync blocks the WHOLE event loop
+// (a 300s bun install froze every concurrent build in the process), so any
+// install that can take more than a second must go through this.
+const execAsync = promisify(exec);
 import esbuild from "esbuild";
 // @ts-ignore - no type declarations
 import flowRemoveTypes from "flow-remove-types";
-
-// Bump this when the bundling logic changes to invalidate all caches.
-// Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
-const SERVER_VERSION = "8";
+import {
+	BuildPlatform,
+	normalizePlatform,
+	hashDepsServer,
+	cacheKeyFor,
+	esbuildPlatformSettings,
+	rnEsbuildSettings,
+	blankedPlatformsRe,
+} from "./platform";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -301,6 +312,139 @@ const patchUpstreamBugsPlugin: esbuild.Plugin = {
 	},
 };
 
+/**
+ * Hermes (Expo Go's engine) is NOT the es2018 engine it first appears to be
+ * (all verified against RN 0.81's hermesc + on-device):
+ *   - `class` syntax is rejected outright (and esbuild cannot lower it);
+ *   - async ARROW functions are rejected (plain `async function` parses);
+ *   - `let`/`const` compile as `var` WITHOUT per-iteration loop bindings, so
+ *     esbuild's own `__copyProps` helper (`for (let key of ...)` + getter
+ *     closures) silently makes EVERY re-exported property return the last
+ *     key's value. This one only shows at runtime, on device.
+ * Native chunks therefore get one babel pass over the finished output:
+ * classes -> functions, async -> generators, block scoping -> closures with
+ * correct per-iteration capture. One parse per chunk, once per package
+ * version, then cached.
+ */
+async function lowerClassesForHermes(code: string, platform: BuildPlatform): Promise<string> {
+	if (platform === "web") return code;
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const babel = require("@babel/core") as typeof import("@babel/core");
+	const result = await babel.transformAsync(code, {
+		plugins: [
+			require.resolve("@babel/plugin-transform-classes"),
+			require.resolve("@babel/plugin-transform-async-generator-functions"),
+			require.resolve("@babel/plugin-transform-async-to-generator"),
+			require.resolve("@babel/plugin-transform-block-scoping"),
+		],
+		babelrc: false,
+		configFile: false,
+		compact: false,
+		sourceMaps: false,
+		// The chunks are plain scripts (IIFEs), not modules.
+		sourceType: "script",
+	});
+	if (result?.code == null) throw new Error("lowerClassesForHermes: babel produced no output");
+	return result.code;
+}
+
+/** Platform-SELECTING replacement for the old blanket native filter. */
+function makeFilterPlatformsPlugin(platform: BuildPlatform): esbuild.Plugin {
+	const re = blankedPlatformsRe(platform);
+	return {
+		name: "filter-native-platforms",
+		setup(build) {
+			build.onLoad({ filter: re }, () => ({ contents: "", loader: "js" }));
+		},
+	};
+}
+
+/** Flow stripping. Web keeps the @flow-pragma-only rule (cache compat).
+ *
+ *  Native react-native core is a different beast: it ships Flow LANGUAGE
+ *  features (component syntax, Flow enums) that flow-remove-types cannot
+ *  lower -- it only erases type positions. Metro compiles RN core with
+ *  @react-native/babel-preset in every real app, so we do the same for
+ *  files inside the react-native package. Slow-ish (~10-20s across the
+ *  package) but it runs once per RN version and is cached. */
+function makeStripFlowPlugin(platform: BuildPlatform): esbuild.Plugin {
+	return {
+		name: "strip-flow",
+		setup(build) {
+			build.onLoad({ filter: /\.jsx?$/ }, async (args) => {
+				const src = await fs.promises.readFile(args.path, "utf8");
+				if (platform !== "web" && /node_modules[/\\]react-native[/\\]/.test(args.path)) {
+					// eslint-disable-next-line @typescript-eslint/no-var-requires
+					const babel = require("@babel/core") as typeof import("@babel/core");
+					const result = await babel.transformAsync(src, {
+						filename: args.path,
+						presets: [[require.resolve("@react-native/babel-preset"), { enableBabelRuntime: false }]],
+						babelrc: false,
+						configFile: false,
+						compact: false,
+						sourceMaps: false,
+					});
+					if (result?.code != null) {
+						return { contents: result.code, loader: "js" };
+					}
+					console.warn(`[strip-flow] babel produced no output for ${args.path}; falling through`);
+					return undefined;
+				}
+				if (src.includes("@flow")) {
+					return { contents: flowRemoveTypes(src).toString(), loader: "jsx" };
+				}
+				return undefined;
+			});
+		},
+	};
+}
+
+// Stub Node.js built-ins that some RN packages import but don't actually
+// need at runtime (e.g. react-native-svg imports "buffer"). Hermes has no
+// node builtins at all, so this applies to every native build.
+const nodeBuiltins = new Set([
+	"buffer", "stream", "path", "fs", "os", "crypto", "util",
+	"events", "http", "https", "net", "tls", "zlib", "url",
+	"querystring", "assert", "child_process", "cluster",
+	"dgram", "dns", "domain", "readline", "tty", "v8", "vm",
+	"worker_threads", "perf_hooks", "string_decoder",
+]);
+const stubNodeBuiltinsPlugin: esbuild.Plugin = {
+	name: "stub-node-builtins",
+	setup(build) {
+		build.onResolve({ filter: /.*/ }, (args) => {
+			if (nodeBuiltins.has(args.path) || args.path.startsWith("node:")) {
+				return { path: args.path, namespace: "node-stub" };
+			}
+			return null;
+		});
+		build.onLoad({ filter: /.*/, namespace: "node-stub" }, () => ({
+			contents: "module.exports = {};",
+			loader: "js",
+		}));
+	},
+};
+
+/** The plugin stack for RN/Expo package builds on a given platform.
+ *  previewShims is web-only (it feeds the RapidNative editor's simulated
+ *  chrome via DOM/postMessage -- meaningless and unwanted on a device).
+ *  patchUpstreamBugs anchors on .web.* files, so it is inert on native but
+ *  registered everywhere per the repo convention. */
+function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch"): esbuild.Plugin[] {
+	return [
+		makeStripFlowPlugin(platform),
+		makeFilterPlatformsPlugin(platform),
+		// Node-builtin stubbing scope preserves the HISTORICAL web behavior:
+		// only the /pkg path ever stubbed on web -- batch builds resolved the
+		// real npm polyfills (buffer/events/util) that some packages depend on,
+		// and widening the stub there would change new web batch builds. Native
+		// (Hermes, no builtins at all) stubs everywhere.
+		...(platform !== "web" || site === "pkg" ? [stubNodeBuiltinsPlugin] : []),
+		patchUpstreamBugsPlugin,
+		...(platform === "web" ? [previewShimsPlugin] : []),
+	];
+}
+
 const app = express();
 const CACHE_DIR = path.join(__dirname, "..", "cache");
 const PORT = 5200;
@@ -428,22 +572,6 @@ async function resolveVersionAsync(pkgName: string, range: string): Promise<stri
 	}
 }
 
-function cacheKeyFor(pkgName: string, version: string, subpath: string): string {
-	// KNOWN GAP: SERVER_VERSION is deliberately NOT part of this key.
-	//
-	// The comment on SERVER_VERSION says bumping it invalidates all caches, but
-	// only the multi-package deps hash actually includes it — these per-package
-	// bundles (the common case) keep serving pre-change output across a bump. So
-	// after changing bundling logic you must also evict the affected entries from
-	// `cache/` by hand, or the change ships inert.
-	//
-	// Adding the version here was tried and reverted: production's cache is ~12GB,
-	// so prefixing every key orphans all of it at once, forcing every package to
-	// rebuild on demand and roughly doubling disk until the old files are removed.
-	// That is too blunt to carry a small source patch. Fix this properly alongside
-	// a planned cache rebuild, not as a side effect.
-	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}`;
-}
 
 function serveCached(res: Response, cacheFile: string, externalsFile: string, label: string): boolean {
 	if (!fs.existsSync(cacheFile)) return false;
@@ -455,14 +583,15 @@ function serveCached(res: Response, cacheFile: string, externalsFile: string, la
 	return true;
 }
 
-async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, baseUrl?: string) {
+async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, baseUrl?: string, platform: BuildPlatform = "web") {
 	const requireSpecifier = pkgName + subpath;
+	const platLabel = platform === "web" ? "" : ` [${platform}]`;
 
 	// 1. Check exact cache (works for exact versions like "6.0.12")
-	const exactKey = cacheKeyFor(pkgName, version, subpath);
+	const exactKey = cacheKeyFor(pkgName, version, subpath, platform);
 	const exactCache = path.join(CACHE_DIR, `${exactKey}.js`);
 	const exactExternals = path.join(CACHE_DIR, `${exactKey}.externals.json`);
-	if (serveCached(res, exactCache, exactExternals, `${requireSpecifier}@${version}`)) return;
+	if (serveCached(res, exactCache, exactExternals, `${requireSpecifier}@${version}${platLabel}`)) return;
 
 	// 2. For semver ranges / dist-tags, resolve to exact version and check cache
 	let resolvedVersion = version;
@@ -470,23 +599,23 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		const resolved = await resolveVersionAsync(pkgName, version);
 		if (resolved && resolved !== version) {
 			resolvedVersion = resolved;
-			const resolvedKey = cacheKeyFor(pkgName, resolvedVersion, subpath);
+			const resolvedKey = cacheKeyFor(pkgName, resolvedVersion, subpath, platform);
 			const resolvedCache = path.join(CACHE_DIR, `${resolvedKey}.js`);
 			const resolvedExternals = path.join(CACHE_DIR, `${resolvedKey}.externals.json`);
-			if (serveCached(res, resolvedCache, resolvedExternals, `${requireSpecifier}@${resolvedVersion} (resolved from ${version})`)) return;
+			if (serveCached(res, resolvedCache, resolvedExternals, `${requireSpecifier}@${resolvedVersion}${platLabel} (resolved from ${version})`)) return;
 		}
 	}
 
 	// 3. No cache - install and bundle
-	console.log(`[bundling] ${requireSpecifier}@${version}`);
+	console.log(`[bundling] ${requireSpecifier}@${version}${platLabel}`);
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pkg-"));
 
 	try {
-		execSync("npm init -y", { cwd: tmpDir, stdio: "ignore" });
-		execSync(`npm install ${pkgName}@${version} --legacy-peer-deps`, {
+		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "pkg-tmp", version: "1.0.0" }));
+		await execAsync(`npm install '${pkgName}@${version}' --legacy-peer-deps --no-audit --no-fund`, {
 			cwd: tmpDir,
-			stdio: "ignore",
-			timeout: 60000,
+			timeout: 180000,
+			maxBuffer: 16 * 1024 * 1024,
 		});
 
 		// Get the actual installed version
@@ -497,7 +626,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		}
 
 		// Final cache key uses resolved exact version
-		const finalKey = cacheKeyFor(pkgName, resolvedVersion, subpath);
+		const finalKey = cacheKeyFor(pkgName, resolvedVersion, subpath, platform);
 		const finalCacheFile = path.join(CACHE_DIR, `${finalKey}.js`);
 		const finalExternalsFile = path.join(CACHE_DIR, `${finalKey}.externals.json`);
 
@@ -560,6 +689,16 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		// Don't externalize a package from itself (would create circular require).
 		externals = externals.filter((dep) => dep !== requireSpecifier && !requireSpecifier.startsWith(dep + "/"));
 
+		// NATIVE react-native core build: everything inlines EXCEPT react (peer,
+		// one instance app-wide) and @react-native/assets-registry (must be a
+		// shared singleton so app asset modules and RN's resolveAssetSource read
+		// the same registry). In particular metro-runtime and react-refresh MUST
+		// inline -- InitializeCore requires them at runtime and there is no
+		// ambient copy in a fresh Hermes instance.
+		if (platform !== "web" && pkgName === "react-native") {
+			externals = ["react", "@react-native/assets-registry"];
+		}
+
 		const entryFile = path.join(tmpDir, "__entry.js");
 		fs.writeFileSync(
 			entryFile,
@@ -592,57 +731,8 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		// contains a version check against require("react").version).
 		const alwaysExternalSubpaths = new Set(["react", "react-dom", "react-native"]);
 
-		// Strip Flow type annotations from .js files that use @flow pragma.
-		// Some RN packages (e.g. @react-native-community/datetimepicker) ship
-		// raw Flow source that esbuild can't parse.
-		const stripFlowPlugin: esbuild.Plugin = {
-			name: "strip-flow",
-			setup(build) {
-				build.onLoad({ filter: /\.jsx?$/ }, async (args) => {
-					const src = await fs.promises.readFile(args.path, "utf8");
-					if (!src.includes("@flow")) return undefined;
-					const stripped = flowRemoveTypes(src);
-					return { contents: stripped.toString(), loader: "jsx" };
-				});
-			},
-		};
-
-		// Filter out native platform files (.android.*, .ios.*, .windows.*)
-		// so esbuild only bundles .web.* or plain .js/.ts files for the browser.
-		const filterNativePlatformsPlugin: esbuild.Plugin = {
-			name: "filter-native-platforms",
-			setup(build) {
-				build.onLoad(
-					{ filter: /\.(android|ios|windows)\.[jt]sx?$/ },
-					() => ({ contents: "", loader: "js" })
-				);
-			},
-		};
-
-		// Stub Node.js built-ins that some RN packages import but don't
-		// actually need on web (e.g. react-native-svg imports "buffer")
-		const nodeBuiltins = new Set([
-			"buffer", "stream", "path", "fs", "os", "crypto", "util",
-			"events", "http", "https", "net", "tls", "zlib", "url",
-			"querystring", "assert", "child_process", "cluster",
-			"dgram", "dns", "domain", "readline", "tty", "v8", "vm",
-			"worker_threads", "perf_hooks", "string_decoder",
-		]);
-		const stubNodeBuiltinsPlugin: esbuild.Plugin = {
-			name: "stub-node-builtins",
-			setup(build) {
-				build.onResolve({ filter: /.*/ }, (args) => {
-					if (nodeBuiltins.has(args.path) || args.path.startsWith("node:")) {
-						return { path: args.path, namespace: "node-stub" };
-					}
-					return null;
-				});
-				build.onLoad({ filter: /.*/, namespace: "node-stub" }, () => ({
-					contents: "module.exports = {};",
-					loader: "js",
-				}));
-			},
-		};
+		// Flow stripping, platform file filtering and node-builtin stubs are the
+		// hoisted platform-aware plugins (see rnPluginStack above).
 
 		const selectiveExternalPlugin: esbuild.Plugin = {
 			name: "selective-external",
@@ -654,6 +744,16 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 						pkg = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
 					} else {
 						pkg = args.path.split("/")[0];
+					}
+
+					// Native: the assets registry must stay a shared singleton even
+					// when a package happens to have it locally resolvable.
+					if (platform !== "web" && pkg === "@react-native/assets-registry" && pkg !== requireSpecifier && !requireSpecifier.startsWith(pkg + "/")) {
+						if (!externalizedMap[pkg]) {
+							const v = getInstalledVersion(pkg);
+							if (v) externalizedMap[pkg] = v;
+						}
+						return { path: args.path, external: true };
 					}
 
 					// For RN/Expo builds, externalize @react-native/* and @expo/*
@@ -709,34 +809,24 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			// For font packages: use outdir so esbuild can emit asset files alongside the JS.
 			// For everything else: use outfile as before.
 			...(isFont ? { outdir } : { outfile: outFile }),
-			platform: "browser",
-			target: "es2020",
-			// For RN/Expo packages: prioritize .web.* extensions, handle JSX in .js,
+			...esbuildPlatformSettings(platform),
+			// For RN/Expo packages: platform-appropriate extensions, JSX in .js,
 			// and serve font assets as static files instead of inlining as data URLs.
 			...(isReactNative && {
-				resolveExtensions: [
-					".web.tsx", ".web.ts", ".web.js",
-					".tsx", ".ts", ".js", ".json",
-				],
-				loader: {
-					".js": "jsx",
-					".ttf": isFont ? "file" : "dataurl",
-					".otf": isFont ? "file" : "dataurl",
-					".png": "dataurl",
-				},
+				...rnEsbuildSettings(platform),
 				...(isFont && {
+					loader: {
+						".js": "jsx",
+						".ttf": "file",
+						".otf": "file",
+						".png": "dataurl",
+					},
 					publicPath: `${baseUrl || `http://localhost:${PORT}`}/assets`,
 					assetNames: "[name]-[hash]",
 				}),
-				banner: {
-					js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');",
-				},
-				define: {
-					"__DEV__": "false",
-				},
 			}),
 			plugins: [
-				...(isReactNative ? [stripFlowPlugin, filterNativePlatformsPlugin, stubNodeBuiltinsPlugin, patchUpstreamBugsPlugin, previewShimsPlugin] : []),
+				...(isReactNative ? rnPluginStack(platform, "pkg") : []),
 				selectiveExternalPlugin,
 			],
 		});
@@ -760,7 +850,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			}
 		}
 
-		const bundled = fs.readFileSync(outFile, "utf-8");
+		const bundled = await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform);
 		const externalsJson = JSON.stringify(externalizedMap);
 		const wrapped = `// Bundled: ${requireSpecifier}@${resolvedVersion}\n// @externals ${externalsJson}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
 
@@ -789,12 +879,78 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
 const BUNDLE_DEPS_PREFIX = "bundle-deps-";
 
-function hashDepsServer(deps: Record<string, string>, subpaths: string[] = []): string {
-	const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
-	const subs = subpaths.length ? `;subpaths:${[...subpaths].sort().join(",")}` : "";
-	const input = `v${SERVER_VERSION}:${sorted}${subs}`;
-	return crypto.createHash("sha256").update(input).digest("hex").slice(0, 16);
-}
+
+// ============================================================
+// GET /prelude/:rnVersion - metro-runtime require.js for native bundles
+//
+// The per-module __d emitter needs the REAL metro-runtime module system
+// (module.hot machinery, React Refresh integration) as a plain script that
+// runs before any __d. metro-runtime ships Flow source, so it goes through
+// the same babel preset + Hermes lowering as react-native core. Version is
+// derived from react-native's own metro-runtime dependency range so the
+// runtime always matches the RN line the app uses.
+// ============================================================
+app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
+	try {
+		let rnVersion = String(req.params.rnVersion);
+		if (needsResolution(rnVersion)) {
+			rnVersion = (await resolveVersionAsync("react-native", rnVersion)) || rnVersion;
+		}
+		const cacheFile = path.join(CACHE_DIR, `prelude-${rnVersion.replace(/[^\w.-]/g, "_")}.js`);
+		if (fs.existsSync(cacheFile)) {
+			console.log(`[prelude cache hit] rn@${rnVersion}`);
+			res.header("Cache-Control", "public, max-age=31536000, immutable");
+			res.type("application/javascript").sendFile(cacheFile);
+			return;
+		}
+
+		console.log(`[prelude] building metro-runtime require.js for rn@${rnVersion}`);
+		// Which metro-runtime does this RN pin?
+		const { stdout } = await execAsync(
+			`npm view react-native@${rnVersion} dependencies.metro-runtime`,
+			{ timeout: 30000 }
+		);
+		const range = stdout.trim() || "latest";
+
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "prelude-"));
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "prelude-tmp", version: "1.0.0" }));
+			await execAsync(`npm install 'metro-runtime@${range}' --no-audit --no-fund`, {
+				cwd: tmpDir,
+				timeout: 120000,
+				maxBuffer: 16 * 1024 * 1024,
+			});
+			const requireJs = fs.readFileSync(
+				path.join(tmpDir, "node_modules", "metro-runtime", "src", "polyfills", "require.js"),
+				"utf8"
+			);
+			// Flow strip + downlevel exactly like RN core files.
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			const babel = require("@babel/core") as typeof import("@babel/core");
+			const preset = await babel.transformAsync(requireJs, {
+				filename: "require.js",
+				presets: [[require.resolve("@react-native/babel-preset"), { enableBabelRuntime: false }]],
+				babelrc: false,
+				configFile: false,
+				compact: false,
+				sourceMaps: false,
+			});
+			if (preset?.code == null) throw new Error("babel produced no output for metro-runtime require.js");
+			const lowered = await lowerClassesForHermes(preset.code, "ios");
+
+			const body = `// metro-runtime require.js (rn@${rnVersion}, metro-runtime@${range})\n${lowered}\n`;
+			fs.writeFileSync(cacheFile, body);
+			res.header("Cache-Control", "public, max-age=31536000, immutable");
+			res.type("application/javascript").send(body);
+		} finally {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		console.error("[prelude error]", message.slice(0, 400));
+		if (!res.headersSent) res.status(500).send(`// Error building prelude\n// ${message.replace(/[\r\n\t]+/g, " ").slice(0, 300)}\n`);
+	}
+});
 
 // GET /bundle-deps/:hash - serve cached dep bundle (CDN cacheable)
 app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
@@ -813,12 +969,16 @@ app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 
 // POST /bundle-deps - build a dep bundle
 app.post("/bundle-deps", async (req: Request, res: Response) => {
-	const { hash, dependencies, subpaths: rawSubpaths } = req.body as { hash?: string; dependencies: Record<string, string>; subpaths?: string[] };
+	const { hash, dependencies, subpaths: rawSubpaths, platform: rawPlatform } = req.body as { hash?: string; dependencies: Record<string, string>; subpaths?: string[]; platform?: string };
 
 	if (!dependencies || typeof dependencies !== "object") {
 		res.status(400).send("// Missing dependencies\n");
 		return;
 	}
+
+	// Absent/unknown platform is "web" -- byte-identical to the platform-less
+	// protocol, so existing clients and cached hashes are unaffected.
+	const platform = normalizePlatform(rawPlatform);
 
 	// Subpaths of direct deps that user code imports (e.g. "expo-router/drawer").
 	// We bundle these combined with their base package so they share the base's
@@ -830,7 +990,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		: [];
 
 	// Compute hash if not provided
-	const depHash = hash || hashDepsServer(dependencies, requestedSubpaths);
+	const depHash = hash || hashDepsServer(dependencies, requestedSubpaths, platform);
 	const cacheFile = path.join(CACHE_DIR, `${BUNDLE_DEPS_PREFIX}${depHash}.js`);
 
 	// Check cache
@@ -867,10 +1027,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				.map(([n, v]) => `'${n}@${v}'`)
 				.join(" ");
 			try {
-				execSync(`bun install ${args}`, {
+				await execAsync(`bun install --no-progress ${args}`, {
 					cwd: tmpDir,
-					stdio: ["ignore", "pipe", "pipe"],
-					timeout: 120000,
+					// Native dep sets include react-native itself (~40MB of tarballs);
+					// 120s was too tight on a cold bun cache.
+					timeout: 300000,
+					maxBuffer: 16 * 1024 * 1024,
 				});
 				installed = true;
 				console.log(
@@ -895,6 +1057,38 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						removed.push(`${name}@${workingDeps[name]}`);
 						delete workingDeps[name];
 						droppedPackages.add(name);
+					}
+				}
+
+				// bun install intermittently hangs under piped spawn (observed on
+				// macOS with a large bun cache); a plain retry sometimes succeeds.
+				// After the first timed-out attempt, fall back to npm — slower but
+				// it has never hung in this server's /pkg path.
+				// exec's timeout surfaces as killed:true + SIGTERM rather than ETIMEDOUT.
+				const timedOut =
+					(e as { code?: string }).code === "ETIMEDOUT" ||
+					/ETIMEDOUT/.test(e.message || "") ||
+					(e as { killed?: boolean }).killed === true;
+				if (removed.length === 0 && timedOut && attempt < MAX_RETRIES - 1) {
+					if (attempt === 0) {
+						console.warn(`[bundle-deps] attempt 1: bun install timed out — retrying with bun`);
+						continue;
+					}
+					console.warn(`[bundle-deps] attempt ${attempt + 1}: bun timed out again — falling back to npm install`);
+					try {
+						const npmArgs = Object.entries(workingDeps).map(([n, v]) => `'${n}@${v}'`).join(" ");
+						await execAsync(`npm install ${npmArgs} --legacy-peer-deps --no-audit --no-fund`, {
+							cwd: tmpDir,
+							timeout: 420000,
+							maxBuffer: 16 * 1024 * 1024,
+						});
+						installed = true;
+						console.log(`[bundle-deps] npm fallback completed in ${Date.now() - installStart}ms (total incl. bun attempts)`);
+						continue;
+					} catch (npmErr: unknown) {
+						const ne = npmErr as { message?: string };
+						console.error(`[bundle-deps] npm fallback also failed: ${ne.message?.slice(0, 200)}`);
+						// fall through to the hard-failure path below
 					}
 				}
 
@@ -989,6 +1183,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		for (const implicit of ["react-native", "react", "react-dom", "expo", "expo-modules-core"]) {
 			batchSet.add(implicit);
 		}
+		// Native: the assets registry must be a shared singleton across the
+		// batch (app asset modules and RN's resolveAssetSource read the same
+		// instance), so externalize it everywhere; the client fetches it once.
+		if (platform !== "web") {
+			batchSet.add("@react-native/assets-registry");
+		}
 
 		// Build the manifest (name -> resolved version)
 		const manifest: Record<string, string> = {};
@@ -1028,17 +1228,8 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		const chunks: string[] = [];
 		const errors: string[] = [];
 
-		const stripFlow: esbuild.Plugin = {
-			name: "strip-flow",
-			setup(build) {
-				build.onLoad({ filter: /\.jsx?$/ }, async (args) => {
-					const src = await fs.promises.readFile(args.path, "utf8");
-					if (!src.includes("@flow")) return undefined;
-					const stripped = flowRemoveTypes(src);
-					return { contents: stripped.toString(), loader: "jsx" };
-				});
-			},
-		};
+		// Flow stripping / platform filtering / node stubs come from the hoisted
+		// platform-aware plugin stack (rnPluginStack).
 
 		for (const [pkgName, info] of allPackages) {
 			const subs = sharedSubpathsByBase.get(pkgName) ?? [];
@@ -1096,15 +1287,22 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 								}
 							}
 
+							// NATIVE Metro leniency: an unresolvable bare import (usually an
+							// optional peer like react-native-screens when the app forgot to
+							// declare it) must not fail the WHOLE chunk. Externalize it -- the
+							// client fetches it as its own module at runtime.
+							if (platform !== "web") {
+								try {
+									require.resolve(args.path, { paths: [args.resolveDir] });
+									return null;
+								} catch {
+									console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (native leniency)`);
+									return { path: args.path, external: true };
+								}
+							}
+
 							return null;
 						});
-					},
-				};
-
-				const filterNative: esbuild.Plugin = {
-					name: "filter-native",
-					setup(build) {
-						build.onLoad({ filter: /\.(android|ios|windows)\.[jt]sx?$/ }, () => ({ contents: "", loader: "js" }));
 					},
 				};
 
@@ -1114,16 +1312,10 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					format: "iife",
 					globalName: "__module",
 					outfile: outFile,
-					platform: "browser",
-					target: "es2020",
-					...(info.isRN && {
-						resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".js", ".json"],
-						loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl" },
-						banner: { js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');" },
-						define: { "__DEV__": "false" },
-					}),
+					...esbuildPlatformSettings(platform),
+					...(info.isRN && rnEsbuildSettings(platform)),
 					plugins: [
-						...(info.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin, previewShimsPlugin] : []),
+						...(info.isRN ? rnPluginStack(platform) : []),
 						pkgExternalPlugin,
 					],
 					logLevel: "silent",
@@ -1143,7 +1335,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					await runBuild();
 				}
 
-				const bundled = fs.readFileSync(outFile, "utf-8");
+				const bundled = await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform);
 				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
 				chunks.push(`// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`);
 
@@ -1161,7 +1353,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
 				errors.push(`${pkgName}: ${msg}`);
-				console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 200));
+				console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 2000));
 				// Add a stub so require() doesn't fail. Collapse whitespace/newlines —
 				// a multi-line esbuild error after a single `//` leaves later lines as
 				// live JS (e.g. a relative path starting with `.` → SyntaxError that
@@ -1234,35 +1426,22 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					},
 				};
 
-				const filterNative: esbuild.Plugin = {
-					name: "filter-native",
-					setup(build) {
-						build.onLoad({ filter: /\.(android|ios|windows)\.[jt]sx?$/ }, () => ({ contents: "", loader: "js" }));
-					},
-				};
-
 				await buildTolerant({
 					entryPoints: [entryFile],
 					bundle: true,
 					format: "iife",
 					globalName: "__module",
 					outfile: outFile,
-					platform: "browser",
-					target: "es2020",
-					...(info?.isRN && {
-						resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".js", ".json"],
-						loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl" },
-						banner: { js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');" },
-						define: { "__DEV__": "false" },
-					}),
+					...esbuildPlatformSettings(platform),
+					...(info?.isRN && rnEsbuildSettings(platform)),
 					plugins: [
-						...(info?.isRN ? [stripFlow, filterNative, patchUpstreamBugsPlugin, previewShimsPlugin] : []),
+						...(info?.isRN ? rnPluginStack(platform) : []),
 						subExternalPlugin,
 					],
 					logLevel: "silent",
 				});
 
-				const bundled = fs.readFileSync(outFile, "utf-8");
+				const bundled = await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform);
 				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
 				chunks.push(`// @dep-start ${subpath}\n${wrapped}\n// @dep-end ${subpath}`);
 			} catch {
@@ -1325,7 +1504,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 	if (!parsed) { res.status(400).send("// Invalid package specifier\n"); return; }
 
 	const baseUrl = `${req.protocol}://${req.get("host")}`;
-	handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath, baseUrl).catch(
+	const platform = normalizePlatform(req.query.platform);
+	handlePkgRequest(res, parsed.pkgName, parsed.version, parsed.subpath, baseUrl, platform).catch(
 		(err) => {
 			console.error("[unhandled]", err);
 			if (!res.headersSent) res.status(500).send("// Internal error\n");

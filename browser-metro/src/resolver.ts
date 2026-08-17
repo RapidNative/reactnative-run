@@ -1,5 +1,19 @@
 import { VirtualFS } from "./fs.js";
-import { ResolverConfig } from "./types.js";
+import { BundlePlatform, ResolverConfig } from "./types.js";
+
+/**
+ * Default source-extension precedence for a platform. Platform-specific
+ * suffixes resolve first, then ".native" for ios/android (Metro convention),
+ * then bare extensions. Undefined platform behaves as "web" (the historical
+ * default the example app has always passed explicitly).
+ */
+export function platformSourceExts(platform?: BundlePlatform): string[] {
+  const bare = ["ts", "tsx", "js", "jsx"];
+  const prefixes = !platform || platform === "web" ? ["web"] : [platform, "native"];
+  const exts: string[] = [];
+  for (const prefix of prefixes) for (const ext of bare) exts.push(`${prefix}.${ext}`);
+  return exts.concat(bare);
+}
 
 export class Resolver {
   private fs: VirtualFS;

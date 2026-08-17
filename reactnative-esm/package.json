@@ -5,17 +5,25 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "test": "tsx --test \"test/**/*.test.ts\""
   },
   "keywords": [],
   "author": "Sanket Sahu",
   "license": "ISC",
   "dependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/plugin-transform-async-generator-functions": "^7.29.7",
+    "@babel/plugin-transform-async-to-generator": "^7.29.7",
+    "@babel/plugin-transform-block-scoping": "^7.29.7",
+    "@babel/plugin-transform-classes": "^7.29.7",
+    "@react-native/babel-preset": "^0.87.0",
     "esbuild": "^0.27.3",
     "express": "^5.2.1",
     "flow-remove-types": "^2.309.0"
   },
   "devDependencies": {
+    "@types/babel__core": "^7.20.5",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",

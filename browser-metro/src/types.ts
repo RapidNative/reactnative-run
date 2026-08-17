@@ -67,8 +67,16 @@ export interface BundlerPlugin {
   nativePackages?(): string[];
 }
 
+export type BundlePlatform = "web" | "ios" | "android";
+
 export interface BundlerConfig {
   resolver: ResolverConfig;
+  /**
+   * Target platform. Undefined behaves exactly like "web" (the historical
+   * behavior). Non-web platforms change package-server requests and bundle
+   * emission; those paths are threaded in as native support lands.
+   */
+  platform?: BundlePlatform;
   transformer: Transformer;
   server: { packageServerUrl: string };
   hmr?: { enabled: boolean; reactRefresh?: boolean };
@@ -77,6 +85,30 @@ export interface BundlerConfig {
   routerShim?: boolean;
   /** URL prefix for external assets, e.g. "/projects/expo-real" */
   assetPublicPath?: string;
+  /**
+   * Asset metadata by VFS path (dimensions + content hash), supplied by the
+   * host that can read asset bytes (the CLI scanner). Used by native
+   * (metro-format) builds to emit AssetRegistry registrations -- RN Images
+   * lay out at 0x0 without real width/height.
+   */
+  assetMeta?: Record<string, { width?: number; height?: number; hash: string }>;
+  /**
+   * Bundle output format. "iife" (default) is the web CJS-registry IIFE;
+   * "metro" wraps the bundle in Metro's __d/__r module system for Expo
+   * Go / Hermes. Metro output currently disables the web HMR runtime.
+   */
+  output?: {
+    format?: "iife" | "metro";
+    /** Module ids required before the entry (e.g. RN's InitializeCore). */
+    preRequires?: string[];
+    /**
+     * Real metro-runtime require.js source (from the package server's
+     * /prelude endpoint). When set, metro output uses per-module __d
+     * registrations with stable numeric ids (enables native HMR); when
+     * absent, the single-__d wrapper fallback is used.
+     */
+    prelude?: string;
+  };
 }
 
 export interface FileChange {

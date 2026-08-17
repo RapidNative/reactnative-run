@@ -5,6 +5,7 @@
   "workspaces": [
     "browser-metro",
     "reactnative-esm",
+    "cli",
     "website"
   ],
   "scripts": {
