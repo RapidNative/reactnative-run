@@ -425,6 +425,77 @@ const stubNodeBuiltinsPlugin: esbuild.Plugin = {
 	},
 };
 
+/** Worklet transforms for packages that ship raw 'worklet' directives
+ *  (react-native-reanimated has ~80 such files; react-native-worklets ~17).
+ *  Metro runs react-native-worklets/plugin over ALL files via babel.config;
+ *  here it runs only on files that can contain worklets (cheap regex gate)
+ *  and only on native builds. The plugin is resolved from the build's own
+ *  install so its version matches the app's worklets runtime; if it isn't
+ *  installed there (project doesn't use reanimated), the plugin is inert.
+ *
+ *  disableSourceMaps: the plugin otherwise embeds sourcesContent by reading
+ *  state.filename from disk, which doubles output size for zero dev value
+ *  here (worklet code strings keep their location field regardless). */
+const WORKLET_HINT_RE = /['"]worklet['"]/;
+function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
+	// Per-directory-tree plugin resolution cache (one entry per tmpdir).
+	const pluginPathCache = new Map<string, string | null>();
+	const resolvePlugin = (fromFile: string): string | null => {
+		// Find the install root (the path segment before node_modules).
+		const idx = fromFile.lastIndexOf(`node_modules${path.sep}`);
+		if (idx === -1) return null;
+		const root = fromFile.slice(0, idx);
+		if (pluginPathCache.has(root)) return pluginPathCache.get(root)!;
+		let resolved: string | null = null;
+		for (const spec of ["react-native-worklets/plugin", "react-native-reanimated/plugin"]) {
+			try {
+				resolved = require.resolve(spec, { paths: [root] });
+				break;
+			} catch { /* try next */ }
+		}
+		if (!resolved) console.warn(`[worklets] plugin not resolvable from ${root}; worklet files ship untransformed`);
+		pluginPathCache.set(root, resolved);
+		return resolved;
+	};
+	return {
+		name: "workletize",
+		setup(build) {
+			if (platform === "web") return;
+			build.onLoad({ filter: /node_modules[/\\](react-native-reanimated|react-native-worklets)[/\\].*\.[cm]?[jt]sx?$/ }, async (args) => {
+				const src = await fs.promises.readFile(args.path, "utf8");
+				if (!WORKLET_HINT_RE.test(src)) return undefined;
+				const pluginPath = resolvePlugin(args.path);
+				if (!pluginPath) return undefined;
+				const ext = args.path.slice(args.path.lastIndexOf(".") + 1).replace(/^[cm]/, "");
+				const parserPlugins: ("typescript" | "jsx" | "flow")[] =
+					ext === "ts" ? ["typescript"] : ext === "tsx" ? ["typescript", "jsx"] : ["flow", "jsx"];
+				try {
+					// eslint-disable-next-line @typescript-eslint/no-var-requires
+					const babel = require("@babel/core") as typeof import("@babel/core");
+					const result = await babel.transformAsync(src, {
+						filename: args.path,
+						plugins: [[pluginPath, { disableSourceMaps: true }]],
+						parserOpts: { plugins: parserPlugins },
+						babelrc: false,
+						configFile: false,
+						compact: false,
+						sourceMaps: false,
+					});
+					if (result?.code != null) {
+						// Loader must match the REAL extension: "tsx" on a .ts file
+						// parses generics like useAnimatedRef<T>() as JSX and fails.
+						const loader = (ext === "ts" ? "ts" : ext === "tsx" ? "tsx" : "jsx") as esbuild.Loader;
+						return { contents: result.code, loader };
+					}
+				} catch (err) {
+					console.warn(`[worklets] transform failed for ${args.path}: ${(err as Error).message.slice(0, 200)}`);
+				}
+				return undefined;
+			});
+		},
+	};
+}
+
 /** The plugin stack for RN/Expo package builds on a given platform.
  *  previewShims is web-only (it feeds the RapidNative editor's simulated
  *  chrome via DOM/postMessage -- meaningless and unwanted on a device).
@@ -434,6 +505,9 @@ function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch")
 	return [
 		makeStripFlowPlugin(platform),
 		makeFilterPlatformsPlugin(platform),
+		// After filterPlatforms so blanked platform variants stay blanked
+		// (esbuild uses the first onLoad that returns contents).
+		makeWorkletsPlugin(platform),
 		// Node-builtin stubbing scope preserves the HISTORICAL web behavior:
 		// only the /pkg path ever stubbed on web -- batch builds resolved the
 		// real npm polyfills (buffer/events/util) that some packages depend on,

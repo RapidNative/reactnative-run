@@ -15,7 +15,7 @@ import {
   INITIALIZE_CORE_SUBPATH,
   NATIVE_POLYFILL_SUBPATHS,
 } from "browser-metro";
-import { hermesLoweringPlugin } from "./hermes-lowering.js";
+import { createHermesLoweringPlugin } from "./hermes-lowering.js";
 import { compileNativewindCss } from "../project/nativewind.js";
 import type {
   BundleLineIndexEntry,
@@ -69,6 +69,8 @@ export interface SessionOptions {
   nativewind?: boolean;
   /** Logger for non-fatal problems (defaults to console.warn). */
   warn?: (msg: string) => void;
+  /** Resolved react-native-worklets babel plugin (native reanimated support). */
+  workletsPluginPath?: string | null;
 }
 
 /**
@@ -154,7 +156,10 @@ export class BundlerSession {
             "react-native" in deps ? [...NATIVE_POLYFILL_SUBPATHS, INITIALIZE_CORE_SUBPATH] : [],
           prelude: this.options.metroPrelude,
         },
-        plugins: [...(hasReact ? [injectReactPlugin] : []), hermesLoweringPlugin],
+        plugins: [
+          ...(hasReact ? [injectReactPlugin] : []),
+          createHermesLoweringPlugin({ workletsPluginPath: this.options.workletsPluginPath }),
+        ],
         env: this.options.env,
         assetPublicPath: this.options.assetPublicPath,
         assetMeta: this.options.assetMeta,
