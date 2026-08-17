@@ -3,6 +3,8 @@ import { Resolver } from "./resolver.js";
 import { DependencyGraph } from "./dependency-graph.js";
 import { ModuleCache } from "./module-cache.js";
 import { emitHmrBundle, HMR_RUNTIME_TEMPLATE } from "./hmr-runtime.js";
+import { emitMetroWrappedBundle, emitMetroModulesBundle, BundleLineIndexEntry } from "./metro-emit.js";
+import { ModuleIdRegistry } from "./module-ids.js";
 import type { RawSourceMap } from "./source-map.js";
 import {
   buildCombinedSourceMap,
@@ -10,7 +12,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS } from "./utils.js";
 import { formatTransformError } from "./transform-error.js";
 import type {
   BundlerConfig,
@@ -34,6 +36,14 @@ export class IncrementalBundler {
   private packageVersions: Record<string, string> = {};
   private transitiveDepsVersions: Record<string, string> = {};
   private prefetchedPackages: Record<string, string> = {};
+  /** Native: direct-dep internal subpaths folded into the combined prefetch
+   *  on the second build pass (see the "NATIVE second pass" block in build). */
+  private extraNativeSubpaths: string[] = [];
+  private nativeSubpathsExpanded = false;
+  /** Stable numeric ids for metro-format output (per bundler session). */
+  readonly moduleIds = new ModuleIdRegistry();
+  /** Bundle-line → module ranges from the last metro emit (for /symbolicate). */
+  nativeLineIndex: BundleLineIndexEntry[] = [];
 
   constructor(fs: VirtualFS, config: BundlerConfig) {
     this.fs = fs;
@@ -305,6 +315,12 @@ export class IncrementalBundler {
    *  Node-side, never bundled. Shared by collectSubpaths and rebuild(). */
   private static readonly CONFIG_FILE_RE = /(?:^|\/)[^/]*\.config\.[cm]?[jt]sx?$/;
 
+  /** Non-web target platform, or null for the historical web behavior. */
+  private nativePlatform(): string | null {
+    const p = this.config.platform;
+    return p && p !== "web" ? p : null;
+  }
+
   private collectSubpaths(depNames: Set<string>): string[] {
     const SRC = /\.(tsx?|jsx?|mjs|cjs)$/;
     // Build-tooling config files import Node-side subpaths (e.g.
@@ -334,7 +350,20 @@ export class IncrementalBundler {
     if (Object.keys(versions).length === 0) return;
 
     const subpaths = this.collectSubpaths(new Set(Object.keys(versions)));
-    const hash = await hashDeps(versions, subpaths);
+    for (const sub of this.extraNativeSubpaths) {
+      if (!subpaths.includes(sub)) subpaths.push(sub);
+    }
+
+    // Native bundles must run react-native's InitializeCore before the entry
+    // (error handling, timers, DEV tooling -- Metro's modulesRunBeforeMainModule).
+    // Requesting it as a subpath makes the server build it IN THE SAME esbuild
+    // context as react-native itself, so stateful RN internals aren't duplicated.
+    const platform = this.nativePlatform();
+    if (platform && versions["react-native"] && !subpaths.includes(INITIALIZE_CORE_SUBPATH)) {
+      subpaths.push(INITIALIZE_CORE_SUBPATH);
+    }
+
+    const hash = await hashDeps(versions, subpaths, platform ?? undefined);
     const baseUrl = this.config.server.packageServerUrl;
 
     try {
@@ -348,13 +377,39 @@ export class IncrementalBundler {
       const postRes = await fetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hash, dependencies: versions, subpaths }),
+        body: JSON.stringify({
+          hash,
+          dependencies: versions,
+          subpaths,
+          ...(platform ? { platform } : {}),
+        }),
       });
       if (postRes.ok) {
         const { packages } = parseDepBundle(await postRes.text());
         this.prefetchedPackages = packages;
+        return;
       }
     } catch (err) {
+      // Native cold builds can exceed fetch's 300s header timeout while the
+      // server keeps building. Poll the GET (which serves the cache) instead
+      // of falling straight back to individual fetches -- those rebuild RN
+      // internals in separate contexts (duplicate singletons).
+      if (platform) {
+        console.warn("[prefetch] request failed; polling for server-side build to finish:", err);
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 15000));
+          try {
+            const poll = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+            if (poll.ok) {
+              const { packages } = parseDepBundle(await poll.text());
+              this.prefetchedPackages = packages;
+              return;
+            }
+          } catch {
+            // keep polling
+          }
+        }
+      }
       console.warn("[prefetch] Failed, falling back to individual fetches:", err);
     }
   }
@@ -377,7 +432,12 @@ export class IncrementalBundler {
     }
 
     // Fallback to individual fetch
-    const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
+    const nativePlat = this.nativePlatform();
+    const url =
+      this.config.server.packageServerUrl +
+      "/pkg/" +
+      specifier +
+      (nativePlat ? "?platform=" + nativePlat : "");
     const res = await fetch(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -402,6 +462,31 @@ export class IncrementalBundler {
   } {
     // Asset files get a stub module that exports the filename (or a real URL for external assets)
     if (this.resolver.isAssetFile(filePath)) {
+      // Native: register with RN's AssetRegistry so Image/resolveAssetSource
+      // produce a real dev-server URL (/assets/<path>) with dimensions.
+      if (this.nativePlatform()) {
+        const dot = filePath.lastIndexOf(".");
+        const slash = filePath.lastIndexOf("/");
+        const name = filePath.slice(slash + 1, dot);
+        const type = filePath.slice(dot + 1).toLowerCase();
+        const meta = this.config.assetMeta?.[filePath];
+        const descriptor = {
+          __packager_asset: true,
+          name,
+          type,
+          hash: meta?.hash ?? "0",
+          httpServerLocation: "/assets" + filePath.slice(0, Math.max(0, slash)),
+          scales: [1],
+          fileHashes: [meta?.hash ?? "0"],
+          ...(meta?.width !== undefined ? { width: meta.width } : {}),
+          ...(meta?.height !== undefined ? { height: meta.height } : {}),
+        };
+        this.moduleMap[filePath] =
+          'module.exports = require("@react-native/assets-registry/registry").registerAsset(' +
+          JSON.stringify(descriptor) +
+          ");";
+        return { localDeps: [], npmDeps: ["@react-native/assets-registry/registry"] };
+      }
       if (this.fs.isExternalAsset(filePath) && this.config.assetPublicPath) {
         const assetUrl = this.config.assetPublicPath + filePath;
         this.moduleMap[filePath] = "module.exports = { uri: " + JSON.stringify(assetUrl) + " };";
@@ -559,6 +644,34 @@ export class IncrementalBundler {
 
   /** Emit the bundle using HMR runtime or standard IIFE */
   private emitBundle(): string {
+    // Metro format for native targets (Expo Go / Hermes). With a metro-runtime
+    // prelude available we emit per-module __d registrations (stable numeric
+    // ids -- the basis for native HMR); otherwise the single-__d wrapper.
+    if (this.config.output?.format === "metro") {
+      if (this.config.output.prelude) {
+        const lineIndex: BundleLineIndexEntry[] = [];
+        const bundle = emitMetroModulesBundle(
+          this.moduleMap,
+          this.entryFile!,
+          this.moduleIds,
+          {
+            env: this.config.env,
+            preRequires: this.config.output.preRequires,
+            prelude: this.config.output.prelude,
+            dev: true,
+          },
+          lineIndex
+        );
+        this.nativeLineIndex = lineIndex;
+        return bundle;
+      }
+      return emitMetroWrappedBundle(this.moduleMap, this.entryFile!, {
+        env: this.config.env,
+        preRequires: this.config.output.preRequires,
+        dev: true,
+      });
+    }
+
     const hmrEnabled = this.config.hmr?.enabled ?? false;
     const reactRefresh = this.config.hmr?.reactRefresh ?? false;
 
@@ -695,6 +808,15 @@ export class IncrementalBundler {
       npmPackagesNeeded.add("react-refresh/runtime");
     }
 
+    // Native: Metro's prelude modules must be in the module map so the
+    // metro-format emitter can run them before the entry (nothing in user
+    // code requires them): js-polyfills (global.ErrorUtils, console) and
+    // then InitializeCore.
+    if (this.nativePlatform() && this.packageVersions["react-native"]) {
+      for (const polyfill of NATIVE_POLYFILL_SUBPATHS) npmPackagesNeeded.add(polyfill);
+      npmPackagesNeeded.add(INITIALIZE_CORE_SUBPATH);
+    }
+
     await this.fetchNpmPackages(npmPackagesNeeded);
 
     // Resolve transitive npm deps (subpath requires like react-dom/client)
@@ -703,6 +825,28 @@ export class IncrementalBundler {
     while (newDeps.size > 0) {
       await this.fetchNpmPackages(newDeps);
       newDeps = this.findTransitiveNpmDeps(skipNames);
+    }
+
+    // NATIVE second pass: transitive chunks require direct-dep INTERNALS
+    // (react-native/Libraries/..., expo-modules-core internals). Fetched
+    // individually those rebuild the base package's private modules in a
+    // separate esbuild context -- a second copy of stateful RN singletons,
+    // which is fatal at runtime. Re-prefetch ONCE with every such subpath
+    // included so the server combine-builds them with their base (shared
+    // internals via the __rnSubpaths registry), then rebuild the map.
+    if (this.nativePlatform() && !this.nativeSubpathsExpanded) {
+      const internalSubs = Object.keys(this.moduleMap).filter((k) => {
+        if (!this.resolver.isNpmPackage(k)) return false;
+        const base = k.startsWith("@") ? k.split("/").slice(0, 2).join("/") : k.split("/")[0];
+        return base !== k && this.packageVersions[base] !== undefined && !this.extraNativeSubpaths.includes(k);
+      });
+      if (internalSubs.length > 0) {
+        this.nativeSubpathsExpanded = true;
+        this.extraNativeSubpaths = [...new Set([...this.extraNativeSubpaths, ...internalSubs])];
+        this.prefetchedPackages = {};
+        this.cache.invalidateNpmPackages();
+        return this.build(entryFile);
+      }
     }
 
     // Inject alias shim modules
@@ -931,6 +1075,10 @@ export class IncrementalBundler {
         };
       } else {
         const updatedModules: Record<string, string> = {};
+        // Metro-format consumers (the native /hot server) wrap module bodies
+        // themselves via emitMetroModule -- give them RAW bodies. Web gets the
+        // historical decorations for the new Function eval path.
+        const metroFormat = this.config.output?.format === "metro";
         // new Function('module','exports','require', code) wraps with:
         //   function anonymous(module,exports,require\n) {\n<code>\n}
         // That's 2 extra lines before code starts
@@ -938,23 +1086,25 @@ export class IncrementalBundler {
         for (const id of rebuiltModules) {
           if (this.moduleMap[id] !== undefined) {
             let code = this.moduleMap[id];
-            // Append per-module inline source map for HMR
-            const sm = this.sourceMapMap[id];
-            if (sm) {
-              const sourceContent = this.fs.read(id);
-              if (sourceContent) {
-                code +=
-                  "\n" +
-                  inlineSourceMap({
-                    version: 3,
-                    sources: [id],
-                    sourcesContent: [sourceContent],
-                    names: sm.names || [],
-                    mappings: ";".repeat(NEW_FUNCTION_LINES) + sm.mappings,
-                  });
+            if (!metroFormat) {
+              // Append per-module inline source map for HMR
+              const sm = this.sourceMapMap[id];
+              if (sm) {
+                const sourceContent = this.fs.read(id);
+                if (sourceContent) {
+                  code +=
+                    "\n" +
+                    inlineSourceMap({
+                      version: 3,
+                      sources: [id],
+                      sourcesContent: [sourceContent],
+                      names: sm.names || [],
+                      mappings: ";".repeat(NEW_FUNCTION_LINES) + sm.mappings,
+                    });
+                }
               }
+              code += "\n//# sourceURL=" + id;
             }
-            code += "\n//# sourceURL=" + id;
             updatedModules[id] = code;
           }
         }

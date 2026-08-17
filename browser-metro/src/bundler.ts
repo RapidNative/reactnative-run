@@ -9,7 +9,7 @@ import {
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
 import { formatTransformError } from "./transform-error.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, INITIALIZE_CORE_SUBPATH } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -24,6 +24,12 @@ export class Bundler {
     const paths = Bundler.readTsconfigPaths(fs);
     this.resolver = new Resolver(fs, { ...config.resolver, ...(paths && { paths }) });
     this.plugins = config.plugins ?? [];
+  }
+
+  /** Non-web target platform, or null for the historical web behavior. */
+  private nativePlatform(): string | null {
+    const p = this.config.platform;
+    return p && p !== "web" ? p : null;
   }
 
   /** Scan VFS source files for bare subpath imports of direct deps so the
@@ -58,7 +64,15 @@ export class Bundler {
     if (Object.keys(versions).length === 0) return;
 
     const subpaths = this.collectSubpaths(new Set(Object.keys(versions)));
-    const hash = await hashDeps(versions, subpaths);
+
+    // Native: run InitializeCore in the same esbuild context as react-native
+    // (see the matching comment in IncrementalBundler.prefetchDependencies).
+    const platform = this.nativePlatform();
+    if (platform && versions["react-native"] && !subpaths.includes(INITIALIZE_CORE_SUBPATH)) {
+      subpaths.push(INITIALIZE_CORE_SUBPATH);
+    }
+
+    const hash = await hashDeps(versions, subpaths, platform ?? undefined);
     const baseUrl = this.config.server.packageServerUrl;
 
     try {
@@ -74,13 +88,39 @@ export class Bundler {
       const postRes = await fetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hash, dependencies: versions, subpaths }),
+        body: JSON.stringify({
+          hash,
+          dependencies: versions,
+          subpaths,
+          ...(platform ? { platform } : {}),
+        }),
       });
       if (postRes.ok) {
         const { packages } = parseDepBundle(await postRes.text());
         this.prefetchedPackages = packages;
+        return;
       }
     } catch (err) {
+      // Native cold builds can exceed fetch's 300s header timeout while the
+      // server keeps building. Poll the GET (which serves the cache) instead
+      // of falling straight back to individual fetches -- those rebuild RN
+      // internals in separate contexts (duplicate singletons).
+      if (platform) {
+        console.warn("[prefetch] request failed; polling for server-side build to finish:", err);
+        for (let i = 0; i < 40; i++) {
+          await new Promise((r) => setTimeout(r, 15000));
+          try {
+            const poll = await fetch(`${baseUrl}/bundle-deps/${hash}`);
+            if (poll.ok) {
+              const { packages } = parseDepBundle(await poll.text());
+              this.prefetchedPackages = packages;
+              return;
+            }
+          } catch {
+            // keep polling
+          }
+        }
+      }
       // Silently fall back to individual fetches
       console.warn("[prefetch] Failed, falling back to individual fetches:", err);
     }
@@ -267,7 +307,12 @@ export class Bundler {
     }
 
     // Fallback to individual fetch
-    const url = this.config.server.packageServerUrl + "/pkg/" + specifier;
+    const nativePlat = this.nativePlatform();
+    const url =
+      this.config.server.packageServerUrl +
+      "/pkg/" +
+      specifier +
+      (nativePlat ? "?platform=" + nativePlat : "");
     const res = await fetch(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");

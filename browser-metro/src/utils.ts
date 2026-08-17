@@ -362,6 +362,20 @@ export function hashString(str: string): string {
 // Must match SERVER_VERSION in reactnative-esm/src/index.ts
 const DEPS_HASH_VERSION = "8";
 
+/** Metro's "modulesRunBeforeMainModule": native bundles must execute this
+ *  before the entry. Requested as a combined subpath so the server builds it
+ *  in the same esbuild context as react-native itself. */
+export const INITIALIZE_CORE_SUBPATH = "react-native/Libraries/Core/InitializeCore";
+
+/** Metro injects these as prelude polyfills before any module runs. Without
+ *  error-guard, `global.ErrorUtils` is undefined and InitializeCore's
+ *  setUpErrorHandling crashes on the first setGlobalHandler call. Order
+ *  matches Metro's getPolyfills(): console first, then error-guard. */
+export const NATIVE_POLYFILL_SUBPATHS = [
+  "@react-native/js-polyfills/console",
+  "@react-native/js-polyfills/error-guard",
+];
+
 /** Hash a dependencies object to a stable cache key.
  *  Uses SHA-256 (via Web Crypto or Node crypto) truncated to 16 hex chars
  *  for collision resistance while keeping URLs short.
@@ -369,10 +383,14 @@ const DEPS_HASH_VERSION = "8";
  *  `subpaths` (e.g. "expo-router/drawer") are folded in because the server
  *  bundles them combined with their base package — different used subpaths
  *  produce a different bundle and must not collide on cache key. */
-export async function hashDeps(deps: Record<string, string>, subpaths: string[] = []): Promise<string> {
+export async function hashDeps(deps: Record<string, string>, subpaths: string[] = [], platform?: string): Promise<string> {
   const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
   const subs = subpaths.length ? `;subpaths:${[...subpaths].sort().join(",")}` : "";
-  const input = `v${DEPS_HASH_VERSION}:${sorted}${subs}`;
+  // Platform folds into the hash ONLY when non-web, so every existing web hash
+  // (and the production bundle-deps cache behind it) stays valid. Must match
+  // hashDepsServer in reactnative-esm exactly.
+  const plat = platform && platform !== "web" ? `;platform=${platform}` : "";
+  const input = `v${DEPS_HASH_VERSION}:${sorted}${subs}${plat}`;
 
   // Web Crypto API (works in browsers and workers)
   if (typeof globalThis.crypto?.subtle?.digest === "function") {

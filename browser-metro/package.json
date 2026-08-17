@@ -5,6 +5,12 @@
   "description": "A browser-based JavaScript/TypeScript bundler with HMR support, inspired by Metro. Runs entirely client-side.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist"
   ],

@@ -65,8 +65,22 @@ function detectComponents(originalSrc: string, transformedCode: string): string[
   return components;
 }
 
-/** Wrap a base transformer with React Refresh instrumentation for .tsx/.jsx files */
-export function createReactRefreshTransformer(base: Transformer): Transformer {
+/**
+ * Wrap a base transformer with React Refresh instrumentation for .tsx/.jsx.
+ *
+ * style "web" (default): the historical browser runtime -- registration goes
+ * through window.__REACT_REFRESH_RUNTIME__ and a module.hot.accept() marks
+ * the accept boundary for the postMessage HMR runtime.
+ *
+ * style "metro": the Metro/native convention. metro-runtime's define() in DEV
+ * exposes bare $RefreshReg$/$RefreshSig$ globals around factory execution
+ * (when RN's setUpReactRefresh installed global.__ReactRefresh), and computes
+ * refresh boundaries itself -- no window, no explicit accept.
+ */
+export function createReactRefreshTransformer(
+  base: Transformer,
+  style: "web" | "metro" = "web"
+): Transformer {
   return {
     transform(params) {
       const result = base.transform(params);
@@ -82,6 +96,28 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
 
       // Compute hook signature for this module — changes when hooks are added/removed
       const hookSig = extractHookSignature(params.src + result.code);
+
+      if (style === "metro") {
+        let preamble = "";
+        for (const name of components) {
+          preamble +=
+            "var _s_" + name + ' = typeof $RefreshSig$ === "function" ? $RefreshSig$() : function(t){return t;};\n';
+        }
+        let postamble = "\n";
+        for (const name of components) {
+          postamble +=
+            'if (typeof ' + name + ' === "function" && typeof $RefreshReg$ === "function") {\n' +
+            "  _s_" + name + "(" + name + ", " + JSON.stringify(hookSig) + ");\n" +
+            "  $RefreshReg$(" + name + ", " + JSON.stringify(name) + ");\n" +
+            "}\n";
+        }
+        let sourceMap = result.sourceMap;
+        if (sourceMap) {
+          const preambleLines = countNewlines(preamble);
+          sourceMap = { ...sourceMap, mappings: ";".repeat(preambleLines) + sourceMap.mappings };
+        }
+        return { code: preamble + result.code + postamble, sourceMap };
+      }
 
       // Check if module uses createContext (needs HMR identity preservation)
       const usesCreateContext =
@@ -173,3 +209,7 @@ export function createReactRefreshTransformer(base: Transformer): Transformer {
 /** Pre-built React Refresh transformer wrapping the default TypeScript transformer */
 export const reactRefreshTransformer: Transformer =
   createReactRefreshTransformer(typescriptTransformer);
+
+/** Metro-convention Fast Refresh transformer for native (Expo Go) bundles. */
+export const metroReactRefreshTransformer: Transformer =
+  createReactRefreshTransformer(typescriptTransformer, "metro");
