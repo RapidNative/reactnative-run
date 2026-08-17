@@ -4,6 +4,8 @@ import type esbuild from "esbuild";
 // Bump this when the bundling logic changes to invalidate all caches.
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
 export const SERVER_VERSION = "8";
+// Must stay equal to NATIVE_DEPS_VERSION in browser-metro/src/utils.ts.
+export const NATIVE_DEPS_VERSION = "2";
 
 // ============================================================
 // Platform dimension (web | ios | android)
@@ -22,8 +24,9 @@ export function normalizePlatform(raw: unknown): BuildPlatform {
 export function hashDepsServer(deps: Record<string, string>, subpaths: string[] = [], platform: BuildPlatform = "web"): string {
 	const sorted = Object.keys(deps).sort().map(k => `${k}@${deps[k]}`).join(",");
 	const subs = subpaths.length ? `;subpaths:${[...subpaths].sort().join(",")}` : "";
-	// Non-web only, byte-identical to hashDeps in browser-metro/src/utils.ts.
-	const plat = platform !== "web" ? `;platform=${platform}` : "";
+	// Non-web only, byte-identical to hashDeps in browser-metro/src/utils.ts
+	// (including NATIVE_DEPS_VERSION -- see that file for bump rules).
+	const plat = platform !== "web" ? `;platform=${platform};nv=${NATIVE_DEPS_VERSION}` : "";
 	const input = `v${SERVER_VERSION}:${sorted}${subs}${plat}`;
 	return crypto.createHash("sha256").update(input).digest("hex").slice(0, 16);
 }

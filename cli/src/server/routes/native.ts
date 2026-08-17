@@ -82,11 +82,20 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
       session = native;
     }
     if (!session.getBundle()) {
+      // Metro parity: a JSON error body makes the RN bundle loader surface a
+      // proper redbox with the message instead of a blank app. (Web's shell
+      // reads the same shape for its overlay.)
+      const message = session.buildError || "Bundle is not ready";
       sendText(
         res,
         500,
-        "application/javascript",
-        `// Build failed\nconsole.error(${JSON.stringify(session.buildError || "No bundle")});\n`
+        "application/json",
+        JSON.stringify({
+          type: "TransformError",
+          name: "BuildError",
+          message,
+          errors: [{ description: message }],
+        })
       );
       return;
     }

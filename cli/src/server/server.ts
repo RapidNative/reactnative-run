@@ -68,6 +68,9 @@ export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise
     port: actualPort,
     close: async () => {
       hub.close();
+      // Browsers hold keep-alive sockets open; without this, close() waits
+      // for them indefinitely and Ctrl+C appears to hang.
+      server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

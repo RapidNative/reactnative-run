@@ -361,6 +361,9 @@ export function hashString(str: string): string {
 
 // Must match SERVER_VERSION in reactnative-esm/src/index.ts
 const DEPS_HASH_VERSION = "8";
+// Native-only bundle-format version; folded into non-web hashes (see hashDeps).
+// History: 2 = server-side worklets babel pass (PR #48).
+const NATIVE_DEPS_VERSION = "2";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it
@@ -389,7 +392,13 @@ export async function hashDeps(deps: Record<string, string>, subpaths: string[] 
   // Platform folds into the hash ONLY when non-web, so every existing web hash
   // (and the production bundle-deps cache behind it) stays valid. Must match
   // hashDepsServer in reactnative-esm exactly.
-  const plat = platform && platform !== "web" ? `;platform=${platform}` : "";
+  //
+  // NATIVE_DEPS_VERSION: bump when a server-side change alters NATIVE bundle
+  // output for the same dep set (e.g. the worklets babel pass). Same hash +
+  // different bytes silently poisons every layer that treats bundle-deps as
+  // immutable (server cache, CDN, the CLI's disk cache); a bump mints fresh
+  // native hashes while web keys stay byte-identical.
+  const plat = platform && platform !== "web" ? `;platform=${platform};nv=${NATIVE_DEPS_VERSION}` : "";
   const input = `v${DEPS_HASH_VERSION}:${sorted}${subs}${plat}`;
 
   // Web Crypto API (works in browsers and workers)
