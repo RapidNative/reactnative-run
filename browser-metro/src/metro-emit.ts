@@ -207,20 +207,49 @@ export function buildMetroHmrBody(
     return out;
   };
 
-  const added: MetroHmrModuleEntry[] = [];
-  const modified: MetroHmrModuleEntry[] = [];
+  interface Pending extends MetroHmrModuleEntry {
+    isNew: boolean;
+    depIds: Set<number>;
+  }
+  const pending: Pending[] = [];
   for (const [key, code] of Object.entries(update.updatedModules)) {
     const isNew = !registry.has(key);
-    const { text } = emitMetroModule(code, key, registry, {
+    const { text, depKeys } = emitMetroModule(code, key, registry, {
       inverseDependencies: ancestorsFor(key),
     });
-    const entry: MetroHmrModuleEntry = {
+    pending.push({
       module: [registry.idFor(key), text],
       sourceMappingURL: null,
       sourceURL: key,
-    };
-    (isNew ? added : modified).push(entry);
+      isNew,
+      depIds: new Set(depKeys.map((d) => registry.idFor(d))),
+    });
   }
+
+  // ORDER MATTERS: metro-runtime's define() hot-swaps a redefined module
+  // SYNCHRONOUSLY, re-running its factory at eval time -- if that factory
+  // requires another module carried in this same update but evaluated later,
+  // the device throws "Requiring unknown module <id>". Emit dependencies
+  // before dependents (Metro's serializer does the same).
+  const inPayload = new Set(pending.map((p) => p.module[0]));
+  const emittedIds = new Set<number>();
+  const ordered: Pending[] = [];
+  let remaining = pending;
+  while (remaining.length > 0) {
+    const ready = remaining.filter((p) =>
+      [...p.depIds].every((d) => !inPayload.has(d) || emittedIds.has(d) || d === p.module[0])
+    );
+    // Cycle (or self-reference chain): fall back to remaining order.
+    const batch = ready.length > 0 ? ready : remaining;
+    for (const p of batch) {
+      ordered.push(p);
+      emittedIds.add(p.module[0]);
+    }
+    remaining = remaining.filter((p) => !emittedIds.has(p.module[0]));
+  }
+
+  const added = ordered.filter((p) => p.isNew).map(({ isNew, depIds, ...e }) => e);
+  const modified = ordered.filter((p) => !p.isNew).map(({ isNew, depIds, ...e }) => e);
   const deleted = update.removedModules.filter((k) => registry.has(k)).map((k) => registry.idFor(k));
   return { revisionId, isInitialUpdate: false, added, modified, deleted };
 }
