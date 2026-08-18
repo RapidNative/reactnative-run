@@ -22,7 +22,10 @@ import { createHash } from "node:crypto";
  * Headers the client consumes (X-Externals) are preserved. Disable with
  * RNRUN_NO_PKG_CACHE=1; wipe with `rm -rf ~/.rnrun/pkg-cache`.
  */
-const CACHE_DIR = path.join(os.homedir(), ".rnrun", "pkg-cache");
+// RNRUN_PKG_CACHE_DIR relocates the package cache onto a persistent volume,
+// alongside RNRUN_BUNDLE_CACHE_DIR / RNRUN_TOOLS_DIR -- otherwise a container
+// whose $HOME is an ephemeral writable layer re-fetches every package on wake.
+const CACHE_DIR = process.env.RNRUN_PKG_CACHE_DIR || path.join(os.homedir(), ".rnrun", "pkg-cache");
 const KEPT_HEADERS = ["content-type", "x-externals", "x-resolved-version"];
 const TTL_VERSIONLESS_MS = 24 * 60 * 60 * 1000;
 const TTL_NEGATIVE_MS = 60 * 60 * 1000;
