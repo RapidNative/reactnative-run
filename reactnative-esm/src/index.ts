@@ -1346,7 +1346,18 @@ app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 
 	// no-store: Cloudflare negative-caches plain 404s (~5 min), which blocks
 	// the GET path for freshly-built hashes and every client's first warm run.
-	res.header("Cache-Control", "no-store").status(404).send("// Not found\n");
+	//
+	// X-Build-Status lets a polling client tell "still building, keep waiting"
+	// apart from "nobody is building this, stop waiting". Without it the client
+	// has to guess a timeout, and guessing wrong abandons a build that was
+	// nearly done (observed in production: a 746s build abandoned by a 600s
+	// client budget, which then fell back to per-package fetches).
+	const building = inflightBundleBuilds.has(String(hash));
+	res
+		.header("Cache-Control", "no-store")
+		.header("X-Build-Status", building ? "building" : "absent")
+		.status(404)
+		.send(building ? "// Building\n" : "// Not found\n");
 });
 
 // POST /bundle-deps - build a dep bundle

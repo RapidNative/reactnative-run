@@ -433,7 +433,7 @@ export class IncrementalBundler {
     // reporting the build threw. GET will 404 forever, so polling only stalls.
     const GATEWAY_STATUSES = new Set([408, 425, 429, 502, 503, 504, 524]);
     const pollForBuild = async (budgetMs: number): Promise<boolean> => {
-      const deadline = Date.now() + budgetMs;
+      let deadline = Date.now() + budgetMs;
       // Short first check: if a proxy hung up at 60s the build may already be
       // done, and a 15s blind wait is pure latency.
       let delay = 3000;
@@ -445,7 +445,17 @@ export class IncrementalBundler {
           if (poll.ok) {
             const { packages } = parseDepBundle(await poll.text());
             this.prefetchedPackages = packages;
+            log?.(`Dependency bundle ready (${Object.keys(packages).length} packages, ${secs()}s)`);
             return true;
+          }
+          // The server tells us whether a build is actually running for this
+          // hash. While it says "building", keep the deadline ahead of us: a
+          // fixed budget abandons builds that are simply slow under load (a
+          // 746s build was dropped by a 600s budget in production, which then
+          // fell back to per-package fetches -- duplicate-singleton territory
+          // on native).
+          if (poll.headers.get("x-build-status") === "building") {
+            deadline = Math.max(deadline, Date.now() + budgetMs);
           }
         } catch {
           // keep polling
@@ -463,6 +473,40 @@ export class IncrementalBundler {
     // just stalls startup, so the throw path requires real elapsed time first.
     const MIN_ELAPSED_TO_POLL_MS = 5000;
     const started = Date.now();
+    const log = this.config.log;
+    const secs = () => Math.round((Date.now() - started) / 1000);
+    // A cold combined build of a native dep set runs for minutes on the
+    // server. Announce it and tick, so the caller isn't staring at silence.
+    let ticker: ReturnType<typeof setInterval> | undefined;
+    const announceBuild = (count: number): void => {
+      if (!log) return;
+      log(
+        `Building dependency bundle for ${count} packages on the package server -- ` +
+          `first run for this dependency set, this can take a few minutes ...`
+      );
+      ticker = setInterval(() => log(`  ... still building on the package server (${secs()}s elapsed)`), 20_000);
+    };
+    // The combined bundle is what keeps stateful package internals (RN core,
+    // css-interop) to ONE instance. Falling back to per-package fetches
+    // rebuilds them in separate esbuild contexts, which is a correctness risk
+    // on native, not just a slowdown -- so say so, loudly, with the platform.
+    const warnFallback = (reason: string): void => {
+      const msg =
+        `[prefetch] combined dependency bundle unavailable (${reason}); ` +
+        `falling back to individual package fetches` +
+        (platform
+          ? ` -- on ${platform} this can duplicate stateful package internals ` +
+            `(react-native, css-interop) and cause subtle runtime failures. ` +
+            `Retry once the package server is reachable.`
+          : "");
+      console.warn(msg);
+      log?.(msg);
+    };
+
+    const stopTicker = (): void => {
+      if (ticker !== undefined) clearInterval(ticker);
+      ticker = undefined;
+    };
 
     try {
       const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
@@ -472,6 +516,7 @@ export class IncrementalBundler {
         return;
       }
 
+      announceBuild(Object.keys(versions).length);
       const postRes = await doFetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -485,6 +530,7 @@ export class IncrementalBundler {
       if (postRes.ok) {
         const { packages } = parseDepBundle(await postRes.text());
         this.prefetchedPackages = packages;
+        log?.(`Dependency bundle ready (${Object.keys(packages).length} packages, ${secs()}s)`);
         return;
       }
       if (GATEWAY_STATUSES.has(postRes.status)) {
@@ -493,7 +539,7 @@ export class IncrementalBundler {
         );
         if (await pollForBuild(pollBudgetMs)) return;
       }
-      console.warn(`[prefetch] Failed (HTTP ${postRes.status}), falling back to individual fetches`);
+      warnFallback(`HTTP ${postRes.status}`);
     } catch (err) {
       // A thrown fetch error after a long wait is also "unknown": the request
       // died in transit while the server may well still be building.
@@ -501,7 +547,9 @@ export class IncrementalBundler {
         console.warn("[prefetch] request failed after a long wait; polling for server-side build to finish:", err);
         if (await pollForBuild(pollBudgetMs)) return;
       }
-      console.warn("[prefetch] Failed, falling back to individual fetches:", err);
+      warnFallback((err as Error)?.message ?? String(err));
+    } finally {
+      stopTicker();
     }
   }
 
