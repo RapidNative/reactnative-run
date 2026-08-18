@@ -100,7 +100,21 @@ export async function startCommand(options: StartOptions): Promise<void> {
       /* no deps */
     }
     const workletsPluginPath = resolveWorkletsPlugin(rootDir, projectDeps, log.warn);
-    if (workletsPluginPath) log.info(`[${platform}] reanimated detected -- worklets plugin enabled`);
+    if (workletsPluginPath) {
+      log.info(`[${platform}] reanimated detected -- worklets plugin enabled`);
+    } else if ("react-native-reanimated" in projectDeps) {
+      // Building without the plugin produces a bundle that looks fine and then
+      // fails on device ("Failed to create a worklet") the moment an animation
+      // runs. A production fleet shipped exactly that for 15 minutes because
+      // this was only a warning -- so refuse to build instead.
+      log.error(
+        `[${platform}] react-native-reanimated is declared but its babel plugin could not be resolved. ` +
+          `Refusing to build a bundle whose worklets would fail at runtime.\n` +
+          `  Fix any of: run npm install in the project; set RNRUN_WORKLETS_PLUGIN to a plugin path; ` +
+          `set RNRUN_TOOLS_DIR to a writable directory; or check network access to the npm registry.`
+      );
+      throw new Error(`[${platform}] worklets plugin unavailable while react-native-reanimated is declared`);
+    }
     const native = new BundlerSession(rescan.files, {
       packageServerUrl,
       env: config.env,
@@ -130,6 +144,12 @@ export async function startCommand(options: StartOptions): Promise<void> {
     return native;
   };
 
+  // A native session that cannot be built (e.g. reanimated present but its
+  // babel plugin unresolvable) must not take the server down -- web clients are
+  // unaffected and the device should get a redbox it can act on. Record the
+  // reason and let the route report it.
+  const nativeSessionErrors = new Map<string, string>();
+
   const ctx: ServerContext = {
     session,
     config,
@@ -140,10 +160,25 @@ export async function startCommand(options: StartOptions): Promise<void> {
     getPlatformSession: async (platform: string) => {
       if (platform !== "ios" && platform !== "android") return null;
       if (!nativeSessions.has(platform)) {
-        nativeSessions.set(platform, makeNativeSession(platform));
+        nativeSessions.set(
+          platform,
+          makeNativeSession(platform).catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            nativeSessionErrors.set(platform, msg);
+            // Drop the rejected promise so a retry after a fix can succeed
+            // without restarting the server.
+            nativeSessions.delete(platform);
+            throw err;
+          })
+        );
       }
-      return nativeSessions.get(platform)!;
+      try {
+        return await nativeSessions.get(platform)!;
+      } catch {
+        return null;
+      }
     },
+    getPlatformError: (platform: string) => nativeSessionErrors.get(platform) ?? null,
   };
 
   // Bind the server BEFORE the first build: build errors are served/pushed
@@ -202,7 +237,10 @@ export async function startCommand(options: StartOptions): Promise<void> {
   if (prewarmList.length > 0) {
     log.info(`Pre-warming ${prewarmList.join(", ")} bundle(s) ...`);
     for (const platform of prewarmList) {
-      void ctx.getPlatformSession?.(platform);
+      // getPlatformSession already swallows the rejection and records it; the
+      // catch here is belt-and-braces against an unhandled rejection killing
+      // the process.
+      void Promise.resolve(ctx.getPlatformSession?.(platform)).catch(() => {});
     }
   }
 

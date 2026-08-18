@@ -20,6 +20,9 @@ export interface ServerContext {
    * then answers 501). Provided by the start command.
    */
   getPlatformSession?: (platform: string) => Promise<BundlerSession | null>;
+  /** Why a platform's session could not be built, surfaced to the device as a
+   *  redbox instead of failing silently or taking the server down. */
+  getPlatformError?: (platform: string) => string | null;
   /** Set by startServer once the ws hub exists. */
   hub?: HmrHub;
 }

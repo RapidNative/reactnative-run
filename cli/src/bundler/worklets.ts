@@ -91,6 +91,22 @@ export function resolveWorkletsPlugin(
   const hasReanimated = "react-native-reanimated" in deps;
   if (!version && !hasReanimated) return null;
 
+  // 0. Explicit override, checked first: a host that bakes the plugin into an
+  // image points at it directly and no fetch ever happens -- which also keeps
+  // the fetch off the startup path, where wake latency lives.
+  const override = process.env.RNRUN_WORKLETS_PLUGIN;
+  if (override) {
+    try {
+      createRequire(import.meta.url)(override);
+      return override;
+    } catch (err) {
+      warn(
+        `[worklets] RNRUN_WORKLETS_PLUGIN=${override} could not be loaded (${(err as Error).message}); ` +
+          `falling back to resolution`
+      );
+    }
+  }
+
   // 1. The project's own install (version-exact by construction).
   for (const spec of ["react-native-worklets/plugin", "react-native-reanimated/plugin"]) {
     try {
@@ -132,28 +148,72 @@ export function resolveWorkletsPlugin(
   const ready = loadable();
   if (ready) return ready;
 
-  // The plugin resolves @babel/* relative to its own location, so link the
-  // node_modules directory that actually holds our @babel/core (derived, so
-  // hoisted and nested layouts both work).
-  const babelHome = (): string | null => {
+  // The plugin resolves its imports relative to its OWN location, so it needs a
+  // node_modules beside it. Earlier this symlinked the directory containing our
+  // @babel/core -- which assumed such a directory exists. Under `npm install -g`
+  // it doesn't (the global layout has no node_modules parent to point at), so
+  // both this and the fallback install failed and reanimated was silently
+  // disabled in every bundle. Reported from production after a fleet rollback.
+  //
+  // Now nothing is guessed: each module the plugin needs is resolved from OUR
+  // context and symlinked individually, so global, local, hoisted and nested
+  // layouts all work.
+  const PLUGIN_RUNTIME_DEPS = [
+    "@babel/core",
+    "@babel/generator",
+    "@babel/traverse",
+    "@babel/types",
+    "@babel/preset-typescript",
+    "@babel/plugin-transform-arrow-functions",
+    "@babel/plugin-transform-nullish-coalescing-operator",
+    "@babel/plugin-transform-optional-chaining",
+    "@babel/plugin-transform-shorthand-properties",
+    "@babel/plugin-transform-template-literals",
+    "convert-source-map",
+  ];
+
+  /** Directory of an installed package, found via its package.json. */
+  const packageDir = (name: string): string | null => {
     try {
-      const p = createRequire(import.meta.url).resolve("@babel/core");
-      const marker = `${path.sep}node_modules${path.sep}`;
-      const i = p.lastIndexOf(marker);
-      return i === -1 ? null : p.slice(0, i + marker.length - 1);
+      return path.dirname(createRequire(import.meta.url).resolve(`${name}/package.json`));
     } catch {
+      try {
+        // Packages without an exports entry for package.json: walk up from main.
+        const main = createRequire(import.meta.url).resolve(name);
+        let dir = path.dirname(main);
+        for (let i = 0; i < 6; i++) {
+          if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+          dir = path.dirname(dir);
+        }
+      } catch {
+        /* unresolvable */
+      }
       return null;
     }
   };
 
-  try {
-    const nm = babelHome();
-    if (!nm) {
-      // Exotic layout (yarn PnP and friends): fall back to a plain install,
-      // which brings its own dependency tree along.
-      warn("[worklets] could not locate a node_modules for @babel/core; falling back to a full install");
-      return legacyInstall(toolDir, wanted, warn);
+  const linkRuntimeDeps = (): string[] => {
+    const missing: string[] = [];
+    const nmDir = path.join(toolDir, "node_modules");
+    for (const dep of PLUGIN_RUNTIME_DEPS) {
+      const target = packageDir(dep);
+      if (!target) {
+        missing.push(dep);
+        continue;
+      }
+      const linkPath = path.join(nmDir, dep);
+      try {
+        fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+        fs.rmSync(linkPath, { recursive: true, force: true });
+        fs.symlinkSync(target, linkPath, "junction");
+      } catch (err) {
+        missing.push(`${dep} (${(err as Error).message})`);
+      }
     }
+    return missing;
+  };
+
+  try {
     warn(`[worklets] fetching react-native-worklets@${wanted} babel plugin (one-time, ~1.6MB)`);
     fs.rmSync(toolDir, { recursive: true, force: true });
     fs.mkdirSync(toolDir, { recursive: true });
@@ -172,14 +232,15 @@ export function resolveWorkletsPlugin(
     fs.renameSync(path.join(toolDir, "package"), path.join(toolDir, "react-native-worklets"));
     fs.rmSync(path.join(toolDir, tgzName), { force: true });
     fs.rmSync(npmCache, { recursive: true, force: true });
-    try {
-      fs.symlinkSync(nm, path.join(toolDir, "node_modules"), "dir");
-    } catch {
-      /* already linked */
-    }
+
+    const missing = linkRuntimeDeps();
     const ok = loadable();
     if (ok) return ok;
-    warn("[worklets] fetched plugin did not load; falling back to a full install");
+    warn(
+      `[worklets] fetched plugin did not load` +
+        (missing.length ? ` (could not link: ${missing.join(", ")})` : "") +
+        `; falling back to a full install`
+    );
     return legacyInstall(toolDir, wanted, warn);
   } catch (err) {
     warn(`[worklets] plugin fetch failed (${(err as Error).message}); falling back to a full install`);
@@ -197,7 +258,10 @@ function legacyInstall(toolDir: string, wanted: string, warn: (msg: string) => v
       `npm install react-native-worklets@${JSON.stringify(wanted).slice(1, -1)} --no-audit --no-fund --ignore-scripts`,
       { cwd: toolDir, stdio: "ignore", timeout: 180_000, env: { ...process.env, NPM_CONFIG_UPDATE_NOTIFIER: "false" } }
     );
-    return createRequire(path.join(toolDir, "package.json")).resolve("react-native-worklets/plugin");
+    const resolved = createRequire(path.join(toolDir, "package.json")).resolve("react-native-worklets/plugin");
+    // Load it: resolving proves a path exists, not that babel can use it.
+    createRequire(import.meta.url)(resolved);
+    return resolved;
   } catch (err) {
     warn(
       `[worklets] plugin install failed (${(err as Error).message}); reanimated worklets will not run. ` +
