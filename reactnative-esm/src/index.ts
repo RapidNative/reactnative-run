@@ -13,6 +13,8 @@ const execAsync = promisify(exec);
 import esbuild from "esbuild";
 // @ts-ignore - no type declarations
 import flowRemoveTypes from "flow-remove-types";
+import { sweepCache } from "./retention";
+import { looseClassFields, normalizeBuildPaths } from "./output";
 import {
 	BuildPlatform,
 	normalizePlatform,
@@ -21,6 +23,7 @@ import {
 	esbuildPlatformSettings,
 	rnEsbuildSettings,
 	blankedPlatformsRe,
+	NATIVE_DEPS_VERSION,
 } from "./platform";
 
 /**
@@ -326,39 +329,6 @@ const patchUpstreamBugsPlugin: esbuild.Plugin = {
  * correct per-iteration capture. One parse per chunk, once per package
  * version, then cached.
  */
-/**
- * Metro parity for class FIELDS.
- *
- * esbuild lowers `class { field = v }` with spec semantics: its
- * `__defNormalProp` helper does `key in obj ? Object.defineProperty(...) :
- * obj[key] = v`. Metro compiles the whole RN ecosystem with
- * @react-native/babel-preset, which enables LOOSE class fields
- * (setPublicClassFields), i.e. a plain `this.field = v` assignment.
- *
- * The difference is not academic: a field that shadows an inherited
- * writable-but-non-configurable property (or any property `[[Define]]`
- * rejects) throws "property is not configurable" under the spec path while
- * the loose assignment succeeds. RN's own VirtualizedList hits exactly this
- * on device, so an app using FlatList redboxes under esbuild output but works
- * under Metro. Rewrite the helper to the loose form to match.
- *
- * Anchored on esbuild's exact helper text; if that ever changes shape we log
- * and ship the original rather than silently mangling the chunk.
- */
-const ESBUILD_DEFNORMALPROP_RE =
-	/var __defNormalProp = \(obj, key, value\) => key in obj \? __defProp\(obj, key, \{[^}]*\}\) : obj\[key\] = value;/;
-function looseClassFields(code: string, label: string): string {
-	if (!code.includes("__defNormalProp")) return code;
-	if (!ESBUILD_DEFNORMALPROP_RE.test(code)) {
-		console.warn(`[loose-class-fields] helper shape not recognised in ${label}; leaving spec semantics in place`);
-		return code;
-	}
-	return code.replace(
-		ESBUILD_DEFNORMALPROP_RE,
-		"var __defNormalProp = (obj, key, value) => (obj[key] = value);"
-	);
-}
-
 async function lowerClassesForHermes(code: string, platform: BuildPlatform): Promise<string> {
 	if (platform === "web") return code;
 	code = looseClassFields(code, "native chunk");
@@ -1054,7 +1024,10 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			}
 		}
 
-		const bundled = await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform);
+		const bundled = normalizeBuildPaths(
+			await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
+			tmpDir
+		);
 		const externalsJson = JSON.stringify(externalizedMap);
 		const wrapped = `// Bundled: ${requireSpecifier}@${resolvedVersion}\n// @externals ${externalsJson}\n${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }\n`;
 
@@ -1353,6 +1326,12 @@ app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 app.post("/bundle-deps", async (req: Request, res: Response) => {
 	const { hash, dependencies, subpaths: rawSubpaths, platform: rawPlatform } = req.body as { hash?: string; dependencies: Record<string, string>; subpaths?: string[]; platform?: string };
 
+	// Test affordances, honoured ONLY for loopback callers: a public
+	// cache-bypass switch would let anyone force expensive rebuilds.
+	const fromLoopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.ip ?? "");
+	const bypassChunkCache = fromLoopback && req.header("x-esm-no-chunk-cache") === "1";
+	const forceRebuild = fromLoopback && req.header("x-esm-fresh") === "1";
+
 	if (!dependencies || typeof dependencies !== "object") {
 		res.header("Cache-Control", "no-store").status(400).send("// Missing dependencies\n");
 		return;
@@ -1376,7 +1355,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 	const cacheFile = path.join(CACHE_DIR, `${BUNDLE_DEPS_PREFIX}${depHash}.js`);
 
 	// Check cache
-	if (fs.existsSync(cacheFile)) {
+	if (fs.existsSync(cacheFile) && !forceRebuild) {
 		console.log(`[bundle-deps cache hit] ${depHash}`);
 		res.header("Cache-Control", "public, max-age=31536000, immutable");
 		res.type("application/javascript").sendFile(cacheFile);
@@ -1639,12 +1618,92 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		// Bundle each package
 		const chunks: string[] = [];
 		const errors: string[] = [];
+		const phase = { pkgLoop: 0, subpathLoop: 0, assemble: 0 };
+		const tPkgLoop = Date.now();
 
 		// Flow stripping / platform filtering / node stubs come from the hoisted
 		// platform-aware plugin stack (rnPluginStack).
 
+		// ── Per-package chunk cache ────────────────────────────────────────────
+		//
+		// A combined bundle is a concatenation of independently-built per-package
+		// chunks, and measurement on production showed 95% of those builds to be
+		// exact repeats (126 distinct package@version across 2,543 build slots in
+		// the 40 most recent dep sets; median 78% set overlap). Caching chunks
+		// turns "add one dependency" from a full rebuild into one chunk.
+		//
+		// The key must capture everything that changes a chunk's bytes. Measured
+		// (see chunk-experiment): that is package@version, platform, nv, the
+		// subpaths folded in, and the EXTERNALS DECISION -- a package inlines a
+		// dependency that isn't a direct dep of the requested set, and
+		// externalizes it when it is. Rather than change that rule (which would
+		// break nested version conflicts: P declaring lodash@3 while the app
+		// pins lodash@4 must keep inlining its own copy), the key includes the
+		// batch-set names this package could externalize. Adding a dependency
+		// nothing declares -- the common case -- leaves every key untouched.
+		const chunkCacheDir = path.join(CACHE_DIR, "chunks");
+		const chunkStats = { hit: 0, built: 0 };
+		const declaredDepsOf = (pkgName: string): string[] => {
+			try {
+				const pj = JSON.parse(
+					fs.readFileSync(path.join(tmpDir, "node_modules", pkgName, "package.json"), "utf8")
+				);
+				return Object.keys({ ...(pj.dependencies ?? {}), ...(pj.peerDependencies ?? {}) }).sort();
+			} catch {
+				return [];
+			}
+		};
+		const chunkKeyFor = (pkgName: string, version: string, subs: string[]): string => {
+			// Only batch members that this package might import can affect its
+			// externals, so the key stays stable when unrelated deps come and go.
+			const relevant = declaredDepsOf(pkgName).filter((d) => batchSet.has(d));
+			const input = JSON.stringify({
+				pkg: pkgName,
+				version,
+				platform,
+				nv: NATIVE_DEPS_VERSION,
+				subs: [...subs].sort(),
+				externals: relevant,
+			});
+			return crypto.createHash("sha256").update(input).digest("hex").slice(0, 24);
+		};
+		const readChunk = (key: string): string | null => {
+			if (process.env.ESM_NO_CHUNK_CACHE || bypassChunkCache) return null;
+			try {
+				return fs.readFileSync(path.join(chunkCacheDir, `${key}.js`), "utf8");
+			} catch {
+				return null;
+			}
+		};
+		const writeChunk = (key: string, body: string): void => {
+			if (process.env.ESM_NO_CHUNK_CACHE || bypassChunkCache) return;
+			try {
+				fs.mkdirSync(chunkCacheDir, { recursive: true });
+				fs.writeFileSync(path.join(chunkCacheDir, `${key}.js`), body);
+			} catch {
+				/* cache write failure is non-fatal */
+			}
+		};
+
 		for (const [pkgName, info] of allPackages) {
 			const subs = sharedSubpathsByBase.get(pkgName) ?? [];
+			// Cached chunk for this exact (package, version, platform, nv, subpaths,
+			// externals) combination? Then skip esbuild entirely.
+			const chunkKey = chunkKeyFor(pkgName, info.version, subs);
+			const cachedChunk = readChunk(chunkKey);
+			if (cachedChunk !== null) {
+				chunks.push(cachedChunk);
+				chunkStats.hit++;
+				if (subs.length > 0) {
+					for (const sub of subs) {
+						const stub = `module.exports = (require(${JSON.stringify(pkgName)}), (globalThis.__rnSubpaths || {})[${JSON.stringify(sub)}]);`;
+						chunks.push(`// @dep-start ${sub}\n${stub}\n// @dep-end ${sub}`);
+						manifest[sub] = info.version;
+						emittedSubpaths.add(sub);
+					}
+				}
+				continue;
+			}
 			try {
 				const entryFile = path.join(tmpDir, `__entry_${pkgName.replace(/\//g, "__")}.js`);
 				const outFile = path.join(tmpDir, `__out_${pkgName.replace(/\//g, "__")}.js`);
@@ -1747,9 +1806,17 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					await runBuild();
 				}
 
-				const bundled = await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform);
+				const bundled = normalizeBuildPaths(
+					await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
+					tmpDir
+				);
 				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
-				chunks.push(`// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`);
+				const chunkBody = `// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`;
+				chunks.push(chunkBody);
+				chunkStats.built++;
+				// emitStubs false means the combined build fell back to base-only,
+				// whose bytes don't match what this key promises -- don't cache it.
+				if (emitStubs || subs.length === 0) writeChunk(chunkKey, chunkBody);
 
 				// Emit a tiny stub chunk per combined subpath. It forces the base
 				// chunk to evaluate (populating the registry) then returns the
@@ -1775,6 +1842,9 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			}
 		}
 
+		phase.pkgLoop = Date.now() - tPkgLoop;
+		const tSubLoop = Date.now();
+
 		// Now scan all chunks for subpath requires that need separate entries
 		const allCode = chunks.join("\n");
 		const subpathRequires = new Set<string>();
@@ -1795,8 +1865,21 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			}
 		}
 
-		// Bundle subpath variants
+		// Bundle subpath variants. Same caching as the package loop: these are
+		// independently-built chunks too, and they dominated warm requests
+		// (measured 38s of a 42s request once package chunks were cached).
 		for (const subpath of subpathRequires) {
+			const subBase = subpath.startsWith("@")
+				? subpath.split("/").slice(0, 2).join("/")
+				: subpath.split("/")[0];
+			const subVersion = allPackages.get(subBase)?.version ?? "unknown";
+			const subChunkKey = chunkKeyFor(subpath, subVersion, []);
+			const cachedSub = readChunk(subChunkKey);
+			if (cachedSub !== null) {
+				chunks.push(cachedSub);
+				chunkStats.hit++;
+				continue;
+			}
 			try {
 				const safeName = subpath.replace(/\//g, "__");
 				const entryFile = path.join(tmpDir, `__entry_${safeName}.js`);
@@ -1853,13 +1936,22 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					logLevel: "silent",
 				});
 
-				const bundled = await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform);
+				const bundled = normalizeBuildPaths(
+					await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
+					tmpDir
+				);
 				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
-				chunks.push(`// @dep-start ${subpath}\n${wrapped}\n// @dep-end ${subpath}`);
+				const subChunkBody = `// @dep-start ${subpath}\n${wrapped}\n// @dep-end ${subpath}`;
+				chunks.push(subChunkBody);
+				chunkStats.built++;
+				writeChunk(subChunkKey, subChunkBody);
 			} catch {
 				chunks.push(`// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`);
 			}
 		}
+
+		phase.subpathLoop = Date.now() - tSubLoop;
+		const tAssemble = Date.now();
 
 		// Emit stubs for packages dropped during install (unsatisfiable version
 		// ranges). Runtime `require("<name>")` returns {} instead of crashing.
@@ -1876,7 +1968,8 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 
 		// Cache
 		fs.writeFileSync(cacheFile, bundle);
-		console.log(`[bundle-deps] Cached ${chunks.length} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB, total: ${Date.now() - buildStart}ms)`);
+		phase.assemble = Date.now() - tAssemble;
+		console.log(`[bundle-deps] Cached ${chunks.length} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB, total: ${Date.now() - buildStart}ms, chunks: ${chunkStats.hit} reused / ${chunkStats.built} built, phases: pkg=${phase.pkgLoop}ms subpath=${phase.subpathLoop}ms assemble=${phase.assemble}ms)`);
 
 		res.header("Cache-Control", "public, max-age=31536000, immutable");
 		res.type("application/javascript").send(bundle);
@@ -1927,6 +2020,26 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 		}
 	);
 });
+
+// Cache retention: opt-in so a deploy never starts deleting unannounced.
+// ESM_RETENTION=on enables eviction; ESM_RETENTION=dry reports only.
+const retentionMode = process.env.ESM_RETENTION;
+if (retentionMode === "on" || retentionMode === "dry") {
+	const dryRun = retentionMode === "dry";
+	const everyMs = Number(process.env.ESM_RETENTION_INTERVAL_MIN ?? 60) * 60_000;
+	const run = () => {
+		try {
+			console.log(`[retention] sweep start (${dryRun ? "dry run" : "evicting"})`);
+			sweepCache(CACHE_DIR, { dryRun });
+		} catch (err) {
+			console.error("[retention] sweep failed:", err instanceof Error ? err.message : String(err));
+		}
+	};
+	// Not at t=0: let the process finish starting and serve first.
+	setTimeout(run, 5 * 60_000).unref();
+	setInterval(run, everyMs).unref();
+	console.log(`[retention] enabled (${dryRun ? "dry run" : "evicting"}), sweeping every ${everyMs / 60000}min`);
+}
 
 app.listen(PORT, () => {
 	console.log(`Package server running at http://localhost:${PORT}`);
