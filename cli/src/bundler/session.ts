@@ -17,6 +17,7 @@ import {
 } from "browser-metro";
 import { createHermesLoweringPlugin } from "./hermes-lowering.js";
 import { compileNativewindCss } from "../project/nativewind.js";
+import { bundleCacheKey, readCachedBundle, writeCachedBundle } from "./bundle-cache.js";
 import type {
   BundleLineIndexEntry,
   BundlerConfig,
@@ -115,6 +116,8 @@ export interface SessionOptions {
   warn?: (msg: string) => void;
   /** Resolved react-native-worklets babel plugin (native reanimated support). */
   workletsPluginPath?: string | null;
+  /** rnrun + browser-metro versions; part of the bundle-cache key. */
+  toolVersions?: string;
 }
 
 /**
@@ -135,6 +138,9 @@ export class BundlerSession {
   bundleVersion = 0;
   buildError: string | null = null;
   private everBuilt = false;
+  private buildingOnce: Promise<boolean> | null = null;
+  /** Serving a bundle restored from disk; a background build is warming HMR. */
+  restoredFromCache = false;
   private listeners = new Set<(e: SessionEvent) => void>();
 
   // nativewind: css path → compiled injectData module (virtualSource reads it).
@@ -324,8 +330,61 @@ export class BundlerSession {
     })();
   }
 
-  /** Initial build. Returns true on success. */
+  /**
+   * Build once, coalescing concurrent callers. Lets a platform's first request
+   * trigger its build instead of paying for it at startup: a container woken
+   * by a phone scan should not build a web bundle nobody asked for.
+   */
+  ensureBuilt(): Promise<boolean> {
+    if (this.everBuilt) return Promise.resolve(true);
+    if (!this.buildingOnce) {
+      this.buildingOnce = this.build().finally(() => {
+        this.buildingOnce = null;
+      });
+    }
+    return this.buildingOnce;
+  }
+
+  /** Cache key for the CURRENT VFS + config state. */
+  private cacheKey(): string {
+    return bundleCacheKey({
+      platform: this.platform,
+      toolVersions: this.options.toolVersions ?? "unknown",
+      files: this.vfs.toFileMap(),
+      assetMeta: this.options.assetMeta,
+      env: this.options.env,
+      prelude: this.options.metroPrelude,
+      flags: {
+        nativewind: !!this.options.nativewind,
+        worklets: !!this.options.workletsPluginPath,
+        assetPublicPath: this.options.assetPublicPath,
+        packageServerUrl: this.options.packageServerUrl,
+      },
+    });
+  }
+
+  /**
+   * Initial build. Tries the on-disk bundle cache first: a restart (or a
+   * scale-to-zero container wake) then serves in milliseconds instead of
+   * re-assembling. A background build still runs, because HMR needs the module
+   * graph that a cached bundle doesn't carry -- and since the inputs are
+   * identical the rebuilt bytes should match, so clients are never disturbed.
+   */
   async build(): Promise<boolean> {
+    const key = this.cacheKey();
+    const cached = readCachedBundle(key);
+    if (cached && !this.everBuilt) {
+      this.bundle = cached;
+      this.bundleVersion++;
+      this.buildError = null;
+      this.restoredFromCache = true;
+      this.options.warn?.(
+        `[${this.platform}] serving a cached bundle (${(cached.length / 1024).toFixed(0)} KB); rebuilding in the background for Fast Refresh`
+      );
+      void this.warmAfterCacheHit(cached);
+      return true;
+    }
+
     // First bundle should ship styles, so the initial compile is awaited.
     if (this.options.nativewind && this.nativewindCss.size === 0) {
       await this.refreshNativewindCss();
@@ -342,11 +401,44 @@ export class BundlerSession {
       this.bundleVersion++;
       this.buildError = null;
       this.everBuilt = true;
+      writeCachedBundle(key, result.bundle);
       return true;
     } catch (err) {
       this.buildError = errText(err);
       this.emit({ type: "build-error", message: this.buildError });
       return false;
+    }
+  }
+
+  /**
+   * After serving a cached bundle, do the real build so incremental rebuilds
+   * (Fast Refresh) have a module graph. Identical inputs should produce
+   * identical bytes; if they don't, the difference is real and clients are
+   * told to reload rather than left running stale code.
+   */
+  private async warmAfterCacheHit(served: string): Promise<void> {
+    try {
+      const entry = ensureEntryFile(this.vfs);
+      if (!entry) return;
+      if (this.options.nativewind && this.nativewindCss.size === 0) {
+        await this.refreshNativewindCss();
+      }
+      const result = await this.bundler.build(entry);
+      this.bundle = result.bundle;
+      this.restoredFromCache = false;
+      this.everBuilt = true;
+      if (result.bundle !== served) {
+        this.options.warn?.(
+          `[${this.platform}] rebuilt bundle differs from the cached one; reloading clients`
+        );
+        this.bundleVersion++;
+        this.emit({ type: "reload", bundleVersion: this.bundleVersion, reason: "cache refresh" });
+      }
+      writeCachedBundle(this.cacheKey(), result.bundle);
+    } catch (err) {
+      // The cached bundle is already serving; a failed warm-up only costs HMR,
+      // so surface it without tearing down a working app.
+      this.options.warn?.(`[${this.platform}] background rebuild failed: ${errText(err)}`);
     }
   }
 
@@ -383,6 +475,9 @@ export class BundlerSession {
       this.bundle = result.bundle;
       this.bundleVersion++;
       this.buildError = null;
+      // Persist after edits too, so the next wake starts warm at the CURRENT
+      // state rather than the state the process started from.
+      writeCachedBundle(this.cacheKey(), result.bundle);
 
       if (result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload) {
         this.emit({
