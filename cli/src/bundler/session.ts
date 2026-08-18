@@ -139,8 +139,11 @@ export class BundlerSession {
   buildError: string | null = null;
   private everBuilt = false;
   private buildingOnce: Promise<boolean> | null = null;
-  /** Serving a bundle restored from disk; a background build is warming HMR. */
+  /** Serving a bundle restored from disk (no module graph yet). */
   restoredFromCache = false;
+  /** The bundler holds a live module graph (needed for incremental rebuilds).
+   *  False after a cache-hit serve until the first edit forces a real build. */
+  private graphBuilt = false;
   private listeners = new Set<(e: SessionEvent) => void>();
 
   // nativewind: css path → compiled injectData module (virtualSource reads it).
@@ -374,18 +377,32 @@ export class BundlerSession {
     const key = this.cacheKey();
     const cached = readCachedBundle(key);
     if (cached && !this.everBuilt) {
+      // Serve the persisted bundle and STOP: no eager rebuild. The module
+      // graph (needed only for Fast Refresh) is built lazily on the first
+      // edit instead. This is what makes a scale-to-zero wake cost ~0 -- an
+      // unconditional background rebuild here burned a full build of CPU on
+      // every wake even when nobody would ever edit (and made --prewarm
+      // actively harmful: a scan coalesced onto that rebuild instead of the
+      // cache). The cache key already covers every input, so a hit means the
+      // bytes are current.
       this.bundle = cached;
       this.bundleVersion++;
       this.buildError = null;
+      this.everBuilt = true;
+      this.graphBuilt = false;
       this.restoredFromCache = true;
       this.options.warn?.(
-        `[${this.platform}] serving a cached bundle (${(cached.length / 1024).toFixed(0)} KB); rebuilding in the background for Fast Refresh`
+        `[${this.platform}] served a cached bundle (${(cached.length / 1024).toFixed(0)} KB); module graph builds lazily on first edit`
       );
-      void this.warmAfterCacheHit(cached);
       return true;
     }
+    return this.realBuild(key);
+  }
 
-    // First bundle should ship styles, so the initial compile is awaited.
+  /** Build from the current VFS, populating the module graph. Never serves the
+   *  cache -- callers use this when a live graph is required (a miss, or the
+   *  first edit after a cache-hit serve). */
+  private async realBuild(key: string): Promise<boolean> {
     if (this.options.nativewind && this.nativewindCss.size === 0) {
       await this.refreshNativewindCss();
     }
@@ -401,44 +418,14 @@ export class BundlerSession {
       this.bundleVersion++;
       this.buildError = null;
       this.everBuilt = true;
+      this.graphBuilt = true;
+      this.restoredFromCache = false;
       writeCachedBundle(key, result.bundle);
       return true;
     } catch (err) {
       this.buildError = errText(err);
       this.emit({ type: "build-error", message: this.buildError });
       return false;
-    }
-  }
-
-  /**
-   * After serving a cached bundle, do the real build so incremental rebuilds
-   * (Fast Refresh) have a module graph. Identical inputs should produce
-   * identical bytes; if they don't, the difference is real and clients are
-   * told to reload rather than left running stale code.
-   */
-  private async warmAfterCacheHit(served: string): Promise<void> {
-    try {
-      const entry = ensureEntryFile(this.vfs);
-      if (!entry) return;
-      if (this.options.nativewind && this.nativewindCss.size === 0) {
-        await this.refreshNativewindCss();
-      }
-      const result = await this.bundler.build(entry);
-      this.bundle = result.bundle;
-      this.restoredFromCache = false;
-      this.everBuilt = true;
-      if (result.bundle !== served) {
-        this.options.warn?.(
-          `[${this.platform}] rebuilt bundle differs from the cached one; reloading clients`
-        );
-        this.bundleVersion++;
-        this.emit({ type: "reload", bundleVersion: this.bundleVersion, reason: "cache refresh" });
-      }
-      writeCachedBundle(this.cacheKey(), result.bundle);
-    } catch (err) {
-      // The cached bundle is already serving; a failed warm-up only costs HMR,
-      // so surface it without tearing down a working app.
-      this.options.warn?.(`[${this.platform}] background rebuild failed: ${errText(err)}`);
     }
   }
 
@@ -461,10 +448,13 @@ export class BundlerSession {
     const all = ctxChange ? [...clientChanges, ctxChange] : clientChanges;
     if (all.length === 0) return;
 
-    // A project that never built (e.g. no entry yet, or a broken first build)
-    // retries a full build -- rebuild() needs prior graph state.
-    if (!this.everBuilt) {
-      const ok = await this.build();
+    // No live module graph yet -- never built, or served from cache and this is
+    // the first edit. A full build establishes the graph AND applies these
+    // changes (already written to the VFS above); only the first edit pays it,
+    // and subsequent edits are incremental. realBuild bypasses the cache serve
+    // so we get a real graph rather than the cached bytes again.
+    if (!this.everBuilt || !this.graphBuilt) {
+      const ok = await this.realBuild(this.cacheKey());
       if (ok) this.emit({ type: "reload", bundleVersion: this.bundleVersion, reason: "initial build" });
       return;
     }

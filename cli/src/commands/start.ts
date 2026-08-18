@@ -11,6 +11,7 @@ import { startServer, getLanIp, type ServerContext } from "../server/server.js";
 import { createLogger } from "../ui/logger.js";
 import { printStartupBanner, attachInteractiveKeys } from "../ui/interactive.js";
 import { createCachedFetch } from "../project/pkg-cache.js";
+import { warnIfEphemeralCache, bundleCacheDir, BUNDLE_CACHE_ENV } from "../bundler/bundle-cache.js";
 import { createRequire } from "node:module";
 
 export interface StartOptions {
@@ -67,6 +68,10 @@ export async function startCommand(options: StartOptions): Promise<void> {
   const { files, skippedLarge, assetMeta } = scanProject(rootDir);
   for (const p of skippedLarge) log.warn(`Skipped large file (>2MB): ${p}`);
   log.info(`Scanned ${Object.keys(files).length} files in ${Math.round(performance.now() - scanStart)}ms`);
+
+  // Under gVisor/read-only rootfs the default cache is on the ephemeral
+  // writable layer and never survives a wake -- warn so it can be redirected.
+  warnIfEphemeralCache(bundleCacheDir(), BUNDLE_CACHE_ENV, log.warn);
 
   const webNw = detectNativewind(new VirtualFS(files));
   if (webNw.reason) log.warn(`[nativewind] ${webNw.reason}`);
