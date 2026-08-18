@@ -74,6 +74,18 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
     if (platform !== "web") {
       const native = ctx.getPlatformSession ? await ctx.getPlatformSession(platform) : null;
       if (!native) {
+        const reason = ctx.getPlatformError?.(platform);
+        if (reason) {
+          // Metro-shaped error body: Expo Go renders it as a redbox with the
+          // message, instead of the app silently misbehaving later.
+          sendText(res, 500, "application/json", JSON.stringify({
+            type: "TransformError",
+            name: "BuildError",
+            message: reason,
+            errors: [{ description: reason }],
+          }));
+          return;
+        }
         sendText(
           res,
           501,
