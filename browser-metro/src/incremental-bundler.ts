@@ -419,14 +419,27 @@ export class IncrementalBundler {
     const baseUrl = this.config.server.packageServerUrl;
     const doFetch = this.config.server.fetch ?? fetch;
 
-    // Native cold builds can exceed both fetch's header timeout AND a CDN's
-    // origin timeout (Cloudflare 524 is a RESPONSE, not a thrown error) while
-    // the server keeps building. Poll the GET (which serves the cache)
-    // instead of falling straight back to individual fetches -- those rebuild
-    // RN internals in separate contexts (duplicate singletons).
-    const pollForBuild = async (): Promise<boolean> => {
-      for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, 15000));
+    // A cold build can outlast every timeout between us and the builder:
+    // fetch's own header timeout, a CDN's origin timeout (Cloudflare 524), and
+    // any reverse proxy in between (an nginx cache with the default 60s
+    // proxy_read_timeout returns 504 while the origin is still compiling --
+    // observed in production). All of those mean "unknown, possibly still
+    // building", so POLL THE GET rather than re-POSTing (a fresh POST
+    // restarts the wait and multiplies upstream work) and rather than falling
+    // back to individual fetches (those rebuild RN internals in separate
+    // esbuild contexts -- duplicate singletons, fatal on native).
+    //
+    // Deliberately NOT retried this way: a 500, which is the origin itself
+    // reporting the build threw. GET will 404 forever, so polling only stalls.
+    const GATEWAY_STATUSES = new Set([408, 425, 429, 502, 503, 504, 524]);
+    const pollForBuild = async (budgetMs: number): Promise<boolean> => {
+      const deadline = Date.now() + budgetMs;
+      // Short first check: if a proxy hung up at 60s the build may already be
+      // done, and a 15s blind wait is pure latency.
+      let delay = 3000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, 15000);
         try {
           const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
           if (poll.ok) {
@@ -440,6 +453,16 @@ export class IncrementalBundler {
       }
       return false;
     };
+    // Native cold builds legitimately run for minutes (RN core + 40 deps);
+    // web dep sets are far smaller, so a shorter budget keeps a genuinely
+    // unbuildable web set falling back to individual fetches quickly.
+    const pollBudgetMs = platform ? 10 * 60_000 : 90_000;
+
+    // A request that dies in milliseconds is an unreachable server (offline,
+    // wrong URL, connection refused), NOT a build in progress -- polling there
+    // just stalls startup, so the throw path requires real elapsed time first.
+    const MIN_ELAPSED_TO_POLL_MS = 5000;
+    const started = Date.now();
 
     try {
       const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
@@ -464,15 +487,19 @@ export class IncrementalBundler {
         this.prefetchedPackages = packages;
         return;
       }
-      if (platform) {
-        console.warn(`[prefetch] POST returned HTTP ${postRes.status}; polling for server-side build to finish`);
-        if (await pollForBuild()) return;
+      if (GATEWAY_STATUSES.has(postRes.status)) {
+        console.warn(
+          `[prefetch] POST returned HTTP ${postRes.status} (gateway/timeout -- the build may still be running upstream); polling GET /bundle-deps/${hash}`
+        );
+        if (await pollForBuild(pollBudgetMs)) return;
       }
       console.warn(`[prefetch] Failed (HTTP ${postRes.status}), falling back to individual fetches`);
     } catch (err) {
-      if (platform) {
-        console.warn("[prefetch] request failed; polling for server-side build to finish:", err);
-        if (await pollForBuild()) return;
+      // A thrown fetch error after a long wait is also "unknown": the request
+      // died in transit while the server may well still be building.
+      if (Date.now() - started > MIN_ELAPSED_TO_POLL_MS) {
+        console.warn("[prefetch] request failed after a long wait; polling for server-side build to finish:", err);
+        if (await pollForBuild(pollBudgetMs)) return;
       }
       console.warn("[prefetch] Failed, falling back to individual fetches:", err);
     }

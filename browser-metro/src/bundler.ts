@@ -76,6 +76,38 @@ export class Bundler {
     const baseUrl = this.config.server.packageServerUrl;
     const doFetch = this.config.server.fetch ?? fetch;
 
+    // See IncrementalBundler.prefetchDeps for the full rationale: a gateway
+    // timeout (proxy 504 / CDN 524) or a thrown request means "unknown,
+    // possibly still building" -- poll the GET instead of re-POSTing or
+    // falling back to individual fetches. A 500 is the origin reporting a
+    // failed build, so it falls back immediately.
+    const GATEWAY_STATUSES = new Set([408, 425, 429, 502, 503, 504, 524]);
+    const pollBudgetMs = platform ? 10 * 60_000 : 90_000;
+    const pollForBuild = async (): Promise<boolean> => {
+      const deadline = Date.now() + pollBudgetMs;
+      let delay = 3000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, 15000);
+        try {
+          const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
+          if (poll.ok) {
+            const { packages } = parseDepBundle(await poll.text());
+            this.prefetchedPackages = packages;
+            return true;
+          }
+        } catch {
+          // keep polling
+        }
+      }
+      return false;
+    };
+
+    // A request that dies in milliseconds is an unreachable server, not a
+    // build in progress -- see IncrementalBundler.
+    const MIN_ELAPSED_TO_POLL_MS = 5000;
+    const started = Date.now();
+
     try {
       // Try GET first (CDN cacheable)
       const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
@@ -101,28 +133,18 @@ export class Bundler {
         this.prefetchedPackages = packages;
         return;
       }
-    } catch (err) {
-      // Native cold builds can exceed fetch's 300s header timeout while the
-      // server keeps building. Poll the GET (which serves the cache) instead
-      // of falling straight back to individual fetches -- those rebuild RN
-      // internals in separate contexts (duplicate singletons).
-      if (platform) {
-        console.warn("[prefetch] request failed; polling for server-side build to finish:", err);
-        for (let i = 0; i < 40; i++) {
-          await new Promise((r) => setTimeout(r, 15000));
-          try {
-            const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
-            if (poll.ok) {
-              const { packages } = parseDepBundle(await poll.text());
-              this.prefetchedPackages = packages;
-              return;
-            }
-          } catch {
-            // keep polling
-          }
-        }
+      if (GATEWAY_STATUSES.has(postRes.status)) {
+        console.warn(
+          `[prefetch] POST returned HTTP ${postRes.status} (gateway/timeout); polling GET /bundle-deps/${hash}`
+        );
+        if (await pollForBuild()) return;
       }
-      // Silently fall back to individual fetches
+      console.warn(`[prefetch] Failed (HTTP ${postRes.status}), falling back to individual fetches`);
+    } catch (err) {
+      if (Date.now() - started > MIN_ELAPSED_TO_POLL_MS) {
+        console.warn("[prefetch] request failed after a long wait; polling for server-side build to finish:", err);
+        if (await pollForBuild()) return;
+      }
       console.warn("[prefetch] Failed, falling back to individual fetches:", err);
     }
   }
