@@ -728,6 +728,24 @@ const NATIVE_TOOL_STUBS = new Set([
 ]);
 
 async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, baseUrl?: string, platform: BuildPlatform = "web") {
+	// browser-metro's overrideModules hook keeps the real module reachable under
+	// a synthetic "<name>__original" key so a wrapper can delegate to it. That
+	// key is CLIENT-side bookkeeping and must never reach us -- but when the
+	// client's module map doesn't already hold the wrapped package, its
+	// transitive scan treats the synthetic name as an npm specifier and fetches
+	// it. Resolution then fails here, esbuild externalises the base package, and
+	// we serve a ~1KB stub instead of the module: on device the first JSX call
+	// throws "Cannot read property 'call' of undefined" and the app renders
+	// blank with no redbox. Three production projects hit exactly this.
+	//
+	// The client's intent is unambiguous -- it wants the original module -- so
+	// serve it. This repairs already-deployed clients that cannot be rolled
+	// forward, and stays harmless once they stop asking.
+	if (subpath.endsWith("__original")) {
+		const real = subpath.slice(0, -"__original".length);
+		console.log(`[pkg] serving ${pkgName}${real} for synthetic ${pkgName}${subpath}${platform === "web" ? "" : ` [${platform}]`}`);
+		subpath = real;
+	}
 	const requireSpecifier = pkgName + subpath;
 	const platLabel = platform === "web" ? "" : ` [${platform}]`;
 
