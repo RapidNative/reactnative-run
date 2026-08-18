@@ -12,7 +12,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, NATIVE_DEPS_VERSION } from "./utils.js";
 import { formatTransformError } from "./transform-error.js";
 import type {
   BundlerConfig,
@@ -522,13 +522,20 @@ export class IncrementalBundler {
       return { code: lowerDynamicImports(this.prefetchedPackages[baseName]), externals: {} };
     }
 
-    // Fallback to individual fetch
+    // Fallback to individual fetch.
+    //
+    // nv=<NATIVE_DEPS_VERSION> on native URLs: /pkg responses are served as
+    // immutable (CDN + the CLI's disk cache), but their BYTES change whenever
+    // server-side native bundling changes -- so without a version in the URL
+    // every cache layer keeps serving pre-fix chunks and a server fix reaches
+    // nobody without manual purges. Web URLs stay untouched (byte-identical
+    // cache-key invariant).
     const nativePlat = this.nativePlatform();
     const url =
       this.config.server.packageServerUrl +
       "/pkg/" +
       specifier +
-      (nativePlat ? "?platform=" + nativePlat : "");
+      (nativePlat ? "?platform=" + nativePlat + "&nv=" + NATIVE_DEPS_VERSION : "");
     const res = await (this.config.server.fetch ?? fetch)(url);
     if (!res.ok) {
       const body = await res.text().catch(() => "");

@@ -4,7 +4,7 @@ import { scanProject } from "../project/scan.js";
 import { watchProject } from "../project/watch.js";
 import { loadProjectConfig } from "../project/config.js";
 import { BundlerSession } from "../bundler/session.js";
-import { VirtualFS } from "browser-metro";
+import { VirtualFS, NATIVE_DEPS_VERSION } from "browser-metro";
 import { detectNativewind } from "../project/nativewind.js";
 import { resolveWorkletsPlugin } from "../bundler/worklets.js";
 import { startServer, getLanIp, type ServerContext } from "../server/server.js";
@@ -299,7 +299,7 @@ async function fetchMetroPrelude(
   if (!rnVersion) return undefined;
   try {
     const res = await doFetch(
-      `${packageServerUrl}/prelude/${encodeURIComponent(rnVersion)}`,
+      `${packageServerUrl}/prelude/${encodeURIComponent(rnVersion)}?nv=${NATIVE_DEPS_VERSION}`,
       { signal: AbortSignal.timeout(180_000) }
     );
     if (res.ok) {

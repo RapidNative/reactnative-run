@@ -5,7 +5,7 @@ import type esbuild from "esbuild";
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
 export const SERVER_VERSION = "8";
 // Must stay equal to NATIVE_DEPS_VERSION in browser-metro/src/utils.ts.
-export const NATIVE_DEPS_VERSION = "2";
+export const NATIVE_DEPS_VERSION = "3";
 
 // ============================================================
 // Platform dimension (web | ios | android)
@@ -49,7 +49,13 @@ export function cacheKeyFor(pkgName: string, version: string, subpath: string, p
 	// PLATFORM: appended ONLY for non-web platforms, so every existing web key
 	// (the entire production cache) is untouched. Native entries live in a new
 	// key namespace (e.g. "react-native@0.81.4.ios.js") from day one.
-	const plat = platform && platform !== "web" ? `.${platform}` : "";
+	// NATIVE_DEPS_VERSION rides along on native keys only: native bundling logic
+	// changes the BYTES for an unchanged package@version (worklets pass, loose
+	// class fields, ...), and per-package entries are otherwise served forever.
+	// Bumping the version mints a fresh native namespace; the web namespace --
+	// and the ~12GB of production web cache behind it -- is untouched, which is
+	// exactly the blunt-instrument problem described above.
+	const plat = platform && platform !== "web" ? `.${platform}.nv${NATIVE_DEPS_VERSION}` : "";
 	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}${plat}`;
 }
 

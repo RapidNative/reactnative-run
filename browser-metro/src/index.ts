@@ -5,6 +5,7 @@ export { Resolver, platformSourceExts } from "./resolver.js";
 export { DependencyGraph } from "./dependency-graph.js";
 export { ModuleCache } from "./module-cache.js";
 export { typescriptTransformer, createTypescriptTransformer } from "./transforms/typescript.js";
+export { NATIVE_DEPS_VERSION } from "./utils.js";
 export {
   reactRefreshTransformer,
   metroReactRefreshTransformer,
