@@ -9,6 +9,11 @@ const START_FLAGS: FlagSpec[] = [
   { name: "--local-packages", type: "boolean", default: false, description: "Use/spawn a local reactnative-esm on :5200" },
   { name: "--host", type: "string", default: "lan", description: "Bind address: lan or localhost" },
   { name: "--quiet", type: "boolean", default: false, description: "Suppress non-error output" },
+  {
+    name: "--prewarm",
+    type: "string",
+    description: 'Build native bundles at startup instead of on first device request, e.g. "ios" or "ios,android" (env: RNRUN_PREWARM)',
+  },
 ];
 
 const BUNDLE_FLAGS: FlagSpec[] = [
@@ -47,6 +52,7 @@ async function main(): Promise<void> {
       localPackages: parsed.flags.localPackages as boolean,
       host: parsed.flags.host as string,
       quiet: parsed.flags.quiet as boolean,
+      prewarm: (parsed.flags.prewarm as string | undefined) ?? process.env.RNRUN_PREWARM,
     });
     return;
   }

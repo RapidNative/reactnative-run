@@ -61,6 +61,9 @@ export function sendText(res: ServerResponse, status: number, type: string, body
     "Content-Type": type,
     "Cache-Control": "no-cache",
     "Access-Control-Allow-Origin": "*",
+    // Explicit length rather than chunked: clients that show download
+    // progress (Expo Go's loading screen, browser devtools) need a total.
+    "Content-Length": Buffer.byteLength(body),
   });
   res.end(body);
 }
