@@ -445,6 +445,7 @@ export class IncrementalBundler {
           if (poll.ok) {
             const { packages } = parseDepBundle(await poll.text());
             this.prefetchedPackages = packages;
+            log?.(`Dependency bundle ready (${Object.keys(packages).length} packages, ${secs()}s)`);
             return true;
           }
         } catch {
@@ -463,6 +464,23 @@ export class IncrementalBundler {
     // just stalls startup, so the throw path requires real elapsed time first.
     const MIN_ELAPSED_TO_POLL_MS = 5000;
     const started = Date.now();
+    const log = this.config.log;
+    const secs = () => Math.round((Date.now() - started) / 1000);
+    // A cold combined build of a native dep set runs for minutes on the
+    // server. Announce it and tick, so the caller isn't staring at silence.
+    let ticker: ReturnType<typeof setInterval> | undefined;
+    const announceBuild = (count: number): void => {
+      if (!log) return;
+      log(
+        `Building dependency bundle for ${count} packages on the package server -- ` +
+          `first run for this dependency set, this can take a few minutes ...`
+      );
+      ticker = setInterval(() => log(`  ... still building on the package server (${secs()}s elapsed)`), 20_000);
+    };
+    const stopTicker = (): void => {
+      if (ticker !== undefined) clearInterval(ticker);
+      ticker = undefined;
+    };
 
     try {
       const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
@@ -472,6 +490,7 @@ export class IncrementalBundler {
         return;
       }
 
+      announceBuild(Object.keys(versions).length);
       const postRes = await doFetch(`${baseUrl}/bundle-deps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -485,6 +504,7 @@ export class IncrementalBundler {
       if (postRes.ok) {
         const { packages } = parseDepBundle(await postRes.text());
         this.prefetchedPackages = packages;
+        log?.(`Dependency bundle ready (${Object.keys(packages).length} packages, ${secs()}s)`);
         return;
       }
       if (GATEWAY_STATUSES.has(postRes.status)) {
@@ -502,6 +522,8 @@ export class IncrementalBundler {
         if (await pollForBuild(pollBudgetMs)) return;
       }
       console.warn("[prefetch] Failed, falling back to individual fetches:", err);
+    } finally {
+      stopTicker();
     }
   }
 

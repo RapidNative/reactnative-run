@@ -189,6 +189,7 @@ export class BundlerSession {
           ? (p: string) => this.nativewindCss.get(p)
           : undefined,
         server: { packageServerUrl: this.options.packageServerUrl, fetch: this.options.fetch },
+      log: this.options.warn,
         // hmr.enabled makes rebuilds produce HmrUpdate payloads (raw module
         // bodies in metro format); the emitter itself ignores this flag.
         hmr: { enabled: !!this.options.metroPrelude },
@@ -227,6 +228,7 @@ export class BundlerSession {
         ? (p: string) => this.nativewindCss.get(p)
         : undefined,
       server: { packageServerUrl: this.options.packageServerUrl, fetch: this.options.fetch },
+      log: this.options.warn,
       hmr: { enabled: true, reactRefresh: hasReact },
       plugins: [
         ...(hasReact ? [injectReactPlugin] : []),

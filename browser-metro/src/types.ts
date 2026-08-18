@@ -91,6 +91,13 @@ export interface BundlerConfig {
     /** Custom fetch (e.g. the CLI's disk-cached fetch). Defaults to global fetch. */
     fetch?: typeof fetch;
   };
+  /**
+   * Progress messages for long-running work the caller can't otherwise see --
+   * chiefly a cold dependency-bundle build on the package server, which takes
+   * minutes for a large native dep set. Without this the host (rnrun) prints
+   * nothing for the whole build and it reads as a hang.
+   */
+  log?: (msg: string) => void;
   hmr?: { enabled: boolean; reactRefresh?: boolean };
   plugins?: BundlerPlugin[];
   env?: Record<string, string>;
