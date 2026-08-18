@@ -362,8 +362,9 @@ export function hashString(str: string): string {
 // Must match SERVER_VERSION in reactnative-esm/src/index.ts
 const DEPS_HASH_VERSION = "8";
 // Native-only bundle-format version; folded into non-web hashes (see hashDeps).
-// History: 2 = server-side worklets babel pass (PR #48).
-const NATIVE_DEPS_VERSION = "2";
+// History: 2 = server-side worklets babel pass (PR #48);
+//          3 = loose class fields for Metro parity (PR #55).
+export const NATIVE_DEPS_VERSION = "3";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it

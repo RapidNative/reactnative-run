@@ -326,8 +326,42 @@ const patchUpstreamBugsPlugin: esbuild.Plugin = {
  * correct per-iteration capture. One parse per chunk, once per package
  * version, then cached.
  */
+/**
+ * Metro parity for class FIELDS.
+ *
+ * esbuild lowers `class { field = v }` with spec semantics: its
+ * `__defNormalProp` helper does `key in obj ? Object.defineProperty(...) :
+ * obj[key] = v`. Metro compiles the whole RN ecosystem with
+ * @react-native/babel-preset, which enables LOOSE class fields
+ * (setPublicClassFields), i.e. a plain `this.field = v` assignment.
+ *
+ * The difference is not academic: a field that shadows an inherited
+ * writable-but-non-configurable property (or any property `[[Define]]`
+ * rejects) throws "property is not configurable" under the spec path while
+ * the loose assignment succeeds. RN's own VirtualizedList hits exactly this
+ * on device, so an app using FlatList redboxes under esbuild output but works
+ * under Metro. Rewrite the helper to the loose form to match.
+ *
+ * Anchored on esbuild's exact helper text; if that ever changes shape we log
+ * and ship the original rather than silently mangling the chunk.
+ */
+const ESBUILD_DEFNORMALPROP_RE =
+	/var __defNormalProp = \(obj, key, value\) => key in obj \? __defProp\(obj, key, \{[^}]*\}\) : obj\[key\] = value;/;
+function looseClassFields(code: string, label: string): string {
+	if (!code.includes("__defNormalProp")) return code;
+	if (!ESBUILD_DEFNORMALPROP_RE.test(code)) {
+		console.warn(`[loose-class-fields] helper shape not recognised in ${label}; leaving spec semantics in place`);
+		return code;
+	}
+	return code.replace(
+		ESBUILD_DEFNORMALPROP_RE,
+		"var __defNormalProp = (obj, key, value) => (obj[key] = value);"
+	);
+}
+
 async function lowerClassesForHermes(code: string, platform: BuildPlatform): Promise<string> {
 	if (platform === "web") return code;
+	code = looseClassFields(code, "native chunk");
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	const babel = require("@babel/core") as typeof import("@babel/core");
 	const result = await babel.transformAsync(code, {

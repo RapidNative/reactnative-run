@@ -104,6 +104,10 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
       "Cache-Control": "no-cache",
       "Access-Control-Allow-Origin": "*",
       "X-Metro-Files-Changed-Count": "0",
+      // Content-Length (not chunked): Expo Go's loading screen computes its
+      // download percentage from the total size, so without this the device
+      // just says "Downloading..." with no progress. Metro sends it too.
+      "Content-Length": Buffer.byteLength(session.getBundle()),
     });
     res.end(session.getBundle());
   });

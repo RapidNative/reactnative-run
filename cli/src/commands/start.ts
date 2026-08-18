@@ -4,7 +4,7 @@ import { scanProject } from "../project/scan.js";
 import { watchProject } from "../project/watch.js";
 import { loadProjectConfig } from "../project/config.js";
 import { BundlerSession } from "../bundler/session.js";
-import { VirtualFS } from "browser-metro";
+import { VirtualFS, NATIVE_DEPS_VERSION } from "browser-metro";
 import { detectNativewind } from "../project/nativewind.js";
 import { resolveWorkletsPlugin } from "../bundler/worklets.js";
 import { startServer, getLanIp, type ServerContext } from "../server/server.js";
@@ -19,6 +19,17 @@ export interface StartOptions {
   localPackages: boolean;
   host: string;
   quiet: boolean;
+  /**
+   * Comma-separated platforms to build at startup instead of lazily on the
+   * first device request ("ios", "android", "ios,android").
+   *
+   * Lazy is right for local development: a web-only session shouldn't pay for
+   * a native build. It is wrong for a hosted preview container, where the
+   * container starts, idles, and only then does someone scan the QR -- they
+   * wait out the whole cold build, and a device that times out looks broken
+   * (retry-until-it-works). Pre-warming moves that build into the idle time.
+   */
+  prewarm?: string;
 }
 
 export const DEFAULT_PACKAGE_SERVER = "https://esm.reactnative.run";
@@ -153,6 +164,21 @@ export async function startCommand(options: StartOptions): Promise<void> {
     }
   });
 
+  // Pre-warm requested native platforms so a device that scans later gets a
+  // cached bundle instead of waiting out a cold build. Fire-and-forget: build
+  // errors are already logged by the session and a failed pre-warm must not
+  // stop the server (the device request will retry the build).
+  const prewarmList = (options.prewarm ?? "")
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter((p) => p === "ios" || p === "android");
+  if (prewarmList.length > 0) {
+    log.info(`Pre-warming ${prewarmList.join(", ")} bundle(s) ...`);
+    for (const platform of prewarmList) {
+      void ctx.getPlatformSession?.(platform);
+    }
+  }
+
   const watcher = watchProject({
     rootDir,
     vfsHas: (p) => session.getVfs().exists(p),
@@ -273,7 +299,7 @@ async function fetchMetroPrelude(
   if (!rnVersion) return undefined;
   try {
     const res = await doFetch(
-      `${packageServerUrl}/prelude/${encodeURIComponent(rnVersion)}`,
+      `${packageServerUrl}/prelude/${encodeURIComponent(rnVersion)}?nv=${NATIVE_DEPS_VERSION}`,
       { signal: AbortSignal.timeout(180_000) }
     );
     if (res.ok) {

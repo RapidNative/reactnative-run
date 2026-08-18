@@ -15,6 +15,7 @@ import {
 	esbuildPlatformSettings,
 	rnEsbuildSettings,
 	blankedPlatformsRe,
+	NATIVE_DEPS_VERSION,
 } from "../src/platform";
 
 test("normalizePlatform: anything unknown is web", () => {
@@ -40,12 +41,24 @@ test("hashDepsServer: web hash is byte-identical to the historical v8 input", ()
 });
 
 test("cacheKeyFor: web keys unchanged, native keys suffixed", () => {
+	// WEB KEYS ARE FROZEN: the production cache (~12GB) is addressed by these
+	// exact strings. This assertion must never need updating.
 	assert.equal(cacheKeyFor("react-native", "0.81.4", ""), "react-native@0.81.4");
 	assert.equal(cacheKeyFor("react-native", "0.81.4", "", "web"), "react-native@0.81.4");
-	assert.equal(cacheKeyFor("react-native", "0.81.4", "", "ios"), "react-native@0.81.4.ios");
+
+	// Native keys carry platform + NATIVE_DEPS_VERSION. The version is expected
+	// to change (each bump mints a fresh native namespace when bundling logic
+	// changes native bytes), so assert the shape, not a frozen string.
+	const nv = NATIVE_DEPS_VERSION;
+	assert.equal(cacheKeyFor("react-native", "0.81.4", "", "ios"), `react-native@0.81.4.ios.nv${nv}`);
 	assert.equal(
 		cacheKeyFor("@react-native/assets-registry", "0.81.4", "/registry", "android"),
-		"@react-native__assets-registry@0.81.4__registry.android",
+		`@react-native__assets-registry@0.81.4__registry.android.nv${nv}`,
+	);
+	// A native key must never collide with the web key for the same package.
+	assert.notEqual(
+		cacheKeyFor("react-native", "0.81.4", "", "ios"),
+		cacheKeyFor("react-native", "0.81.4", "", "web"),
 	);
 });
 
