@@ -439,23 +439,64 @@ const stubNodeBuiltinsPlugin: esbuild.Plugin = {
 const WORKLET_HINT_RE = /['"]worklet['"]/;
 function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
 	// Per-directory-tree plugin resolution cache (one entry per tmpdir).
-	const pluginPathCache = new Map<string, string | null>();
-	const resolvePlugin = (fromFile: string): string | null => {
-		// Find the install root (the path segment before node_modules).
-		const idx = fromFile.lastIndexOf(`node_modules${path.sep}`);
-		if (idx === -1) return null;
-		const root = fromFile.slice(0, idx);
-		if (pluginPathCache.has(root)) return pluginPathCache.get(root)!;
-		let resolved: string | null = null;
+	const pluginPathCache = new Map<string, Promise<string | null>>();
+	const resolveNow = (root: string): string | null => {
 		for (const spec of ["react-native-worklets/plugin", "react-native-reanimated/plugin"]) {
 			try {
-				resolved = require.resolve(spec, { paths: [root] });
-				break;
+				const resolved = require.resolve(spec, { paths: [root] });
+				// Must actually LOAD: reanimated 4.x ships a plugin/ shim that
+				// re-exports react-native-worklets/plugin -- it resolves even when
+				// the worklets peer is missing, then explodes inside babel.
+				require(resolved);
+				return resolved;
 			} catch { /* try next */ }
 		}
-		if (!resolved) console.warn(`[worklets] plugin not resolvable from ${root}; worklet files ship untransformed`);
-		pluginPathCache.set(root, resolved);
-		return resolved;
+		return null;
+	};
+	const resolvePlugin = (fromFile: string): Promise<string | null> => {
+		// Find the install root (the path segment before node_modules).
+		const idx = fromFile.lastIndexOf(`node_modules${path.sep}`);
+		if (idx === -1) return Promise.resolve(null);
+		const root = fromFile.slice(0, idx);
+		let cached = pluginPathCache.get(root);
+		if (!cached) {
+			cached = (async () => {
+				let resolved = resolveNow(root);
+				if (!resolved) {
+					// Standalone /pkg builds install with --legacy-peer-deps, which
+					// skips react-native-worklets (reanimated's peer). WITHOUT the
+					// plugin the chunk ships unworkletized and crashes at runtime
+					// ("Failed to create a worklet"), so failing the build would be
+					// better than skipping -- but installing the peer fixes it.
+					const range = (() => {
+						try {
+							const pkg = JSON.parse(
+								fs.readFileSync(path.join(root, "node_modules", "react-native-reanimated", "package.json"), "utf8")
+							);
+							return pkg.peerDependencies?.["react-native-worklets"] || "latest";
+						} catch {
+							return "latest";
+						}
+					})();
+					console.log(`[worklets] installing react-native-worklets@${range} into build root for the babel plugin`);
+					try {
+						await execAsync(`npm install 'react-native-worklets@${range}' --no-save --no-audit --no-fund`, {
+							cwd: root,
+							killSignal: "SIGKILL",
+							timeout: 120000,
+							maxBuffer: 16 * 1024 * 1024,
+						});
+						resolved = resolveNow(root);
+					} catch (err) {
+						console.warn(`[worklets] peer install failed: ${(err as Error).message.slice(0, 200)}`);
+					}
+				}
+				if (!resolved) console.warn(`[worklets] plugin not resolvable from ${root}; worklet files ship untransformed`);
+				return resolved;
+			})();
+			pluginPathCache.set(root, cached);
+		}
+		return cached;
 	};
 	return {
 		name: "workletize",
@@ -464,7 +505,7 @@ function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
 			build.onLoad({ filter: /node_modules[/\\](react-native-reanimated|react-native-worklets)[/\\].*\.[cm]?[jt]sx?$/ }, async (args) => {
 				const src = await fs.promises.readFile(args.path, "utf8");
 				if (!WORKLET_HINT_RE.test(src)) return undefined;
-				const pluginPath = resolvePlugin(args.path);
+				const pluginPath = await resolvePlugin(args.path);
 				if (!pluginPath) return undefined;
 				const ext = args.path.slice(args.path.lastIndexOf(".") + 1).replace(/^[cm]/, "");
 				const parserPlugins: ("typescript" | "jsx" | "flow")[] =
@@ -660,9 +701,41 @@ function serveCached(res: Response, cacheFile: string, externalsFile: string, la
 	return true;
 }
 
+// Node-side build tooling that RN app code can transitively reference (e.g.
+// nativewind's exports pull @expo/metro-config) but that can NEVER run under
+// Hermes. Attempting to bundle them costs an npm install + a guaranteed
+// esbuild failure per request; native gets an immediate cacheable stub
+// instead. Web is untouched (historical behavior preserved).
+const NATIVE_TOOL_STUBS = new Set([
+	"metro",
+	"metro-config",
+	"metro-core",
+	"metro-cache",
+	"metro-resolver",
+	"metro-transform-worker",
+	"@expo/metro-config",
+	"@expo/cli",
+	"@react-native/metro-config",
+	"babel-plugin-module-resolver",
+	"@babel/core",
+	"lightningcss",
+	"postcss",
+	"autoprefixer",
+]);
+
 async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, baseUrl?: string, platform: BuildPlatform = "web") {
 	const requireSpecifier = pkgName + subpath;
 	const platLabel = platform === "web" ? "" : ` [${platform}]`;
+
+	if (platform !== "web" && NATIVE_TOOL_STUBS.has(pkgName)) {
+		console.log(`[tool stub] ${requireSpecifier}${platLabel}`);
+		res.header("Cache-Control", "public, max-age=31536000, immutable");
+		res.header("X-Externals", "{}");
+		res.type("application/javascript").send(
+			`// ${requireSpecifier}: Node-side build tooling, stubbed on ${platform}\nmodule.exports = {};\n`
+		);
+		return;
+	}
 
 	// 1. Check exact cache (works for exact versions like "6.0.12")
 	const exactKey = cacheKeyFor(pkgName, version, subpath, platform);
@@ -691,6 +764,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "pkg-tmp", version: "1.0.0" }));
 		await execAsync(`npm install '${pkgName}@${version}' --legacy-peer-deps --no-audit --no-fund`, {
 			cwd: tmpDir,
+			killSignal: "SIGKILL",
 			timeout: 180000,
 			maxBuffer: 16 * 1024 * 1024,
 		});
@@ -978,6 +1052,9 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
 const BUNDLE_DEPS_PREFIX = "bundle-deps-";
 
+// depHash -> promise of the currently-running combined build (see POST /bundle-deps).
+const inflightBundleBuilds = new Map<string, Promise<void>>();
+
 
 // ============================================================
 // GET /prelude/:rnVersion - metro-runtime require.js for native bundles
@@ -1007,7 +1084,8 @@ app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 		// Which metro-runtime does this RN pin?
 		const { stdout } = await execAsync(
 			`npm view react-native@${rnVersion} dependencies.metro-runtime`,
-			{ timeout: 30000 }
+			{ killSignal: "SIGKILL",
+			timeout: 30000 }
 		);
 		const range = stdout.trim() || "latest";
 
@@ -1016,7 +1094,8 @@ app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "prelude-tmp", version: "1.0.0" }));
 			await execAsync(`npm install 'metro-runtime@${range}' --no-audit --no-fund`, {
 				cwd: tmpDir,
-				timeout: 120000,
+				killSignal: "SIGKILL",
+			timeout: 120000,
 				maxBuffer: 16 * 1024 * 1024,
 			});
 			const requireJs = fs.readFileSync(
@@ -1166,7 +1245,8 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 			);
 			await execAsync(`npm install --legacy-peer-deps --no-audit --no-fund`, {
 				cwd: envDir,
-				timeout: 180000,
+				killSignal: "SIGKILL",
+			timeout: 180000,
 				maxBuffer: 16 * 1024 * 1024,
 			});
 		}
@@ -1197,7 +1277,8 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 			const t = Date.now();
 			const { stdout } = await execAsync(
 				`node runner.cjs ${JSON.stringify(workdir)} ${platform}`,
-				{ cwd: envDir, timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
+				{ cwd: envDir, killSignal: "SIGKILL",
+			timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
 			);
 			const data = JSON.parse(stdout);
 			console.log(`[nativewind] compiled ${inputHash} (${platform}) in ${Date.now() - t}ms`);
@@ -1268,6 +1349,34 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		return;
 	}
 
+	// In-flight dedup: a client retrying its POST (CDN 504, network blip) must
+	// join the running build for this hash, not spawn a duplicate ~3-minute
+	// build that doubles server load.
+	const inflight = inflightBundleBuilds.get(depHash);
+	if (inflight) {
+		console.log(`[bundle-deps] joining in-flight build (hash: ${depHash})`);
+		try {
+			await inflight;
+		} catch {
+			/* the original build failed; fall through to the cache check */
+		}
+		if (fs.existsSync(cacheFile)) {
+			res.header("Cache-Control", "public, max-age=31536000, immutable");
+			res.type("application/javascript").sendFile(cacheFile);
+		} else {
+			res.header("Cache-Control", "no-store").status(500).json({ error: "bundle build failed (in-flight)" });
+		}
+		return;
+	}
+	let resolveInflight!: () => void;
+	let rejectInflight!: (err: unknown) => void;
+	const inflightPromise = new Promise<void>((res2, rej2) => {
+		resolveInflight = res2;
+		rejectInflight = rej2;
+	});
+	inflightPromise.catch(() => {}); // observed by joiners; avoid unhandled rejection
+	inflightBundleBuilds.set(depHash, inflightPromise);
+
 	console.log(`[bundle-deps] Building for ${Object.keys(dependencies).length} deps (hash: ${depHash})`);
 	const buildStart = Date.now();
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-deps-"));
@@ -1298,7 +1407,8 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					cwd: tmpDir,
 					// Native dep sets include react-native itself (~40MB of tarballs);
 					// 120s was too tight on a cold bun cache.
-					timeout: 300000,
+					killSignal: "SIGKILL",
+			timeout: 300000,
 					maxBuffer: 16 * 1024 * 1024,
 				});
 				installed = true;
@@ -1346,7 +1456,8 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 						const npmArgs = Object.entries(workingDeps).map(([n, v]) => `'${n}@${v}'`).join(" ");
 						await execAsync(`npm install ${npmArgs} --legacy-peer-deps --no-audit --no-fund`, {
 							cwd: tmpDir,
-							timeout: 420000,
+							killSignal: "SIGKILL",
+			timeout: 420000,
 							maxBuffer: 16 * 1024 * 1024,
 						});
 						installed = true;
@@ -1735,13 +1846,16 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 
 		res.header("Cache-Control", "public, max-age=31536000, immutable");
 		res.type("application/javascript").send(bundle);
+		resolveInflight();
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
 		console.error(`[bundle-deps error]`, message);
 		if (!res.headersSent) {
 			res.header("Cache-Control", "no-store").status(500).json({ error: message });
 		}
+		rejectInflight(err);
 	} finally {
+		inflightBundleBuilds.delete(depHash);
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
