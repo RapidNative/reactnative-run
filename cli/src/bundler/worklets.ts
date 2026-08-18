@@ -100,40 +100,109 @@ export function resolveWorkletsPlugin(
     }
   }
 
-  // 2. Tool cache: install the declared version once, reuse forever.
+  // 2. Tool cache: fetch the plugin once per version, reuse forever.
+  //
+  // Deliberately NOT `npm install react-native-worklets`: that pulls 256
+  // transitive packages (~140MB) plus ~200MB of npm HTTP cache, none of it
+  // needed. The plugin ships pre-bundled (~1.6MB) and its only runtime imports
+  // are @babel/* and convert-source-map, which rnrun already depends on -- so
+  // fetch just the tarball and point the plugin at our own module tree. On a
+  // container-per-project host this was the single largest per-project cost,
+  // larger than the project itself, and it sat on the startup path.
+  //
+  // RNRUN_TOOLS_DIR relocates the cache so a host can bake it into an image or
+  // share one copy across containers instead of paying for it per container.
   const wanted = version ?? "latest";
-  const toolDir = path.join(
-    os.homedir(),
-    ".rnrun",
-    "tools",
-    `worklets-plugin-${wanted.replace(/[^\w.-]/g, "_")}`
-  );
-  const probe = () => {
+  const toolsRoot = process.env.RNRUN_TOOLS_DIR || path.join(os.homedir(), ".rnrun", "tools");
+  const toolDir = path.join(toolsRoot, `worklets-${wanted.replace(/[^\w.-]/g, "_")}`);
+  const pluginDir = path.join(toolDir, "react-native-worklets", "plugin");
+
+  /** Resolve AND load: a path that exists but throws inside babel is worse
+   *  than no plugin at all (that trap cost us a silently unworkletized
+   *  reanimated chunk server-side). */
+  const loadable = (): string | null => {
     try {
-      return createRequire(path.join(toolDir, "package.json")).resolve("react-native-worklets/plugin");
+      createRequire(import.meta.url)(pluginDir);
+      return pluginDir;
     } catch {
       return null;
     }
   };
-  let resolved = probe();
-  if (!resolved) {
+
+  const ready = loadable();
+  if (ready) return ready;
+
+  // The plugin resolves @babel/* relative to its own location, so link the
+  // node_modules directory that actually holds our @babel/core (derived, so
+  // hoisted and nested layouts both work).
+  const babelHome = (): string | null => {
     try {
-      warn(`[worklets] installing react-native-worklets@${wanted} babel plugin (one-time, ~10s)`);
-      fs.mkdirSync(toolDir, { recursive: true });
-      fs.writeFileSync(path.join(toolDir, "package.json"), JSON.stringify({ name: "rnrun-tools", version: "1.0.0" }));
-      execSync(`npm install react-native-worklets@${JSON.stringify(wanted).slice(1, -1)} --no-audit --no-fund --ignore-scripts`, {
-        cwd: toolDir,
-        stdio: "ignore",
-        timeout: 120_000,
-      });
-      resolved = probe();
-    } catch (err) {
-      warn(`[worklets] plugin install failed (${(err as Error).message}); reanimated worklets will not run. Fix: npm install in the project.`);
+      const p = createRequire(import.meta.url).resolve("@babel/core");
+      const marker = `${path.sep}node_modules${path.sep}`;
+      const i = p.lastIndexOf(marker);
+      return i === -1 ? null : p.slice(0, i + marker.length - 1);
+    } catch {
       return null;
     }
+  };
+
+  try {
+    const nm = babelHome();
+    if (!nm) {
+      // Exotic layout (yarn PnP and friends): fall back to a plain install,
+      // which brings its own dependency tree along.
+      warn("[worklets] could not locate a node_modules for @babel/core; falling back to a full install");
+      return legacyInstall(toolDir, wanted, warn);
+    }
+    warn(`[worklets] fetching react-native-worklets@${wanted} babel plugin (one-time, ~1.6MB)`);
+    fs.rmSync(toolDir, { recursive: true, force: true });
+    fs.mkdirSync(toolDir, { recursive: true });
+    // Scoped npm cache, discarded below: npm's _cacache otherwise leaves
+    // ~200MB of tarballs and metadata behind that is never read again. Never
+    // `npm cache clean` here -- that would wipe the user's global cache.
+    const npmCache = path.join(toolDir, ".npm-cache");
+    const tgzName = execSync(
+      `npm pack react-native-worklets@${JSON.stringify(wanted).slice(1, -1)} --silent --cache ${JSON.stringify(npmCache)}`,
+      { cwd: toolDir, timeout: 120_000, env: { ...process.env, NPM_CONFIG_UPDATE_NOTIFIER: "false" }, encoding: "utf8" }
+    )
+      .trim()
+      .split("\n")
+      .pop()!;
+    execSync(`tar -xzf ${JSON.stringify(tgzName)}`, { cwd: toolDir, timeout: 60_000 });
+    fs.renameSync(path.join(toolDir, "package"), path.join(toolDir, "react-native-worklets"));
+    fs.rmSync(path.join(toolDir, tgzName), { force: true });
+    fs.rmSync(npmCache, { recursive: true, force: true });
+    try {
+      fs.symlinkSync(nm, path.join(toolDir, "node_modules"), "dir");
+    } catch {
+      /* already linked */
+    }
+    const ok = loadable();
+    if (ok) return ok;
+    warn("[worklets] fetched plugin did not load; falling back to a full install");
+    return legacyInstall(toolDir, wanted, warn);
+  } catch (err) {
+    warn(`[worklets] plugin fetch failed (${(err as Error).message}); falling back to a full install`);
+    return legacyInstall(toolDir, wanted, warn);
   }
-  if (!resolved) {
-    warn("[worklets] plugin not resolvable after install; reanimated worklets will not run.");
+}
+
+/** The pre-existing behaviour: a real install, dependency tree and all. Kept as
+ *  a fallback for layouts where the lean path can't work. */
+function legacyInstall(toolDir: string, wanted: string, warn: (msg: string) => void): string | null {
+  try {
+    fs.mkdirSync(toolDir, { recursive: true });
+    fs.writeFileSync(path.join(toolDir, "package.json"), JSON.stringify({ name: "rnrun-tools", version: "1.0.0" }));
+    execSync(
+      `npm install react-native-worklets@${JSON.stringify(wanted).slice(1, -1)} --no-audit --no-fund --ignore-scripts`,
+      { cwd: toolDir, stdio: "ignore", timeout: 180_000, env: { ...process.env, NPM_CONFIG_UPDATE_NOTIFIER: "false" } }
+    );
+    return createRequire(path.join(toolDir, "package.json")).resolve("react-native-worklets/plugin");
+  } catch (err) {
+    warn(
+      `[worklets] plugin install failed (${(err as Error).message}); reanimated worklets will not run. ` +
+        `Fix: run npm install in the project so its own copy is used.`
+    );
+    return null;
   }
-  return resolved;
 }
