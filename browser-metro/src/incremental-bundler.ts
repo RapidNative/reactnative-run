@@ -165,6 +165,38 @@ export class IncrementalBundler {
     return shims;
   }
 
+  private getOverrideModules(): Record<string, string> {
+    const overrides: Record<string, string> = {};
+    for (const plugin of this.plugins) {
+      if (plugin.overrideModules) {
+        Object.assign(overrides, plugin.overrideModules());
+      }
+    }
+    return overrides;
+  }
+
+  /**
+   * Replace fetched npm modules with plugin-supplied wrappers, keeping the
+   * fetched code reachable at `<name>__original`. Runs AFTER transitive
+   * resolution (the original must be fetched first); a follow-up transitive
+   * pass then fetches anything new the override code requires.
+   */
+  private async applyOverrideModules(skipNames: Set<string>): Promise<void> {
+    const overrides = this.getOverrideModules();
+    for (const [name, code] of Object.entries(overrides)) {
+      if (this.moduleMap[name] !== undefined && !this.moduleMap[name + "__original"]) {
+        this.moduleMap[name + "__original"] = this.moduleMap[name];
+      }
+      this.moduleMap[name] = code;
+    }
+    if (Object.keys(overrides).length === 0) return;
+    let newDeps = this.findTransitiveNpmDeps(skipNames);
+    while (newDeps.size > 0) {
+      await this.fetchNpmPackages(newDeps);
+      newDeps = this.findTransitiveNpmDeps(skipNames);
+    }
+  }
+
   /** Native packages plugins shim but which must still be declared in package.json. */
   private getNativePackages(): string[] {
     const names: string[] = [];
@@ -373,6 +405,11 @@ export class IncrementalBundler {
       for (const sub of [
         "react-native-css-interop/jsx-runtime",
         "react-native-css-interop/dist/runtime/native/styles",
+        // wrapJSX: the CLI's react/jsx-runtime override wraps the REAL runtime
+        // with it so package-internal JSX (RN core, react-navigation) also
+        // resolves css-interop styles -- Metro parity (Metro aliases
+        // react/jsx-runtime globally via its resolver).
+        "react-native-css-interop/dist/runtime/wrap-jsx",
       ]) {
         if (!subpaths.includes(sub)) subpaths.push(sub);
       }
@@ -915,6 +952,10 @@ export class IncrementalBundler {
 
     // (Alias stubs + shims were injected above, before the transitive scan.)
 
+    // Overrides (wrapped npm modules) go in AFTER the scan: the wrapped
+    // package must have been fetched so `<name>__original` can delegate.
+    await this.applyOverrideModules(skipNames);
+
     // walkDeps() silently skips files that aren't on the VFS, so a missing or
     // unreadable entry would otherwise yield a bundle whose entryId is set but
     // whose module map has no entry factory -- booting into "Module not found:
@@ -1087,6 +1128,7 @@ export class IncrementalBundler {
       await this.fetchNpmPackages(newDeps);
       newDeps = this.findTransitiveNpmDeps(skipNames);
     }
+    await this.applyOverrideModules(skipNames);
 
     // Phase 4: Orphan cleanup
     const orphans = this.graph.findOrphans(this.entryFile);

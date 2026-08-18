@@ -45,6 +45,50 @@ const injectReactPlugin = {
   },
 };
 
+/**
+ * nativewind/native: Metro aliases react/jsx-runtime GLOBALLY (css-interop's
+ * metro resolver), so JSX inside packages -- RN core's KeyboardAvoidingView,
+ * react-navigation internals -- also flows through css-interop's wrapJSX and
+ * remapped className styles resolve. Our per-package chunks are compiled
+ * against the real runtime, so we override the registry key instead: the
+ * real runtime stays at react/jsx-runtime__original and every chunk's
+ * require("react/jsx-runtime") gets the wrapped one. ES5 only: overrides
+ * skip the transform pipeline.
+ */
+const nativewindGlobalJsxPlugin = {
+  name: "nativewind-global-jsx",
+  overrideModules() {
+    return {
+      "react/jsx-runtime":
+        'var _real = require("react/jsx-runtime__original");\n' +
+        // LAZY: react/jsx-runtime is required by RN core itself, BEFORE
+        // InitializeCore installs native modules. Requiring css-interop's
+        // runtime at module scope crashes there (its appearance observable
+        // reads Appearance.getColorScheme on an undefined native module), so
+        // the wrapper is built on the first JSX call instead -- by then the
+        // app is rendering and the runtime is up.
+        "var _cache = null;\n" +
+        "function _wrapped(name) {\n" +
+        "  return function () {\n" +
+        "    if (_cache === null) {\n" +
+        '      var m = require("react-native-css-interop/dist/runtime/wrap-jsx");\n' +
+        "      var w = m.default || m;\n" +
+        "      _cache = { jsx: w(_real.jsx), jsxs: w(_real.jsxs) };\n" +
+        "      if (_real.jsxDEV) _cache.jsxDEV = w(_real.jsxDEV);\n" +
+        "    }\n" +
+        "    return _cache[name].apply(null, arguments);\n" +
+        "  };\n" +
+        "}\n" +
+        "module.exports = {\n" +
+        "  Fragment: _real.Fragment,\n" +
+        '  jsx: _wrapped("jsx"),\n' +
+        '  jsxs: _wrapped("jsxs")\n' +
+        "};\n" +
+        'if (_real.jsxDEV) module.exports.jsxDEV = _wrapped("jsxDEV");\n',
+    };
+  },
+};
+
 export type SessionEvent =
   | { type: "hmr"; update: HmrUpdate; bundleVersion: number }
   | { type: "reload"; bundleVersion: number; reason?: string }
@@ -158,6 +202,7 @@ export class BundlerSession {
         },
         plugins: [
           ...(hasReact ? [injectReactPlugin] : []),
+          ...(this.options.nativewind ? [nativewindGlobalJsxPlugin] : []),
           createHermesLoweringPlugin({ workletsPluginPath: this.options.workletsPluginPath }),
         ],
         env: this.options.env,
