@@ -67,6 +67,10 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
   router.pattern("GET", /\.bundle$/, async (_req, res, { url }) => {
     const platform = url.searchParams.get("platform") || "web";
     let session = ctx.session;
+    if (platform === "web") {
+      // Web is built lazily when startup pre-warmed only native platforms.
+      await session.ensureBuilt();
+    }
     if (platform !== "web") {
       const native = ctx.getPlatformSession ? await ctx.getPlatformSession(platform) : null;
       if (!native) {

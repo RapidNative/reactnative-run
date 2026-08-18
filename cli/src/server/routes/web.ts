@@ -14,8 +14,10 @@ export function registerWebRoutes(router: Router, ctx: ServerContext): void {
     "GET",
     (url, req) =>
       url.pathname === "/" && (req.headers.accept || "").includes("text/html") ? {} : null,
-    (_req, res) => {
+    async (_req, res) => {
       const { session } = ctx;
+      // First browser hit builds the web bundle if startup skipped it.
+      await session.ensureBuilt();
       if (!session.getBundle() && session.buildError) {
         sendText(res, 200, "text/html", errorHtml(ctx.title, session.buildError));
         return;

@@ -11,6 +11,7 @@ import { startServer, getLanIp, type ServerContext } from "../server/server.js";
 import { createLogger } from "../ui/logger.js";
 import { printStartupBanner, attachInteractiveKeys } from "../ui/interactive.js";
 import { createCachedFetch } from "../project/pkg-cache.js";
+import { createRequire } from "node:module";
 
 export interface StartOptions {
   dir: string;
@@ -35,8 +36,20 @@ export interface StartOptions {
 export const DEFAULT_PACKAGE_SERVER = "https://esm.reactnative.run";
 export const LOCAL_PACKAGE_SERVER = "http://localhost:5200";
 
+/** rnrun + browser-metro versions: the bundle format depends on both, so they
+ *  belong in the bundle-cache key. */
+function toolVersions(): string {
+  try {
+    const req = createRequire(import.meta.url);
+    return `rnrun@${req("../../package.json").version}+bm@${req("browser-metro/package.json").version}`;
+  } catch {
+    return "unknown";
+  }
+}
+
 export async function startCommand(options: StartOptions): Promise<void> {
   const log = createLogger(options.quiet);
+  const tools = toolVersions();
   const rootDir = path.resolve(options.dir);
   const packageServerUrl = options.localPackages ? LOCAL_PACKAGE_SERVER : options.packageServer;
 
@@ -65,8 +78,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
     fetch: cachedFetch,
     nativewind: webNw.enabled,
     warn: log.warn,
+    toolVersions: tools,
+    assetMeta,
   });
-  void assetMeta;
 
   // Native sessions (ios/android) are created lazily on the first bundle
   // request for that platform -- an Expo Go scan shouldn't cost anything until
@@ -98,6 +112,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       nativewind: nw.enabled,
       warn: log.warn,
       workletsPluginPath,
+      toolVersions: tools,
     });
     native.onEvent((e) => {
       if (e.type === "build-error") log.error(`[${platform}] build error:\n${e.message}`);
@@ -143,14 +158,30 @@ export async function startCommand(options: StartOptions): Promise<void> {
     printStartupBanner({ rootDir, expUrl, webUrl, interactive });
   }
 
-  const buildStart = performance.now();
-  const ok = await session.build();
-  if (ok) {
-    log.info(
-      `Bundled in ${Math.round(performance.now() - buildStart)}ms (${(session.getBundle().length / 1024).toFixed(0)} KB)`
-    );
+  // --prewarm names the platforms worth building up front. When it names only
+  // native ones, DON'T build web here: a container woken by a phone scan would
+  // otherwise build a web bundle nobody asked for before starting the iOS one
+  // (measured on the orchd fleet as a full web build ahead of every scan).
+  // The web routes build on first browser request instead.
+  const prewarmRaw = (options.prewarm ?? "")
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+  const prewarmList = prewarmRaw.filter((p) => p === "ios" || p === "android");
+  const skipEagerWeb = prewarmList.length > 0 && !prewarmRaw.includes("web");
+
+  if (skipEagerWeb) {
+    log.info("Deferring the web bundle until a browser asks (--prewarm names native only)");
   } else {
-    log.error(`Build failed:\n${session.buildError}`);
+    const buildStart = performance.now();
+    const ok = await session.build();
+    if (ok) {
+      log.info(
+        `Bundled in ${Math.round(performance.now() - buildStart)}ms (${(session.getBundle().length / 1024).toFixed(0)} KB)`
+      );
+    } else {
+      log.error(`Build failed:\n${session.buildError}`);
+    }
   }
 
   // Session events → terminal (the HmrHub independently forwards them to clients).
@@ -168,10 +199,6 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // cached bundle instead of waiting out a cold build. Fire-and-forget: build
   // errors are already logged by the session and a failed pre-warm must not
   // stop the server (the device request will retry the build).
-  const prewarmList = (options.prewarm ?? "")
-    .split(",")
-    .map((p) => p.trim().toLowerCase())
-    .filter((p) => p === "ios" || p === "android");
   if (prewarmList.length > 0) {
     log.info(`Pre-warming ${prewarmList.join(", ")} bundle(s) ...`);
     for (const platform of prewarmList) {
@@ -235,6 +262,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       fetch: cachedFetch,
       nativewind: freshNw.enabled,
       warn: log.warn,
+      toolVersions: tools,
     });
     // Swap the session everywhere, rewire hub + terminal logging. Native
     // sessions are dropped and rebuilt lazily on the next device request.
