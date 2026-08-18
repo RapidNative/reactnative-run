@@ -57,6 +57,14 @@ export interface BundlerPlugin {
    * Shimmed modules are NOT fetched from the package server.
    */
   shimModules?(): Record<string, string>;
+  /**
+   * Like shimModules, but the shimmed package is STILL fetched and its
+   * fetched module is preserved under `<name>__original` so the override can
+   * delegate to it. Applied after transitive-dependency resolution. Used to
+   * wrap `react/jsx-runtime` for nativewind (Metro aliases it globally so
+   * package-internal JSX also flows through css-interop).
+   */
+  overrideModules?(): Record<string, string>;
 
   /**
    * Native packages this plugin shims for web preview that must STILL be declared
