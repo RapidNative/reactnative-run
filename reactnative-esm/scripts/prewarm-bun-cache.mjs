@@ -12,14 +12,16 @@
 // only populates the global cache (installs into a throwaway tmpdir with
 // --no-save, then deletes it) — it does not touch the server's `cache/`.
 //
-// Provenance of the list: the union of dependencies across the migrated
-// jetplane->rnrun projects' mobile package.json (relayed 2026-08-19). Versions
-// are pinned where the projects agreed on one; entries WITHOUT a pin (the
-// @expo-google-fonts family and a few Expo SDK modules) warm at `latest` as a
-// best-effort — a version mismatch just means that one tarball isn't warmed,
-// never a wrong build (the server always installs the project's exact pins).
-// The v2-legacy specs the migration strips (@vibecode-db/client,
-// babel-plugin-module-resolver) are intentionally omitted.
+// Provenance of the list: the fleet-wide union of dependencies across ALL
+// fullstack-supabase preview projects (2,752 projects parsed, 166 distinct
+// deps; dominant version per package, relayed 2026-08-19). The ~45 core
+// packages present in 2740+ projects are the shared scaffold (probably already
+// warm, but included so a fresh box warms from empty); the rest are the
+// "extras" present in fewer projects that are the ones most likely COLD in
+// bun's cache — the @expo-google-fonts family especially. A version mismatch
+// just leaves that one tarball cold, never a wrong build (the server always
+// installs the project's exact pins). The v2-legacy specs the migration
+// strips (@vibecode-db/client, babel-plugin-module-resolver) are omitted.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -29,26 +31,28 @@ import { join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
-// name -> version spec (empty string = warm `latest`, best-effort).
+// name -> version spec (empty string = warm `latest`, best-effort where the
+// fleet had no dominant pin).
 const DEPS = {
-	// Expo SDK 54 core + modules (mostly already warm — shared by every project)
+	// --- Shared scaffold: Expo SDK 54 core + modules (in 2740+ projects) ---
 	expo: "54.0.13",
 	"@expo/html-elements": "0.12.5",
 	"@expo/metro-runtime": "6.1.2",
-	"expo-clipboard": "",
+	"@expo/vector-icons": "^14.1.0",
+	"expo-clipboard": "~8.0.7",
 	"expo-constants": "18.0.9",
-	"expo-document-picker": "",
+	"expo-document-picker": "~14.0.8",
 	"expo-file-system": "",
 	"expo-font": "14.0.9",
 	"expo-image": "3.0.9",
 	"expo-image-picker": "",
 	"expo-linear-gradient": "15.0.7",
 	"expo-linking": "",
-	"expo-local-authentication": "",
-	"expo-location": "",
-	"expo-print": "",
+	"expo-local-authentication": "~16.0.8",
+	"expo-location": "~18.0.9",
+	"expo-print": "~15.0.5",
 	"expo-router": "6.0.12",
-	"expo-sharing": "",
+	"expo-sharing": "~14.0.7",
 	"expo-splash-screen": "31.0.10",
 	"expo-sqlite": "",
 	"expo-status-bar": "",
@@ -91,6 +95,7 @@ const DEPS = {
 	"react-native-css-interop": "0.2.1",
 	tailwindcss: "3.4.18",
 	"tailwind-variants": "0.1.20",
+	postcss: "^8.4.49",
 
 	// Data / state
 	"@supabase/supabase-js": "^2.90.1",
@@ -100,8 +105,10 @@ const DEPS = {
 	zustand: "5.0.2",
 	zod: "^3.25.76",
 	"date-fns": "4.1.0",
+	dayjs: "^1.11.13",
 	"sql.js": "^1.14.0",
 	xlsx: "0.18.5",
+	papaparse: "5.4.1",
 
 	// Routing (web) + react-aria stack
 	"react-router": "7.8.2",
@@ -112,19 +119,81 @@ const DEPS = {
 	// Icons
 	"lucide-react-native": "0.510.0",
 
-	// Google fonts family — the highest-value warm targets (Lovable adds these
-	// beyond the shared scaffold, so they're the ones most often cold).
-	"@expo-google-fonts/cairo": "",
-	"@expo-google-fonts/fraunces": "",
-	"@expo-google-fonts/instrument-serif": "",
-	"@expo-google-fonts/inter": "",
-	"@expo-google-fonts/jetbrains-mono": "",
-	"@expo-google-fonts/manrope": "",
-	"@expo-google-fonts/outfit": "",
-	"@expo-google-fonts/plus-jakarta-sans": "",
-	"@expo-google-fonts/sora": "",
-	"@expo-google-fonts/space-grotesk": "",
-	"@expo-google-fonts/work-sans": "",
+	// --- Extras beyond the scaffold (present in fewer projects => most likely
+	// COLD in bun's cache; these are the high-value warm targets) ---
+	"expo-av": "~15.0.2",
+	"expo-audio": "~1.0.7",
+	"expo-video": "~2.0.6",
+	"expo-camera": "~16.0.18",
+	"expo-media-library": "~17.0.0",
+	"expo-haptics": "~14.0.1",
+	"expo-speech": "~14.0.2",
+	"expo-blur": "~15.0.7",
+	"expo-secure-store": "15.0.7",
+	"expo-notifications": "~0.31.0",
+	"expo-fetch": "~0.1.4",
+	"expo-sensors": "~15.0.7",
+	"expo-crypto": "~14.0.2",
+	"expo-intent-launcher": "~13.0.6",
+	"expo-keep-awake": "15.0.0",
+	"expo-screen-orientation": "~8.0.8",
+	"expo-auth-session": "~6.1.0",
+	"expo-device": "~8.0.9",
+
+	"react-native-maps": "1.20.1",
+	"react-native-qrcode-svg": "^6.3.14",
+	"react-native-mmkv": "3.2.0",
+	"react-native-markdown-display": "7.0.2",
+	"react-native-video": "^6.12.0",
+	"react-native-vision-camera": "4.7.0",
+	"react-native-purchases": "~10.7.1",
+
+	"@shopify/flash-list": "1.8.0",
+	"@shopify/react-native-skia": "^1.5.0",
+
+	"@reduxjs/toolkit": "^2.6.1",
+	"react-redux": "^9.2.0",
+
+	three: "0.179.1",
+	"@react-three/fiber": "8.17.10",
+	"@react-three/drei": "9.122.0",
+
+	"react-hook-form": "^7.54.2",
+	"@hookform/resolvers": "^3.9.1",
+
+	"@react-navigation/drawer": "7.3.10",
+	"@react-navigation/native-stack": "^6.11.0",
+
+	firebase: "^10.14.0",
+	i18next: "^24.2.0",
+	"react-i18next": "^15.4.0",
+
+	// Google fonts family — the single highest-value warm targets (Lovable adds
+	// these beyond the scaffold, so they're the ones most often cold). Exact
+	// dominant pins from the fleet scan.
+	"@expo-google-fonts/inter": "^0.4.1",
+	"@expo-google-fonts/jetbrains-mono": "^0.4.1",
+	"@expo-google-fonts/space-grotesk": "^0.4.1",
+	"@expo-google-fonts/playfair-display": "^0.4.0",
+	"@expo-google-fonts/plus-jakarta-sans": "^0.2.3",
+	"@expo-google-fonts/manrope": "^0.4.1",
+	"@expo-google-fonts/sora": "^0.4.1",
+	"@expo-google-fonts/fraunces": "^0.2.3",
+	"@expo-google-fonts/dm-sans": "^0.4.1",
+	"@expo-google-fonts/outfit": "^0.4.1",
+	"@expo-google-fonts/instrument-serif": "^0.2.3",
+	"@expo-google-fonts/work-sans": "^0.2.3",
+	"@expo-google-fonts/ibm-plex-mono": "^0.4.1",
+	"@expo-google-fonts/ibm-plex-sans": "^0.4.1",
+	"@expo-google-fonts/cairo": "^0.4.1",
+	"@expo-google-fonts/anton": "^0.4.2",
+	"@expo-google-fonts/poppins": "^0.2.3",
+	"@expo-google-fonts/vazirmatn": "^0.2.3",
+	"@expo-google-fonts/raleway": "^0.4.1",
+	"@expo-google-fonts/jost": "^0.4.0",
+	"@expo-google-fonts/montserrat": "^0.4.1",
+	"@expo-google-fonts/dm-serif-display": "0.2.4",
+	"@expo-google-fonts/roboto-slab": "^0.4.2",
 };
 
 // A handful of packages pinned two versions across the fleet — warm both so
