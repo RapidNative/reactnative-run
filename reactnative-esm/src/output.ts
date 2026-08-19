@@ -60,3 +60,41 @@ export function normalizeBuildPaths(code: string, tmpDir: string): string {
 	return out;
 }
 
+
+/**
+ * Degrade CSS animations/transitions to static on native for the ONE known
+ * fatal pairing: react-native-css-interop 0.2.x with react-native-reanimated
+ * >= 4. css-interop 0.2.1 drives keyframe animations and transitions by
+ * scheduling a worklet on reanimated's UI runtime (makeMutable/withRepeat/
+ * withTiming), and its peer range (>=3.6.2) predates reanimated 4's rewrite.
+ * On rea 4 that worklet throws on the UI thread, where there is no redbox --
+ * Hermes rethrows and the process SIGABRTs. Any generated app with an
+ * animate-pulse skeleton or animate-spin loader crashes on load.
+ *
+ * The compiled data carries the trigger as `animations`/`transition` on each
+ * rule variant plus a top-level `keyframes` map. Dropping those (keeping the
+ * static declarations `d`) makes such classes render static -- a still
+ * skeleton instead of a crash. Gated on the version pairing, so it stops
+ * automatically once a css-interop that supports reanimated 4 ships. The
+ * animation DATA is what changes the bytes, and versions are already in the
+ * cache key, so caching the degraded result is correct.
+ */
+export function degradeIncompatibleAnimations(data: unknown, versions: Record<string, string>): number {
+	const interop = (versions["react-native-css-interop"] || "").replace(/^[\^~]/, "");
+	const rea = (versions["react-native-reanimated"] || "").replace(/^[\^~]/, "");
+	const reaMajor = parseInt(rea.split(".")[0], 10);
+	if (!interop.startsWith("0.2.") || !Number.isFinite(reaMajor) || reaMajor < 4) return 0;
+	if (!data || typeof data !== "object") return 0;
+	const d = data as { rules?: Record<string, { n?: Array<Record<string, unknown>> }>; keyframes?: unknown };
+	let stripped = 0;
+	for (const rule of Object.values(d.rules ?? {})) {
+		for (const variant of rule.n ?? []) {
+			if ("animations" in variant) { delete variant.animations; stripped++; }
+			if ("transition" in variant) { delete variant.transition; stripped++; }
+		}
+	}
+	// Keyframes are now unreferenced; drop them so nothing can schedule one.
+	if (d.keyframes) d.keyframes = {};
+	return stripped;
+}
+

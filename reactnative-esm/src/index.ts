@@ -14,7 +14,7 @@ import esbuild from "esbuild";
 // @ts-ignore - no type declarations
 import flowRemoveTypes from "flow-remove-types";
 import { sweepCache } from "./retention";
-import { looseClassFields, normalizeBuildPaths } from "./output";
+import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } from "./output";
 import {
 	BuildPlatform,
 	normalizePlatform,
@@ -1229,9 +1229,13 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 			return;
 		}
 
+		// NW_COMPILE_VERSION bumps when post-compile transforms change the OUTPUT
+		// for unchanged input (the animation degrade below), so old cache entries
+		// aren't served with the pre-fix animation data.
+		const NW_COMPILE_VERSION = 2;
 		const inputHash = crypto
 			.createHash("sha256")
-			.update(JSON.stringify({ platform, versions, tailwindConfig, css, content }))
+			.update(JSON.stringify({ v: NW_COMPILE_VERSION, platform, versions, tailwindConfig, css, content }))
 			.digest("hex")
 			.slice(0, 16);
 		const cacheFile = path.join(CACHE_DIR, `nativewind-${inputHash}.json`);
@@ -1306,7 +1310,11 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 			timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
 			);
 			const data = JSON.parse(stdout);
-			console.log(`[nativewind] compiled ${inputHash} (${platform}) in ${Date.now() - t}ms`);
+			const degraded = platform !== "web" ? degradeIncompatibleAnimations(data, versions) : 0;
+			console.log(
+				`[nativewind] compiled ${inputHash} (${platform}) in ${Date.now() - t}ms` +
+					(degraded > 0 ? ` (stripped ${degraded} CSS animation/transition rule(s): reanimated 4 + css-interop 0.2.x crashes on the UI runtime)` : "")
+			);
 			const responseBody = JSON.stringify({ data });
 			fs.writeFileSync(cacheFile, responseBody);
 			res.header("Cache-Control", "public, max-age=31536000, immutable");
