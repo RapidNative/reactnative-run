@@ -727,6 +727,26 @@ const NATIVE_TOOL_STUBS = new Set([
 	"autoprefixer",
 ]);
 
+// Build-time-only packages a CLIENT bundle never requires at runtime. Unlike
+// NATIVE_TOOL_STUBS (native-only, and consulted on the /pkg path), these must
+// be stubbed in the /bundle-deps path on BOTH platforms: they're regular
+// direct deps of the project, so the deps loop tries to esbuild them, they
+// pull Node builtins (fs/path/stream/events via @nodelib etc.) that don't
+// resolve in a browser/Hermes build, and esbuild fails with 60+ "Could not
+// resolve" lines before the existing catch falls back to a `{}` stub anyway.
+// tailwindcss is in essentially every nativewind project (2,743 of 2,752 in
+// the fleet), so that wasted install + guaranteed-failing build + log spew
+// fires on almost every build. Stubbing up front reaches the identical end
+// state (module.exports = {}) without the wasted work. nativewind consumes the
+// server-compiled CSS from /nativewind-css, never tailwindcss at runtime.
+const CLIENT_EXCLUDED_BUILD_TOOLS = new Set([
+	"tailwindcss",
+	"@tailwindcss/postcss",
+	"postcss",
+	"autoprefixer",
+	"lightningcss",
+]);
+
 async function handlePkgRequest(res: Response, pkgName: string, version: string, subpath: string, baseUrl?: string, platform: BuildPlatform = "web") {
 	// browser-metro's overrideModules hook keeps the real module reachable under
 	// a synthetic "<name>__original" key so a wrapper can delegate to it. That
@@ -1723,6 +1743,14 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		};
 
 		for (const [pkgName, info] of allPackages) {
+			// Build-time-only tooling (tailwindcss/postcss/...) is never required
+			// at client runtime and cannot bundle for a browser/Hermes target;
+			// stub it directly instead of paying an esbuild attempt that is
+			// guaranteed to fail into the same stub below. Same end state, no spew.
+			if (CLIENT_EXCLUDED_BUILD_TOOLS.has(pkgName)) {
+				chunks.push(`// @dep-start ${pkgName}\n// build-time tooling, stubbed on client\nmodule.exports = {};\n// @dep-end ${pkgName}`);
+				continue;
+			}
 			const subs = sharedSubpathsByBase.get(pkgName) ?? [];
 			// Cached chunk for this exact (package, version, platform, nv, subpaths,
 			// externals) combination? Then skip esbuild entirely.
