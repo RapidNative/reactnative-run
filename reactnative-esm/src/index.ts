@@ -1232,7 +1232,7 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 		// NW_COMPILE_VERSION bumps when post-compile transforms change the OUTPUT
 		// for unchanged input (the animation degrade below), so old cache entries
 		// aren't served with the pre-fix animation data.
-		const NW_COMPILE_VERSION = 4;
+		const NW_COMPILE_VERSION = 5;
 		const inputHash = crypto
 			.createHash("sha256")
 			.update(JSON.stringify({ v: NW_COMPILE_VERSION, platform, versions, tailwindConfig, css, content }))

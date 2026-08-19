@@ -115,8 +115,15 @@ export function degradeIncompatibleAnimations(data: unknown, versions: Record<st
 		// but a redbox.
 		if ("animation" in rule) { delete rule.animation; stripped++; }
 	}
-	// Keyframes are now unreferenced; drop them so nothing can schedule one.
-	if (d.keyframes) d.keyframes = {};
+	// Keyframes are now unreferenced (no rule keeps an `animations` payload to
+	// look them up). DELETE the key -- do NOT reassign it to {}. css-interop's
+	// injectData does `for (const entry of data.keyframes)`, expecting the
+	// ARRAY of [name, frames] pairs that cssToReactNativeRuntime emits; an
+	// object is not iterable, so `{}` threw "iterator method is not callable"
+	// at the injectData call (global.css) -- the redbox that survived stripping
+	// the payload and the marker. Deleting the key makes injectData's
+	// `if (data.keyframes)` guard skip it entirely.
+	if ("keyframes" in d) { delete d.keyframes; stripped++; }
 	return stripped;
 }
 
