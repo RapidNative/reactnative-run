@@ -48,3 +48,13 @@ test("tolerates caret/tilde ranges and missing versions", () => {
   assert.equal(degradeIncompatibleAnimations(sample(), { "react-native-css-interop": "^0.2.1", "react-native-reanimated": "~4.1.3" }), 2);
   assert.equal(degradeIncompatibleAnimations(sample(), {}), 0);
 });
+
+test("strips when reanimated version is ABSENT (the real client historically omitted it)", () => {
+  // The bug that shipped: rnrun sent only nativewind/tailwind/css-interop/rn,
+  // never reanimated -- so an rea-major gate read undefined and never fired.
+  // Absent must default to strip: a static skeleton beats a UI-thread SIGABRT.
+  const d = sample();
+  const n = degradeIncompatibleAnimations(d, { "react-native-css-interop": "0.2.1" });
+  assert.equal(n, 2, "unknown reanimated -> assume incompatible -> strip");
+  assert.deepEqual(d.keyframes, {});
+});
