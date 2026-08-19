@@ -75,7 +75,9 @@ export async function compileNativewindCss(opts: {
     /* handled below by missing versions */
   }
   const versions: Record<string, string> = {};
-  for (const name of ["nativewind", "tailwindcss", "react-native-css-interop", "react-native"]) {
+  // react-native-reanimated + worklets are sent so the server can precisely
+  // gate its CSS-animation degrade (css-interop 0.2.x on reanimated 4 crashes).
+  for (const name of ["nativewind", "tailwindcss", "react-native-css-interop", "react-native", "react-native-reanimated", "react-native-worklets"]) {
     if (deps[name]) versions[name] = deps[name];
   }
 

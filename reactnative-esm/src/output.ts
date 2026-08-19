@@ -74,16 +74,26 @@ export function normalizeBuildPaths(code: string, tmpDir: string): string {
  * The compiled data carries the trigger as `animations`/`transition` on each
  * rule variant plus a top-level `keyframes` map. Dropping those (keeping the
  * static declarations `d`) makes such classes render static -- a still
- * skeleton instead of a crash. Gated on the version pairing, so it stops
- * automatically once a css-interop that supports reanimated 4 ships. The
- * animation DATA is what changes the bytes, and versions are already in the
- * cache key, so caching the degraded result is correct.
+ * skeleton instead of a crash.
+ *
+ * Gating: css-interop must be 0.2.x, and reanimated must NOT be a known-safe
+ * 3.x. The reanimated version is treated as "assume incompatible" when ABSENT,
+ * because the real rnrun /nativewind-css request historically didn't send it
+ * (it sent only nativewind/tailwind/css-interop/react-native) -- and the only
+ * safe default against a UI-thread SIGABRT is to strip. A static skeleton is a
+ * graceful degradation; a crash is not. Animations are kept ONLY when
+ * reanimated is explicitly present and major <= 3, so a correct rea3 setup
+ * (once the client sends the version) keeps its working animations, and the
+ * strip self-disables when a css-interop that supports reanimated 4 ships.
  */
 export function degradeIncompatibleAnimations(data: unknown, versions: Record<string, string>): number {
 	const interop = (versions["react-native-css-interop"] || "").replace(/^[\^~]/, "");
+	if (!interop.startsWith("0.2.")) return 0;
 	const rea = (versions["react-native-reanimated"] || "").replace(/^[\^~]/, "");
 	const reaMajor = parseInt(rea.split(".")[0], 10);
-	if (!interop.startsWith("0.2.") || !Number.isFinite(reaMajor) || reaMajor < 4) return 0;
+	// Explicit reanimated 3.x is the one compatible case -> keep animations.
+	// Everything else (rea >= 4, or unknown) -> strip.
+	if (Number.isFinite(reaMajor) && reaMajor <= 3) return 0;
 	if (!data || typeof data !== "object") return 0;
 	const d = data as { rules?: Record<string, { n?: Array<Record<string, unknown>> }>; keyframes?: unknown };
 	let stripped = 0;
