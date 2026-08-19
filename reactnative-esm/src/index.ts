@@ -10,6 +10,14 @@ import { promisify } from "util";
 // (a 300s bun install froze every concurrent build in the process), so any
 // install that can take more than a second must go through this.
 const execAsync = promisify(exec);
+
+// bun install occasionally hangs under piped spawn until it is SIGKILLed. The
+// old 300s bound meant a single hang cost 5 min, and the bun->bun->npm ladder
+// stacked to ~11 min (observed 648393ms on the origin). With the common dep
+// closure pre-warmed into bun's global cache (scripts/prewarm-bun-cache.mjs),
+// an honest install of the shared set is seconds — so 90s is a stall signal,
+// not a slow download, and we fail straight over to npm.
+const BUN_INSTALL_TIMEOUT_MS = 90_000;
 import esbuild from "esbuild";
 // @ts-ignore - no type declarations
 import flowRemoveTypes from "flow-remove-types";
@@ -1455,10 +1463,18 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			try {
 				await execAsync(`bun install --no-progress ${args}`, {
 					cwd: tmpDir,
-					// Native dep sets include react-native itself (~40MB of tarballs);
-					// 120s was too tight on a cold bun cache.
+					// The common dep set (expo/react-native/nativewind/supabase +
+					// the @expo-google-fonts family and other recurring extras) is
+					// pre-warmed into bun's global cache at deploy — see
+					// scripts/prewarm-bun-cache.mjs. With that warm, an honest
+					// install of the shared closure is seconds, so an install still
+					// running past this bound is a genuine stall (bun intermittently
+					// hangs under piped spawn), not honest downloading. Fail fast to
+					// the npm fallback rather than burning the old 300s here; a truly
+					// novel package outside the pre-warm set that needs longer is
+					// caught by npm's more generous timeout below.
 					killSignal: "SIGKILL",
-			timeout: 300000,
+			timeout: BUN_INSTALL_TIMEOUT_MS,
 					maxBuffer: 16 * 1024 * 1024,
 				});
 				installed = true;
@@ -1488,20 +1504,17 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				}
 
 				// bun install intermittently hangs under piped spawn (observed on
-				// macOS with a large bun cache); a plain retry sometimes succeeds.
-				// After the first timed-out attempt, fall back to npm — slower but
-				// it has never hung in this server's /pkg path.
+				// macOS with a large bun cache, and on the origin as multi-minute
+				// SIGKILL timeouts). A second bun attempt rarely un-hangs and just
+				// doubled the wait, so on the FIRST timeout we fall straight over to
+				// npm — slower but it has never hung in this server's /pkg path.
 				// exec's timeout surfaces as killed:true + SIGTERM rather than ETIMEDOUT.
 				const timedOut =
 					(e as { code?: string }).code === "ETIMEDOUT" ||
 					/ETIMEDOUT/.test(e.message || "") ||
 					(e as { killed?: boolean }).killed === true;
 				if (removed.length === 0 && timedOut && attempt < MAX_RETRIES - 1) {
-					if (attempt === 0) {
-						console.warn(`[bundle-deps] attempt 1: bun install timed out — retrying with bun`);
-						continue;
-					}
-					console.warn(`[bundle-deps] attempt ${attempt + 1}: bun timed out again — falling back to npm install`);
+					console.warn(`[bundle-deps] bun install timed out (${BUN_INSTALL_TIMEOUT_MS}ms) — falling back to npm install`);
 					try {
 						const npmArgs = Object.entries(workingDeps).map(([n, v]) => `'${n}@${v}'`).join(" ");
 						await execAsync(`npm install ${npmArgs} --legacy-peer-deps --no-audit --no-fund`, {
