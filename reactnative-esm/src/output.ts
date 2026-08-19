@@ -95,13 +95,25 @@ export function degradeIncompatibleAnimations(data: unknown, versions: Record<st
 	// Everything else (rea >= 4, or unknown) -> strip.
 	if (Number.isFinite(reaMajor) && reaMajor <= 3) return 0;
 	if (!data || typeof data !== "object") return 0;
-	const d = data as { rules?: Record<string, { n?: Array<Record<string, unknown>> }>; keyframes?: unknown };
+	const d = data as {
+		rules?: Record<string, { n?: Array<Record<string, unknown>>; animation?: unknown }>;
+		keyframes?: unknown;
+	};
 	let stripped = 0;
 	for (const rule of Object.values(d.rules ?? {})) {
 		for (const variant of rule.n ?? []) {
 			if ("animations" in variant) { delete variant.animations; stripped++; }
 			if ("transition" in variant) { delete variant.transition; stripped++; }
 		}
+		// css-interop 0.2.1 also carries a rule-LEVEL `animation: true` marker
+		// (a sibling of `n`, present on both animation and transition rules).
+		// Its runtime keys off that boolean to take the animation path and
+		// iterate the steps -- with the payload gone it throws "iterator method
+		// is not callable" and redboxes. Removing the marker too leaves a rule
+		// byte-identical to a plain static one ({n:[{s,d}]}), which the runtime
+		// handles. Stripping the payload without this is a half-strip: no crash,
+		// but a redbox.
+		if ("animation" in rule) { delete rule.animation; stripped++; }
 	}
 	// Keyframes are now unreferenced; drop them so nothing can schedule one.
 	if (d.keyframes) d.keyframes = {};

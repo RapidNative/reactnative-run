@@ -13,8 +13,8 @@ function sample() {
     keyframes: { pulse: [{ opacity: 0.5 }] },
     rules: {
       "flex-1": { n: [{ s: [3, 1], d: [[{ flexGrow: 1 }]] }] },
-      "animate-pulse": { n: [{ s: [4, 1], d: [], animations: { name: [{ type: "ident", value: "pulse" }] } }] },
-      "transition-colors": { n: [{ s: [5, 1], d: [], transition: { property: ["color"] } }] },
+      "animate-pulse": { animation: true, n: [{ s: [4, 1], d: [], animations: { name: [{ type: "ident", value: "pulse" }] } }] },
+      "transition-colors": { animation: true, n: [{ s: [5, 1], d: [], transition: { property: ["color"] } }] },
     },
   };
 }
@@ -22,7 +22,7 @@ function sample() {
 test("strips animations/transitions/keyframes for css-interop 0.2.x + reanimated 4", () => {
   const d = sample();
   const n = degradeIncompatibleAnimations(d, { "react-native-css-interop": "0.2.1", "react-native-reanimated": "4.1.3" });
-  assert.equal(n, 2, "one animation + one transition stripped");
+  assert.equal(n, 4, "one animations payload + one transition payload + two rule-level markers");
   assert.equal("animations" in d.rules["animate-pulse"].n[0], false);
   assert.equal("transition" in d.rules["transition-colors"].n[0], false);
   assert.deepEqual(d.keyframes, {});
@@ -45,7 +45,7 @@ test("does NOT fire once a newer css-interop is used", () => {
 });
 
 test("tolerates caret/tilde ranges and missing versions", () => {
-  assert.equal(degradeIncompatibleAnimations(sample(), { "react-native-css-interop": "^0.2.1", "react-native-reanimated": "~4.1.3" }), 2);
+  assert.equal(degradeIncompatibleAnimations(sample(), { "react-native-css-interop": "^0.2.1", "react-native-reanimated": "~4.1.3" }), 4);
   assert.equal(degradeIncompatibleAnimations(sample(), {}), 0);
 });
 
@@ -55,6 +55,18 @@ test("strips when reanimated version is ABSENT (the real client historically omi
   // Absent must default to strip: a static skeleton beats a UI-thread SIGABRT.
   const d = sample();
   const n = degradeIncompatibleAnimations(d, { "react-native-css-interop": "0.2.1" });
-  assert.equal(n, 2, "unknown reanimated -> assume incompatible -> strip");
+  assert.equal(n, 4, "unknown reanimated -> assume incompatible -> strip payloads + markers");
   assert.deepEqual(d.keyframes, {});
+});
+
+test("removes the rule-level `animation: true` marker (half-strip -> redbox otherwise)", () => {
+  const d = sample();
+  degradeIncompatibleAnimations(d, { "react-native-css-interop": "0.2.1", "react-native-reanimated": "4.1.3" });
+  // A degraded rule must be shaped EXACTLY like a static rule: {n:[{s,d}]},
+  // no leftover `animation` marker and no payload. That empty-but-flagged
+  // shape is the "iterator method is not callable" redbox signature.
+  assert.equal("animation" in d.rules["animate-pulse"], false, "animate-pulse marker cleared");
+  assert.equal("animation" in d.rules["transition-colors"], false, "transition marker cleared");
+  assert.deepEqual(Object.keys(d.rules["animate-pulse"].n[0]).sort(), ["d", "s"]);
+  assert.deepEqual(Object.keys(d.rules["transition-colors"].n[0]).sort(), ["d", "s"]);
 });
