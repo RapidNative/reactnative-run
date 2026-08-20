@@ -163,6 +163,49 @@ test('asset path traversal is rejected', async () => {
   assert.ok(res.status === 403 || res.status === 404);
 });
 
+// SPA deep-path fallback: a browser navigation (Accept: text/html) to a deep
+// expo-router route must receive the SAME index.html as /, so the client
+// router resolves the path. Assets and dev-server API paths must not fall back,
+// and a request without text/html (bare tooling) must still 404.
+test('SPA fallback: deep route with Accept text/html serves the index bytes', async () => {
+  const index = await (await fetch(base + '/', { headers: { Accept: 'text/html' } })).text();
+
+  for (const p of ['/login', '/nested/deep/route', '/settings/profile/']) {
+    const res = await fetch(base + p, { headers: { Accept: 'text/html' } });
+    assert.equal(res.status, 200, `${p} should fall back to index`);
+    assert.match(res.headers.get('content-type'), /text\/html/);
+    assert.equal(await res.text(), index, `${p} must be byte-identical to /`);
+  }
+});
+
+test('SPA fallback: bare request (no text/html) still 404s, so real misses are not masked', async () => {
+  const res = await fetch(base + '/login', { headers: { Accept: '*/*' } });
+  assert.equal(res.status, 404);
+  assert.match(await res.text(), /Not found: \/login/);
+});
+
+test('SPA fallback: assets and bundle are NOT fallback\'d even on a browser navigation', async () => {
+  // /index.bundle keeps serving JS (owned by the bundle route, registered first).
+  const bundle = await fetch(base + '/index.bundle?platform=web', { headers: { Accept: 'text/html' } });
+  assert.equal(bundle.status, 200);
+  assert.match(bundle.headers.get('content-type'), /javascript/);
+
+  // An extensioned path (asset shape) with no backing file 404s -- never index.
+  const png = await fetch(base + '/does-not-exist.png', { headers: { Accept: 'text/html' } });
+  assert.equal(png.status, 404);
+});
+
+test('SPA fallback: dev-server API paths keep current behavior (not index)', async () => {
+  const index = await (await fetch(base + '/', { headers: { Accept: 'text/html' } })).text();
+  // /status is native-owned regardless of Accept.
+  const status = await fetch(base + '/status', { headers: { Accept: 'text/html' } });
+  assert.equal(await status.text(), 'packager-status:running');
+  // /manifest is matched by native only for Expo-looking requests; a plain
+  // browser GET must NOT be handed the SPA index.
+  const manifest = await fetch(base + '/manifest', { headers: { Accept: 'text/html' } });
+  assert.notEqual(await manifest.text(), index, '/manifest must not fall back to index');
+});
+
 test('ws /__hmr: disk edit round-trips to an hmr-update frame', async () => {
   const ws = new WebSocket(`ws://127.0.0.1:${dev.port}/__hmr`);
   const frames = [];
