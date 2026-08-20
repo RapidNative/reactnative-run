@@ -48,7 +48,6 @@ const DEPS = {
 	"expo-image-picker": "",
 	"expo-linear-gradient": "15.0.7",
 	"expo-linking": "",
-	"expo-local-authentication": "~16.0.8",
 	"expo-location": "~18.0.9",
 	"expo-print": "~15.0.5",
 	"expo-router": "6.0.12",
@@ -131,14 +130,19 @@ const DEPS = {
 	"expo-blur": "~15.0.7",
 	"expo-secure-store": "15.0.7",
 	"expo-notifications": "~0.31.0",
-	"expo-fetch": "~0.1.4",
 	"expo-sensors": "~15.0.7",
 	"expo-crypto": "~14.0.2",
 	"expo-intent-launcher": "~13.0.6",
 	"expo-keep-awake": "15.0.0",
-	"expo-screen-orientation": "~8.0.8",
 	"expo-auth-session": "~6.1.0",
 	"expo-device": "~8.0.9",
+	// Deliberately NOT pre-warmed (do not re-add without a resolvable SDK-54
+	// pin): expo-fetch (phantom package — the real API is `expo/fetch`, part of
+	// expo core; the registry package is an empty 0.0.0 placeholder) and
+	// expo-local-authentication / expo-screen-orientation (fleet data only had
+	// pins from mixed older SDK eras; registry `latest` is SDK-57-era, wrong for
+	// SDK 54). Rare (12 projects total) — the per-project install resolves each
+	// project's real pin anyway.
 
 	"react-native-maps": "1.20.1",
 	"react-native-qrcode-svg": "^6.3.14",
@@ -181,7 +185,7 @@ const DEPS = {
 	"@expo-google-fonts/fraunces": "^0.2.3",
 	"@expo-google-fonts/dm-sans": "^0.4.1",
 	"@expo-google-fonts/outfit": "^0.4.1",
-	"@expo-google-fonts/instrument-serif": "^0.2.3",
+	"@expo-google-fonts/instrument-serif": "^0.4.1",
 	"@expo-google-fonts/work-sans": "^0.2.3",
 	"@expo-google-fonts/ibm-plex-mono": "^0.4.1",
 	"@expo-google-fonts/ibm-plex-sans": "^0.4.1",
@@ -192,7 +196,7 @@ const DEPS = {
 	"@expo-google-fonts/raleway": "^0.4.1",
 	"@expo-google-fonts/jost": "^0.4.0",
 	"@expo-google-fonts/montserrat": "^0.4.1",
-	"@expo-google-fonts/dm-serif-display": "0.2.4",
+	"@expo-google-fonts/dm-serif-display": "^0.4.2",
 	"@expo-google-fonts/roboto-slab": "^0.4.2",
 };
 
