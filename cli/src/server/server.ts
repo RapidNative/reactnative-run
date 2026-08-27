@@ -4,6 +4,7 @@ import { Router, sendText } from "./router.js";
 import { registerNativeRoutes } from "./routes/native.js";
 import { registerWebRoutes } from "./routes/web.js";
 import { HmrHub } from "./hmr.js";
+import { ClientRegistry } from "./clients.js";
 import type { BundlerSession } from "../bundler/session.js";
 import type { ProjectConfig } from "../project/config.js";
 
@@ -23,6 +24,14 @@ export interface ServerContext {
   /** Why a platform's session could not be built, surfaced to the device as a
    *  redbox instead of failing silently or taking the server down. */
   getPlatformError?: (platform: string) => string | null;
+  /**
+   * The native session a platform is currently served from, WITHOUT creating
+   * one (null when none exists yet, e.g. right after boot or a re-init). What
+   * the ws hub compares a device's recorded bundle against.
+   */
+  peekPlatformSession?: (platform: string) => BundlerSession | null;
+  /** What each device was served (created by startServer when absent). */
+  clients?: ClientRegistry;
   /** Set by startServer once the ws hub exists. */
   hub?: HmrHub;
 }
@@ -41,7 +50,12 @@ export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise
   registerNativeRoutes(router, ctx);
   registerWebRoutes(router, ctx);
 
-  const hub = new HmrHub(ctx.session);
+  ctx.clients ??= new ClientRegistry();
+  const hub = new HmrHub(ctx.session, {
+    clients: ctx.clients,
+    peekPlatformSession: (platform) => ctx.peekPlatformSession?.(platform) ?? null,
+    log: ctx.log,
+  });
   hub.onDeviceLog = (line) => ctx.log(line);
   ctx.hub = hub;
 

@@ -84,3 +84,25 @@ bundles to a device never pays for it.
 | `RNRUN_WORKLETS_PLUGIN` | — | explicit path to the worklets babel plugin |
 | `RNRUN_PKG_CACHE_DIR` | `$HOME/.rnrun/pkg-cache` | package-response cache |
 | `RNRUN_NO_PKG_CACHE` | — | disable the package-response cache |
+
+## Keeping devices in step with the server
+
+A phone holds the numeric module ids of the bundle it loaded, and RN's
+HMRClient never reconnects once its `/hot` socket drops. So a dev-server
+restart, a `package.json` re-init, or a patch missed while the bundle was
+downloading used to leave Expo Go either silently stale or throwing
+`Requiring unknown module "N"` on every edit. rnrun handles this the way
+Metro's revision map does, plus an automatic reload:
+
+- every manifest mints an `rnrunClient` token into `launchAsset.url`; the
+  bundle route records which bundler session + version it served per token;
+- `register-entrypoints` on `/hot` carries that URL back, and the initial
+  update is the **catch-up patch** for anything the device missed (or a
+  reload when it can't be patched);
+- native bundles carry a tiny dev client that connects to `/__rnrun`,
+  reconnects with backoff, and calls `DevSettings.reload()` when the server
+  no longer serves the bundle it is running. Reloads are per device,
+  rate-floored, and loop-free (a reload re-fetches the same URL, which
+  updates the token's record).
+
+Broadcast reloads (full rebuilds, re-inits) still go out on `/message`.
