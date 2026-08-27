@@ -15,9 +15,17 @@ import {
   INITIALIZE_CORE_SUBPATH,
   NATIVE_POLYFILL_SUBPATHS,
 } from "browser-metro";
+import { randomUUID } from "node:crypto";
 import { createHermesLoweringPlugin } from "./hermes-lowering.js";
 import { compileNativewindCss } from "../project/nativewind.js";
 import { bundleCacheKey, readCachedBundle, writeCachedBundle } from "./bundle-cache.js";
+import { HISTORY_LIMIT, mergeHistory, type HistoryEntry } from "./catch-up.js";
+import {
+  NATIVE_DEV_CLIENT_PATH,
+  NATIVE_DEV_CLIENT_SOURCE,
+  NATIVE_ENTRY_WRAPPER_PATH,
+  nativeEntryWrapperSource,
+} from "./native-dev-client.js";
 import type {
   BundleLineIndexEntry,
   BundlerConfig,
@@ -137,6 +145,29 @@ export class BundlerSession {
   private bundle = "";
   bundleVersion = 0;
   buildError: string | null = null;
+  /**
+   * Identity of this session's module-id space. The bundler mints numeric ids
+   * as it first sees modules, so two sessions (a re-init, a restart) number
+   * the same files differently, and a patch from one applied to a bundle
+   * from the other requires ids that were never defined. The server records
+   * the epoch it served to each device (server/clients.ts) and reloads the
+   * device when the session it is patching from is not that one. Stable
+   * across builds within the session: the IncrementalBundler (and its id
+   * registry) is created once, in the constructor.
+   */
+  readonly epoch = randomUUID().slice(0, 8);
+  /** Applied rebuilds, newest last, so a client that missed patches between
+   *  fetching its bundle and registering on /hot can be caught up (catchUp). */
+  private history: HistoryEntry[] = [];
+  /**
+   * VFS files the session writes itself (synthetic expo-router entry and
+   * route context, the native dev client) -- derived from the project files,
+   * so excluded from the bundle-cache key. Including them made the key differ
+   * between boot (computed before they exist) and every later write (after),
+   * so the bundle persisted after an edit never matched on the next wake and
+   * the fleet paid a full build on every wake that followed an edit.
+   */
+  private syntheticPaths = new Set<string>();
   private everBuilt = false;
   private buildingOnce: Promise<boolean> | null = null;
   /** Serving a bundle restored from disk (no module graph yet). */
@@ -272,6 +303,37 @@ export class BundlerSession {
     return this.bundler.moduleIds;
   }
 
+  /**
+   * The one patch that takes a client holding bundleVersion `from` to the
+   * current bundle (empty when it is current), or null when only a reload can
+   * -- a full rebuild happened since, or the history no longer reaches back.
+   */
+  catchUp(from: number): HmrUpdate | null {
+    return mergeHistory(this.history, from, this.bundleVersion);
+  }
+
+  private recordHistory(update: HmrUpdate | null): void {
+    this.history.push({ version: this.bundleVersion, update });
+    if (this.history.length > HISTORY_LIMIT) this.history.splice(0, this.history.length - HISTORY_LIMIT);
+  }
+
+  /**
+   * Native bundles boot through a wrapper that loads the dev client before
+   * the app (see native-dev-client.ts). Only for metro-format sessions of
+   * projects that actually depend on react-native: the client is inert
+   * without RN, and requiring it from a project that doesn't declare it
+   * would fail resolution.
+   */
+  private nativeBuildEntry(entry: string): string {
+    if (this.platform === "web" || !this.options.metroPrelude) return entry;
+    if (!("react-native" in this.projectDeps())) return entry;
+    this.vfs.write(NATIVE_DEV_CLIENT_PATH, NATIVE_DEV_CLIENT_SOURCE);
+    this.vfs.write(NATIVE_ENTRY_WRAPPER_PATH, nativeEntryWrapperSource(entry));
+    this.syntheticPaths.add(NATIVE_DEV_CLIENT_PATH);
+    this.syntheticPaths.add(NATIVE_ENTRY_WRAPPER_PATH);
+    return NATIVE_ENTRY_WRAPPER_PATH;
+  }
+
   /** Bundle-line → module ranges from the last metro emit (for /symbolicate). */
   getNativeLineIndex(): BundleLineIndexEntry[] {
     return this.bundler.nativeLineIndex;
@@ -348,12 +410,15 @@ export class BundlerSession {
     return this.buildingOnce;
   }
 
-  /** Cache key for the CURRENT VFS + config state. */
+  /** Cache key for the CURRENT VFS + config state (project files only -- see
+   *  syntheticPaths). */
   private cacheKey(): string {
+    const files = { ...this.vfs.toFileMap() };
+    for (const p of this.syntheticPaths) delete files[p];
     return bundleCacheKey({
       platform: this.platform,
       toolVersions: this.options.toolVersions ?? "unknown",
-      files: this.vfs.toFileMap(),
+      files,
       assetMeta: this.options.assetMeta,
       env: this.options.env,
       prelude: this.options.metroPrelude,
@@ -391,6 +456,7 @@ export class BundlerSession {
       this.everBuilt = true;
       this.graphBuilt = false;
       this.restoredFromCache = true;
+      this.recordHistory(null);
       this.options.warn?.(
         `[${this.platform}] served a cached bundle (${(cached.length / 1024).toFixed(0)} KB); module graph builds lazily on first edit`
       );
@@ -406,20 +472,27 @@ export class BundlerSession {
     if (this.options.nativewind && this.nativewindCss.size === 0) {
       await this.refreshNativewindCss();
     }
+    const before = new Set(Object.keys(this.vfs.toFileMap()));
     const entry = ensureEntryFile(this.vfs);
+    // Whatever ensureEntryFile wrote (expo-router's /index.tsx + /__expo_ctx.js)
+    // is derived from the project files, not one of them.
+    for (const p of Object.keys(this.vfs.toFileMap())) if (!before.has(p)) this.syntheticPaths.add(p);
     if (!entry) {
       this.buildError = "No entry file found (looked for /index.*, /App.*, package.json main).";
       this.emit({ type: "build-error", message: this.buildError });
       return false;
     }
     try {
-      const result = await this.bundler.build(entry);
+      const result = await this.bundler.build(this.nativeBuildEntry(entry));
       this.bundle = result.bundle;
       this.bundleVersion++;
       this.buildError = null;
       this.everBuilt = true;
       this.graphBuilt = true;
       this.restoredFromCache = false;
+      // A fresh graph: nothing a client on an earlier version can be patched
+      // up to (ids may have been re-minted), hence the null entry.
+      this.recordHistory(null);
       writeCachedBundle(key, result.bundle);
       return true;
     } catch (err) {
@@ -470,12 +543,14 @@ export class BundlerSession {
       writeCachedBundle(this.cacheKey(), result.bundle);
 
       if (result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload) {
+        this.recordHistory(null);
         this.emit({
           type: "reload",
           bundleVersion: this.bundleVersion,
           reason: result.hmrUpdate?.reloadReason,
         });
       } else {
+        this.recordHistory(result.hmrUpdate);
         this.emit({ type: "hmr", update: result.hmrUpdate, bundleVersion: this.bundleVersion });
       }
       // Source/css edits may change tailwind's output; recompile without

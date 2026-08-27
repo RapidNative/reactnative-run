@@ -91,6 +91,14 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // request for that platform -- an Expo Go scan shouldn't cost anything until
   // a device actually asks for a bundle.
   const nativeSessions = new Map<string, Promise<BundlerSession>>();
+  // The session each platform is CURRENTLY served from (set as soon as it is
+  // created, before its build finishes, so a device that reconnects during
+  // the build already compares against the right epoch and its bundle request
+  // coalesces onto that build) -- what the ws hub reads through
+  // ctx.peekPlatformSession. Plus each session's hub subscription, so a
+  // re-init can drop it instead of leaving a dead session listening.
+  const readyNative = new Map<string, BundlerSession>();
+  const nativeUnsubs = new Map<string, () => void>();
   const makeNativeSession = async (platform: "ios" | "android"): Promise<BundlerSession> => {
     log.info(`Building first ${platform} bundle (Metro format) ...`);
     const rescan = scanProject(rootDir);
@@ -138,7 +146,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
       else if (e.type === "hmr") log.info(`[${platform}] Fast Refresh: ${Object.keys(e.update.updatedModules).length} module(s)`);
     });
     // Metro /hot protocol (Fast Refresh) + /message reload fan-out.
-    dev.hub.attachNativeSession(native);
+    readyNative.set(platform, native);
+    nativeUnsubs.get(platform)?.();
+    nativeUnsubs.set(platform, dev.hub.attachNativeSession(native));
     const t = performance.now();
     const ok = await native.build();
     if (ok) {
@@ -173,6 +183,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
             // Drop the rejected promise so a retry after a fix can succeed
             // without restarting the server.
             nativeSessions.delete(platform);
+            readyNative.delete(platform);
             throw err;
           })
         );
@@ -184,6 +195,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       }
     },
     getPlatformError: (platform: string) => nativeSessionErrors.get(platform) ?? null,
+    peekPlatformSession: (platform: string) => readyNative.get(platform) ?? null,
   };
 
   // Bind the server BEFORE the first build: build errors are served/pushed
@@ -309,6 +321,11 @@ export async function startCommand(options: StartOptions): Promise<void> {
     });
     // Swap the session everywhere, rewire hub + terminal logging. Native
     // sessions are dropped and rebuilt lazily on the next device request.
+    // Devices learn from the hub that their bundle's session is gone and
+    // reload (on top of the reloadAll below).
+    for (const off of nativeUnsubs.values()) off();
+    nativeUnsubs.clear();
+    readyNative.clear();
     nativeSessions.clear();
     session = fresh;
     ctx.session = fresh;

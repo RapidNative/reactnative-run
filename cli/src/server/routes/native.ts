@@ -5,6 +5,7 @@ import { vfsToDisk } from "../../project/scan.js";
 import type { Router } from "../router.js";
 import { sendText, sendJson } from "../router.js";
 import type { ServerContext } from "../server.js";
+import { CLIENT_TOKEN_PARAM, clientTokenFromUrl, newClientToken } from "../clients.js";
 
 /**
  * Metro/Expo-compatible endpoint surface. The bundle route serves web today
@@ -114,6 +115,12 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
         })
       );
       return;
+    }
+    // Remember what this device is about to run, so the /hot handshake and
+    // the dev client can tell later whether it is still in step (clients.ts).
+    const token = platform !== "web" ? clientTokenFromUrl(url.href) : null;
+    if (token) {
+      ctx.clients?.record(token, { platform, epoch: session.epoch, version: session.bundleVersion });
     }
     res.writeHead(200, {
       "Content-Type": "application/javascript",
@@ -274,7 +281,10 @@ function buildManifest(ctx: ServerContext, platform: string, host: string): obje
     launchAsset: {
       key: "bundle",
       contentType: "application/javascript",
-      url: `http://${host}/index.bundle?platform=${platform}&dev=true&hot=false&lazy=true`,
+      // One token per manifest fetch (i.e. per device launch). The device
+      // registers on /hot with this exact URL and its SourceCode.scriptURL is
+      // this URL, which is how the server knows which bundle it is running.
+      url: `http://${host}/index.bundle?platform=${platform}&dev=true&hot=false&lazy=true&${CLIENT_TOKEN_PARAM}=${newClientToken()}`,
     },
     assets: [],
     metadata: {},
