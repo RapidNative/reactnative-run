@@ -3,13 +3,22 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
-import { execSync, exec } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
 
-// Async exec for long-running installs: execSync blocks the WHOLE event loop
-// (a 300s bun install froze every concurrent build in the process), so any
+// SECURITY: every subprocess in this file uses execFile/execFileSync with an
+// argv ARRAY, never a shell string. `exec`/`execSync` spawn `/bin/sh -c` and
+// interpolating a user-controlled package name/version into that string is an
+// OS command injection (CVE-class: unauthenticated RCE). execFile passes each
+// argument straight to execve with no shell, so a metacharacter in a package
+// name is an inert literal, not a command. Do NOT reintroduce exec/execSync
+// here. Input is ALSO validated (see isValidPackageName/isValidVersionRange)
+// as a second layer.
+//
+// Async exec for long-running installs: the sync form blocks the WHOLE event
+// loop (a 300s bun install froze every concurrent build in the process), so any
 // install that can take more than a second must go through this.
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // bun install occasionally hangs under piped spawn until it is SIGKILLed. The
 // old 300s bound meant a single hang cost 5 min, and the bun->bun->npm ladder
@@ -23,6 +32,7 @@ import esbuild from "esbuild";
 import flowRemoveTypes from "flow-remove-types";
 import { sweepCache } from "./retention";
 import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } from "./output";
+import { isValidPackageName, isValidVersionRange } from "./validation";
 import {
 	BuildPlatform,
 	normalizePlatform,
@@ -492,7 +502,7 @@ function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
 					})();
 					console.log(`[worklets] installing react-native-worklets@${range} into build root for the babel plugin`);
 					try {
-						await execAsync(`npm install 'react-native-worklets@${range}' --no-save --no-audit --no-fund`, {
+						await execFileAsync("npm", ["install", `react-native-worklets@${range}`, "--no-save", "--no-audit", "--no-fund"], {
 							cwd: root,
 							killSignal: "SIGKILL",
 							timeout: 120000,
@@ -633,6 +643,10 @@ function parseSpecifier(raw: string) {
 		version = "latest";
 	}
 
+	// SECURITY: reject non-canonical names/versions -> caller returns 400 before
+	// pkgName/version reach npm (subprocess) or path.join (filesystem).
+	if (!isValidPackageName(pkgName) || !isValidVersionRange(version)) return null;
+
 	return { pkgName, version, subpath };
 }
 
@@ -683,9 +697,11 @@ async function resolveVersionAsync(pkgName: string, range: string): Promise<stri
 		} catch { /* fall through to npm view fallback */ }
 	}
 
-	// Fallback: npm view (handles semver ranges and dist-tags if HTTP failed)
+	// Fallback: npm view (handles semver ranges and dist-tags if HTTP failed).
+	// execFileSync (argv array, no shell) — pkgName/range are never interpolated
+	// into a command string.
 	try {
-		const result = execSync(`npm view ${pkgName}@${range} version`, {
+		const result = execFileSync("npm", ["view", `${pkgName}@${range}`, "version"], {
 			stdio: ["pipe", "pipe", "pipe"],
 			timeout: 10000,
 		}).toString().trim();
@@ -812,7 +828,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
 	try {
 		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "pkg-tmp", version: "1.0.0" }));
-		await execAsync(`npm install '${pkgName}@${version}' --legacy-peer-deps --no-audit --no-fund`, {
+		await execFileAsync("npm", ["install", `${pkgName}@${version}`, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
 			cwd: tmpDir,
 			killSignal: "SIGKILL",
 			timeout: 180000,
@@ -1122,6 +1138,12 @@ const inflightBundleBuilds = new Map<string, Promise<void>>();
 app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 	try {
 		let rnVersion = String(req.params.rnVersion);
+		// SECURITY: rnVersion flows into npm subprocesses below; reject anything
+		// that isn't a valid version/range before it gets there.
+		if (!isValidVersionRange(rnVersion)) {
+			res.header("Cache-Control", "no-store").status(400).send("// Invalid react-native version\n");
+			return;
+		}
 		if (needsResolution(rnVersion)) {
 			rnVersion = (await resolveVersionAsync("react-native", rnVersion)) || rnVersion;
 		}
@@ -1135,20 +1157,20 @@ app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 
 		console.log(`[prelude] building metro-runtime require.js for rn@${rnVersion}`);
 		// Which metro-runtime does this RN pin?
-		const { stdout } = await execAsync(
-			`npm view react-native@${rnVersion} dependencies.metro-runtime`,
-			{ killSignal: "SIGKILL",
-			timeout: 30000 }
+		const { stdout } = await execFileAsync(
+			"npm",
+			["view", `react-native@${rnVersion}`, "dependencies.metro-runtime"],
+			{ killSignal: "SIGKILL", timeout: 30000 }
 		);
 		const range = stdout.trim() || "latest";
 
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "prelude-"));
 		try {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "prelude-tmp", version: "1.0.0" }));
-			await execAsync(`npm install 'metro-runtime@${range}' --no-audit --no-fund`, {
+			await execFileAsync("npm", ["install", `metro-runtime@${range}`, "--no-audit", "--no-fund"], {
 				cwd: tmpDir,
 				killSignal: "SIGKILL",
-			timeout: 120000,
+				timeout: 120000,
 				maxBuffer: 16 * 1024 * 1024,
 			});
 			const requireJs = fs.readFileSync(
@@ -1300,10 +1322,10 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 				path.join(envDir, "package.json"),
 				JSON.stringify({ name: "nativewind-env", version: "1.0.0", dependencies: envDeps })
 			);
-			await execAsync(`npm install --legacy-peer-deps --no-audit --no-fund`, {
+			await execFileAsync("npm", ["install", "--legacy-peer-deps", "--no-audit", "--no-fund"], {
 				cwd: envDir,
 				killSignal: "SIGKILL",
-			timeout: 180000,
+				timeout: 180000,
 				maxBuffer: 16 * 1024 * 1024,
 			});
 		}
@@ -1332,10 +1354,10 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 			}
 
 			const t = Date.now();
-			const { stdout } = await execAsync(
-				`node runner.cjs ${JSON.stringify(workdir)} ${platform}`,
-				{ cwd: envDir, killSignal: "SIGKILL",
-			timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
+			const { stdout } = await execFileAsync(
+				"node",
+				["runner.cjs", workdir, platform],
+				{ cwd: envDir, killSignal: "SIGKILL", timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
 			);
 			const data = JSON.parse(stdout);
 			const degraded = platform !== "web" ? degradeIncompatibleAnimations(data, versions) : 0;
@@ -1402,6 +1424,18 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		return;
 	}
 
+	// SECURITY: dependency names/versions come straight from the POST body and
+	// are passed to `bun install`/`npm install`. execFile (argv array) already
+	// prevents shell injection; validating here additionally rejects npm-flag
+	// injection (a name/version starting with `-`), path-traversal names, and
+	// junk that would only waste an install attempt.
+	for (const [name, ver] of Object.entries(dependencies)) {
+		if (!isValidPackageName(name) || !isValidVersionRange(ver)) {
+			res.header("Cache-Control", "no-store").status(400).send("// Invalid dependency name or version\n");
+			return;
+		}
+	}
+
 	// Absent/unknown platform is "web" -- byte-identical to the platform-less
 	// protocol, so existing clients and cached hashes are unaffected.
 	const platform = normalizePlatform(rawPlatform);
@@ -1411,8 +1445,14 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 	// private internals (one CurrentRouteContext, one router store) instead of
 	// each subpath re-bundling a duplicate copy. See the combined-build logic
 	// below and collectUsedSubpaths in browser-metro.
+	// SECURITY: subpaths are interpolated into generated `require("<sub>")` entry
+	// files; restrict to a safe package-subpath charset so a crafted value can't
+	// break out of the string literal (code injection into a served bundle) or
+	// traverse the filesystem. Legit subpaths (expo-router/drawer,
+	// @react-navigation/native, react-dom/client) all match.
+	const SUBPATH_RE = /^[a-zA-Z0-9@][a-zA-Z0-9@/._-]*$/;
 	const requestedSubpaths = Array.isArray(rawSubpaths)
-		? rawSubpaths.filter((s): s is string => typeof s === "string")
+		? rawSubpaths.filter((s): s is string => typeof s === "string" && !s.includes("..") && SUBPATH_RE.test(s))
 		: [];
 
 	// Compute hash if not provided
@@ -1461,9 +1501,6 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 
 	try {
 		// Install ALL deps in one go (bun install — ~6-7x faster than npm)
-		const installArgs = Object.entries(dependencies)
-			.map(([name, ver]) => `'${name}@${ver}'`)
-			.join(" ");
 		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "bundle-deps-tmp", version: "1.0.0" }));
 		const installStart = Date.now();
 
@@ -1477,11 +1514,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		const MAX_RETRIES = 3;
 		let installed = false;
 		for (let attempt = 0; attempt < MAX_RETRIES && !installed; attempt++) {
-			const args = Object.entries(workingDeps)
-				.map(([n, v]) => `'${n}@${v}'`)
-				.join(" ");
+			// argv array, not a shell string: each `name@ver` is one literal
+			// argument, so a metacharacter in a dependency name/version (POST body)
+			// cannot inject a command.
+			const specs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
 			try {
-				await execAsync(`bun install --no-progress ${args}`, {
+				await execFileAsync("bun", ["install", "--no-progress", ...specs], {
 					cwd: tmpDir,
 					// The common dep set (expo/react-native/nativewind/supabase +
 					// the @expo-google-fonts family and other recurring extras) is
@@ -1536,11 +1574,11 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				if (removed.length === 0 && timedOut && attempt < MAX_RETRIES - 1) {
 					console.warn(`[bundle-deps] bun install timed out (${BUN_INSTALL_TIMEOUT_MS}ms) — falling back to npm install`);
 					try {
-						const npmArgs = Object.entries(workingDeps).map(([n, v]) => `'${n}@${v}'`).join(" ");
-						await execAsync(`npm install ${npmArgs} --legacy-peer-deps --no-audit --no-fund`, {
+						const npmSpecs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
+						await execFileAsync("npm", ["install", ...npmSpecs, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
 							cwd: tmpDir,
 							killSignal: "SIGKILL",
-			timeout: 420000,
+							timeout: 420000,
 							maxBuffer: 16 * 1024 * 1024,
 						});
 						installed = true;
