@@ -9,7 +9,7 @@ import {
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
 import { formatTransformError } from "./transform-error.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, INITIALIZE_CORE_SUBPATH } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -285,8 +285,9 @@ export class Bundler {
   }
 
   /** Resolve an npm specifier to a versioned form using package.json versions.
-   *  Priority: user's package.json > transitive dep versions from manifests >
-   *  react-native's version for `@react-native/*` > bare name */
+   *  Priority: user's package.json > react's version for `react-dom` >
+   *  transitive dep versions from manifests > react-native's version for
+   *  `@react-native/*` > bare name */
   private resolveNpmSpecifier(
     specifier: string,
     versions: Record<string, string>,
@@ -303,6 +304,7 @@ export class Bundler {
 
     const version =
       versions[baseName] ||
+      reactDomVersionFor(baseName, versions) ||
       (transitiveDepsVersions && transitiveDepsVersions[baseName]) ||
       rnCoreVersionFor(baseName, versions);
     if (!version) return specifier;
