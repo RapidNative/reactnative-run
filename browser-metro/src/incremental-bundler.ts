@@ -719,6 +719,28 @@ export class IncrementalBundler {
   }
 
   /**
+   * A resolved local dep with no VFS content can't be processed, but its
+   * importer's dependency map still references it — on metro-format output
+   * that mints a numeric id the bundle never defines, and the device throws
+   * the unactionable 'Requiring unknown module "N"' (seen in production when
+   * a binary asset never reached the workspace: the app booted, then every
+   * render of the importing component threw the mystery number). Register a
+   * throwing stub instead: the id is defined, the build stays alive
+   * (mid-stream the file may land moments later, and the rebuild that
+   * creates it replaces the stub), and touching the module at runtime names
+   * the real file, Metro-style.
+   */
+  private stubMissingModule(filePath: string, importer?: string): void {
+    if (this.moduleMap[filePath] !== undefined) return;
+    const from = importer ? ` from "${importer}"` : "";
+    const hint = this.resolver.isAssetFile(filePath)
+      ? "The asset file is missing from the project — it may not have been saved or synced yet."
+      : "The file does not exist on the project filesystem.";
+    this.moduleMap[filePath] =
+      "throw new Error(" + JSON.stringify(`Unable to resolve "${filePath}"${from}. ${hint}`) + ");";
+  }
+
+  /**
    * Walk the dependency tree starting from a file, processing all reachable modules.
    *
    * Returns all files that were visited and processed, so callers can include
@@ -726,23 +748,29 @@ export class IncrementalBundler {
    * be sent to the iframe — transitive deps (e.g. hooks/index.ts → hooks/useAuth.ts)
    * would be missing from the HMR payload, causing "Module not found" at runtime.
    *
-   * Files that don't exist yet on the VFS are silently skipped. During AI streaming,
-   * a barrel file (e.g. seeds/index.ts) may reference a sibling (e.g. seeds/users.ts)
-   * that hasn't been created yet. Without this guard, processFile() would throw
-   * "File not found" and crash the entire rebuild. The missing file will be picked
-   * up on a subsequent rebuild once it's created.
+   * Files that don't exist yet on the VFS don't crash the walk. During AI
+   * streaming, a barrel file (e.g. seeds/index.ts) may reference a sibling
+   * (e.g. seeds/users.ts) that hasn't been created yet; processFile() would
+   * throw "File not found" and kill the entire rebuild. They are not silently
+   * skipped either — that left the importer's dependency map pointing at a
+   * module id the bundle never defines (see stubMissingModule). Each one gets
+   * a throwing stub and is replaced for real on the rebuild that creates it.
    */
   private walkDeps(
     startFile: string,
     npmPackagesNeeded: Set<string>,
   ): string[] {
     const visited = new Set<string>();
-    const queue = [startFile];
+    const queue: Array<{ path: string; importer?: string }> = [{ path: startFile }];
 
     while (queue.length > 0) {
-      const filePath = queue.shift()!;
+      const { path: filePath, importer } = queue.shift()!;
       if (visited.has(filePath)) continue;
-      if (!this.fs.exists(filePath)) continue;
+      if (!this.fs.exists(filePath)) {
+        this.stubMissingModule(filePath, importer);
+        visited.add(filePath);
+        continue;
+      }
       visited.add(filePath);
 
       const { localDeps, npmDeps } = this.processFile(filePath);
@@ -753,7 +781,7 @@ export class IncrementalBundler {
 
       for (const dep of localDeps) {
         if (!visited.has(dep)) {
-          queue.push(dep);
+          queue.push({ path: dep, importer: filePath });
         }
       }
     }
@@ -1168,7 +1196,16 @@ export class IncrementalBundler {
       // HMR updatedModules payload. Previously only the direct dep was pushed,
       // so transitive deps (e.g. barrel re-exports) were missing from HMR.
       for (const dep of localDeps) {
-        if (!this.graph.hasModule(dep) && this.fs.exists(dep)) {
+        if (!this.fs.exists(dep)) {
+          // A dep deleted in THIS batch is already in removedModules; don't
+          // also ship a stub for it in the same update. Anything else missing
+          // gets the throwing stub so the HMR payload defines the id the
+          // edited module now references (see stubMissingModule).
+          if (!removedModules.includes(dep)) {
+            this.stubMissingModule(dep, filePath);
+            rebuiltModules.push(dep);
+          }
+        } else if (!this.graph.hasModule(dep)) {
           const walked = this.walkDeps(dep, npmPackagesNeeded);
           for (const w of walked) {
             rebuiltModules.push(w);
