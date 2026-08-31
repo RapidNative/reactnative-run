@@ -517,3 +517,25 @@ export function rnCoreVersionFor(
   if (!baseName.startsWith("@react-native/")) return undefined;
   return versions["react-native"];
 }
+
+/**
+ * The version to fetch `react-dom` at when the project doesn't declare it: react's own.
+ *
+ * React requires `react` and `react-dom` to be the EXACT same version — react-dom throws
+ * "Incompatible React versions" at boot otherwise. Expo templates declare `react` but usually not
+ * `react-dom` (it only matters on web, where react-native-web pulls it in as a peer). The package
+ * server npm-installs react-native-web in isolation, so npm resolves that peer range to the newest
+ * matching release and `X-Externals` pins react-dom there (e.g. react 19.1.0 declared, react-dom
+ * 19.2.8 fetched) — guaranteed to drift from the project's react whenever npm publishes a newer one.
+ *
+ * Callers consult this BEFORE transitiveDepsVersions so the project's declared react always wins
+ * over the server's isolated peer resolution. An explicit `react-dom` entry in package.json still
+ * takes priority via the `versions[baseName]` lookup ahead of this.
+ */
+export function reactDomVersionFor(
+  baseName: string,
+  versions: Record<string, string>,
+): string | undefined {
+  if (baseName !== "react-dom") return undefined;
+  return versions["react"];
+}
