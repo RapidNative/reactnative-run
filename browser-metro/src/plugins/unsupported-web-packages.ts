@@ -551,6 +551,118 @@ export const UNSUPPORTED_WEB_PACKAGES: Record<string, UnsupportedPackageEntry> =
       Sentry.__esModule = true;
     `,
   },
+  // Google Mobile Ads (AdMob): native ad rendering with no web analogue. Uses the
+  // unsupported tier with a MANUAL mount-notice (not degraded) because the default
+  // export is a callable factory — mobileAds().initialize() — and degradedWrapper's
+  // forwardRef wrapping would make it non-callable. BannerAd renders a neutral
+  // placeholder and posts the banner notice on mount; imperative APIs resolve
+  // safely (consent "not required", interstitials load but never show).
+  "react-native-google-mobile-ads": {
+    mode: "unsupported",
+    stub: `
+      var React = require('react');
+      var RN = require('react-native');
+      var __posted = false;
+      function __postNotice() {
+        if (__posted) return;
+        __posted = true;
+        try {
+          if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+            var route = '';
+            try { route = (window.location.hash || '').replace(/^#/, ''); } catch (e) {}
+            window.parent.postMessage({
+              type: 'iframe.preview.notice',
+              payload: {
+                package: 'react-native-google-mobile-ads',
+                note: 'Ads show as a neutral placeholder here — real banner ads render once your app runs as an installed build.',
+                route: route
+              }
+            }, '*');
+          }
+        } catch (e) {}
+      }
+
+      function BannerAd(props) {
+        React.useEffect(function () {
+          __postNotice();
+          if (props && typeof props.onAdLoaded === 'function') {
+            try { props.onAdLoaded(); } catch (e) {}
+          }
+        }, []);
+        return React.createElement(
+          RN.View,
+          { style: { height: 56, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', backgroundColor: '#f3f4f6' } },
+          React.createElement(RN.Text, { style: { color: '#9ca3af', fontSize: 12 } }, 'Ad')
+        );
+      }
+
+      function _noop() {}
+      function _resolveVoid() { return Promise.resolve(); }
+      function _fullScreenAd() {
+        return {
+          load: _noop,
+          show: function () {
+            __postNotice();
+            return Promise.reject(new Error('Full-screen ads are not available in this preview.'));
+          },
+          addAdEventListener: function () { return _noop; },
+          removeAllListeners: _noop,
+          loaded: false
+        };
+      }
+
+      function mobileAds() {
+        return {
+          initialize: function () { return Promise.resolve([]); },
+          setRequestConfiguration: _resolveVoid,
+          openAdInspector: function () { return Promise.reject(new Error('Ad inspector unavailable in preview.')); },
+          openDebugMenu: _noop
+        };
+      }
+
+      module.exports = mobileAds;
+      mobileAds.default = mobileAds;
+      mobileAds.__esModule = true;
+      mobileAds.BannerAd = BannerAd;
+      mobileAds.GAMBannerAd = BannerAd;
+      mobileAds.BannerAdSize = {
+        BANNER: 'BANNER', FULL_BANNER: 'FULL_BANNER', LARGE_BANNER: 'LARGE_BANNER',
+        LEADERBOARD: 'LEADERBOARD', MEDIUM_RECTANGLE: 'MEDIUM_RECTANGLE',
+        ADAPTIVE_BANNER: 'ADAPTIVE_BANNER',
+        ANCHORED_ADAPTIVE_BANNER: 'ANCHORED_ADAPTIVE_BANNER',
+        INLINE_ADAPTIVE_BANNER: 'INLINE_ADAPTIVE_BANNER',
+        WIDE_SKYSCRAPER: 'WIDE_SKYSCRAPER'
+      };
+      mobileAds.TestIds = {
+        ADAPTIVE_BANNER: 'ca-app-pub-3940256099942544/9214589741',
+        BANNER: 'ca-app-pub-3940256099942544/6300978111',
+        INTERSTITIAL: 'ca-app-pub-3940256099942544/1033173712',
+        REWARDED: 'ca-app-pub-3940256099942544/5224354917',
+        REWARDED_INTERSTITIAL: 'ca-app-pub-3940256099942544/5354046379',
+        APP_OPEN: 'ca-app-pub-3940256099942544/9257395921',
+        NATIVE: 'ca-app-pub-3940256099942544/2247696110'
+      };
+      mobileAds.AdsConsent = {
+        requestInfoUpdate: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true, isConsentFormAvailable: false }); },
+        gatherConsent: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true }); },
+        showForm: function () { return Promise.resolve({ status: 'NOT_REQUIRED' }); },
+        loadAndShowConsentFormIfRequired: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true }); },
+        getConsentInfo: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true, isConsentFormAvailable: false }); },
+        getUserChoices: function () { return Promise.resolve({}); },
+        reset: _noop
+      };
+      mobileAds.AdEventType = {
+        LOADED: 'loaded', ERROR: 'error', OPENED: 'opened', CLOSED: 'closed',
+        CLICKED: 'clicked', PAID: 'paid'
+      };
+      mobileAds.RewardedAdEventType = { LOADED: 'rewarded_loaded', EARNED_REWARD: 'rewarded_earned_reward' };
+      mobileAds.MaxAdContentRating = { G: 'G', PG: 'PG', T: 'T', MA: 'MA' };
+      mobileAds.InterstitialAd = { createForAdRequest: _fullScreenAd };
+      mobileAds.RewardedAd = { createForAdRequest: _fullScreenAd };
+      mobileAds.RewardedInterstitialAd = { createForAdRequest: _fullScreenAd };
+      mobileAds.AppOpenAd = { createForAdRequest: _fullScreenAd };
+    `,
+  },
   // "react-native-keychain": {
   //   stub: `module.exports = {
   //     getGenericPassword: async () => false,
