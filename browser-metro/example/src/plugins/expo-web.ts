@@ -37,12 +37,38 @@ function _cleanStyle(style) {
   return style;
 }
 
+// Convert className -> $$css only for RN primitives. Real nativewind maps
+// className onto styles only for registered components; every other component
+// receives className as an ordinary prop it can read and merge into its own
+// inner elements. Converting on every type deleted className before user
+// components could read it, silently dropping their classes. Collected lazily
+// from react-native(-web)'s exports; if that require fails we fall back to
+// converting everywhere (the old behavior) rather than styling nothing.
+var _prims = null; // null = not built yet; array = identity list; false = convert everything
+function _shouldConvert(type) {
+  if (_prims === null) {
+    try {
+      var RN = require("react-native");
+      var names = ["View", "Text", "Image", "ImageBackground", "TextInput",
+        "Pressable", "TouchableOpacity", "TouchableHighlight",
+        "TouchableWithoutFeedback", "TouchableNativeFeedback", "ScrollView",
+        "FlatList", "SectionList", "VirtualizedList", "SafeAreaView",
+        "KeyboardAvoidingView", "Modal", "ActivityIndicator", "Switch",
+        "RefreshControl", "StatusBar"];
+      var list = [];
+      for (var i = 0; i < names.length; i++) if (RN[names[i]]) list.push(RN[names[i]]);
+      _prims = list.length ? list : false;
+    } catch (e) { _prims = false; }
+  }
+  return _prims === false || _prims.indexOf(type) !== -1;
+}
+
 React.createElement = function() {
   var args = Array.prototype.slice.call(arguments);
   var type = args[0];
   var props = args[1];
 
-  if (props && typeof type !== "string") {
+  if (props && typeof type !== "string" && _shouldConvert(type)) {
     var needsClone = false;
 
     // Handle className -> $$css conversion
