@@ -502,7 +502,7 @@ function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
 					})();
 					console.log(`[worklets] installing react-native-worklets@${range} into build root for the babel plugin`);
 					try {
-						await execFileAsync("npm", ["install", `react-native-worklets@${range}`, "--no-save", "--no-audit", "--no-fund"], {
+						await execFileAsync("npm", ["install", "--ignore-scripts", `react-native-worklets@${range}`, "--no-save", "--no-audit", "--no-fund"], {
 							cwd: root,
 							killSignal: "SIGKILL",
 							timeout: 120000,
@@ -828,7 +828,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 
 	try {
 		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "pkg-tmp", version: "1.0.0" }));
-		await execFileAsync("npm", ["install", `${pkgName}@${version}`, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
+		await execFileAsync("npm", ["install", "--ignore-scripts", `${pkgName}@${version}`, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
 			cwd: tmpDir,
 			killSignal: "SIGKILL",
 			timeout: 180000,
@@ -1167,7 +1167,7 @@ app.get("/prelude/:rnVersion", async (req: Request, res: Response) => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "prelude-"));
 		try {
 			fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "prelude-tmp", version: "1.0.0" }));
-			await execFileAsync("npm", ["install", `metro-runtime@${range}`, "--no-audit", "--no-fund"], {
+			await execFileAsync("npm", ["install", "--ignore-scripts", `metro-runtime@${range}`, "--no-audit", "--no-fund"], {
 				cwd: tmpDir,
 				killSignal: "SIGKILL",
 				timeout: 120000,
@@ -1322,7 +1322,7 @@ app.post("/nativewind-css", async (req: Request, res: Response) => {
 				path.join(envDir, "package.json"),
 				JSON.stringify({ name: "nativewind-env", version: "1.0.0", dependencies: envDeps })
 			);
-			await execFileAsync("npm", ["install", "--legacy-peer-deps", "--no-audit", "--no-fund"], {
+			await execFileAsync("npm", ["install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund"], {
 				cwd: envDir,
 				killSignal: "SIGKILL",
 				timeout: 180000,
@@ -1519,7 +1519,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			// cannot inject a command.
 			const specs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
 			try {
-				await execFileAsync("bun", ["install", "--no-progress", ...specs], {
+				await execFileAsync("bun", ["install", "--no-progress", "--ignore-scripts", ...specs], {
 					cwd: tmpDir,
 					// The common dep set (expo/react-native/nativewind/supabase +
 					// the @expo-google-fonts family and other recurring extras) is
@@ -1575,7 +1575,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					console.warn(`[bundle-deps] bun install timed out (${BUN_INSTALL_TIMEOUT_MS}ms) — falling back to npm install`);
 					try {
 						const npmSpecs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
-						await execFileAsync("npm", ["install", ...npmSpecs, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
+						await execFileAsync("npm", ["install", "--ignore-scripts", ...npmSpecs, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
 							cwd: tmpDir,
 							killSignal: "SIGKILL",
 							timeout: 420000,
@@ -2157,6 +2157,12 @@ if (retentionMode === "on" || retentionMode === "dry") {
 	console.log(`[retention] enabled (${dryRun ? "dry run" : "evicting"}), sweeping every ${everyMs / 60000}min`);
 }
 
-app.listen(PORT, () => {
-	console.log(`Package server running at http://localhost:${PORT}`);
+// SECURITY: bind loopback ONLY. This server sits behind nginx (which proxies
+// from 127.0.0.1) + Cloudflare; listening on 0.0.0.0 exposed :5200 to the
+// public internet, letting an attacker reach the app directly and bypass the
+// nginx WAF/rate limiting entirely. There is a host firewall too, but binding
+// loopback makes the exposure impossible regardless of firewall state.
+const BIND_HOST = process.env.ESM_BIND_HOST || "127.0.0.1";
+app.listen(PORT, BIND_HOST, () => {
+	console.log(`Package server running at http://${BIND_HOST}:${PORT}`);
 });
