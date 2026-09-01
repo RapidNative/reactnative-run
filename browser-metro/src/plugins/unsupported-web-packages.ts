@@ -503,6 +503,54 @@ export const UNSUPPORTED_WEB_PACKAGES: Record<string, UnsupportedPackageEntry> =
       };
     `,
   },
+  // Sentry crash reporting: JS-heavy SDK whose native hooks don't exist here, and
+  // whose bundle weight buys the preview nothing. Silent no-op tier — no banner:
+  // monitoring is invisible UI-wise, so a notice would only confuse. wrap()/
+  // ErrorBoundary pass children through untouched; capture/init/setUser are no-ops.
+  // The rapidnative `sentry` skill routes access through a facade that skips the
+  // SDK in the preview anyway — this stub is the safety net for direct imports.
+  "@sentry/react-native": {
+    mode: "unsupported",
+    stub: `
+      var React = require('react');
+      function _noop() {}
+      function _id(x) { return x; }
+      function ErrorBoundary(props) { return (props && props.children) || null; }
+      function TouchEventBoundary(props) { return (props && props.children) || null; }
+      var _scope = {
+        setUser: _noop, setTag: _noop, setTags: _noop, setExtra: _noop, setExtras: _noop,
+        setContext: _noop, setLevel: _noop, addBreadcrumb: _noop, clear: _noop
+      };
+      var Sentry = {
+        init: _noop, close: function () { return Promise.resolve(true); },
+        wrap: _id,
+        captureException: function () { return ''; },
+        captureMessage: function () { return ''; },
+        captureEvent: function () { return ''; },
+        setUser: _noop, setTag: _noop, setTags: _noop, setExtra: _noop, setExtras: _noop,
+        setContext: _noop, addBreadcrumb: _noop,
+        withScope: function (cb) { try { cb(_scope); } catch (e) {} },
+        configureScope: function (cb) { try { cb(_scope); } catch (e) {} },
+        getCurrentScope: function () { return _scope; },
+        startSpan: function (opts, cb) { return typeof cb === 'function' ? cb({ end: _noop, setStatus: _noop }) : undefined; },
+        startInactiveSpan: function () { return { end: _noop, setStatus: _noop }; },
+        addIntegration: _noop, lastEventId: function () { return undefined; },
+        flush: function () { return Promise.resolve(true); },
+        nativeCrash: _noop,
+        reactNavigationIntegration: function () { return { name: 'ReactNavigation' }; },
+        reactNativeTracingIntegration: function () { return { name: 'ReactNativeTracing' }; },
+        mobileReplayIntegration: function () { return { name: 'MobileReplay' }; },
+        feedbackIntegration: function () { return { name: 'Feedback' }; },
+        ErrorBoundary: ErrorBoundary,
+        TouchEventBoundary: TouchEventBoundary,
+        Mask: function (props) { return React.createElement(React.Fragment, null, (props && props.children) || null); },
+        Unmask: function (props) { return React.createElement(React.Fragment, null, (props && props.children) || null); }
+      };
+      module.exports = Sentry;
+      Sentry.default = Sentry;
+      Sentry.__esModule = true;
+    `,
+  },
   // "react-native-keychain": {
   //   stub: `module.exports = {
   //     getGenericPassword: async () => false,
