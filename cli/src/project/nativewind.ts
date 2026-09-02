@@ -1,3 +1,4 @@
+import { gzipSync } from "node:zlib";
 import type { VirtualFS } from "browser-metro";
 
 /**
@@ -15,6 +16,18 @@ import type { VirtualFS } from "browser-metro";
 
 /** Env override for testing an unreleased server endpoint. */
 const NATIVEWIND_SERVER = process.env.RNRUN_NATIVEWIND_SERVER;
+
+/**
+ * The compile request carries every source file (tailwind's content scan), so
+ * a mid-sized app easily exceeds 1MB uncompressed -- past the nginx default
+ * `client_max_body_size` in front of the package server, which answers 413
+ * before Express (10mb limit) ever sees the body. Source gzips ~5x, so the
+ * body is sent compressed; Express' body parser inflates it transparently.
+ */
+export function encodeNativewindRequest(body: object): { bytes: Uint8Array; rawBytes: number } {
+  const json = JSON.stringify(body);
+  return { bytes: gzipSync(Buffer.from(json, "utf8")), rawBytes: Buffer.byteLength(json, "utf8") };
+}
 
 const CONTENT_EXT_RE = /\.(?:tsx?|jsx?|html|mdx)$/;
 
@@ -99,14 +112,16 @@ export async function compileNativewindCss(opts: {
       continue;
     }
     try {
+      const { bytes, rawBytes } = encodeNativewindRequest({ platform, versions, tailwindConfig, css, content });
       const res = await doFetch(`${serverUrl}/nativewind-css`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ platform, versions, tailwindConfig, css, content }),
+        headers: { "content-type": "application/json", "content-encoding": "gzip" },
+        body: bytes,
         signal: AbortSignal.timeout(180_000),
       });
       if (!res.ok) {
-        warn(`[nativewind] compile failed for ${cssPath} (HTTP ${res.status}); styles unchanged`);
+        const size = res.status === 413 ? ` -- request body ${Math.round(bytes.length / 1024)}KB gzipped (${Math.round(rawBytes / 1024)}KB raw) rejected by the server` : "";
+        warn(`[nativewind] compile failed for ${cssPath} (HTTP ${res.status}${size}); styles unchanged -- className styles and darkMode flags will be missing on this platform`);
         return null;
       }
       const { data } = (await res.json()) as { data: { web?: boolean; css?: string } };
