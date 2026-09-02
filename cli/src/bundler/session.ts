@@ -181,6 +181,11 @@ export class BundlerSession {
   private nativewindCss = new Map<string, string>();
   private nwRefreshing = false;
   private nwPending = false;
+  /** The last nativewind compile failed (package server down, 413, ...). The
+   *  bundle then has no compiled CSS -- serve it (better than nothing) but
+   *  never persist it: a cached degraded bundle would keep being served on
+   *  every wake with the same inputs, long after the server recovered. */
+  private nativewindFailed = false;
 
   constructor(files: FileMap, options: SessionOptions) {
     this.options = options;
@@ -352,7 +357,11 @@ export class BundlerSession {
       fetch: this.options.fetch,
       warn: this.options.warn ?? ((msg) => console.warn(msg)),
     });
-    if (compiled === null) return [];
+    if (compiled === null) {
+      this.nativewindFailed = true;
+      return [];
+    }
+    this.nativewindFailed = false;
     const changed: string[] = [];
     for (const [p, code] of compiled) {
       if (this.nativewindCss.get(p) !== code) {
@@ -493,7 +502,7 @@ export class BundlerSession {
       // A fresh graph: nothing a client on an earlier version can be patched
       // up to (ids may have been re-minted), hence the null entry.
       this.recordHistory(null);
-      writeCachedBundle(key, result.bundle);
+      if (!this.nativewindFailed) writeCachedBundle(key, result.bundle);
       return true;
     } catch (err) {
       this.buildError = errText(err);
@@ -540,7 +549,7 @@ export class BundlerSession {
       this.buildError = null;
       // Persist after edits too, so the next wake starts warm at the CURRENT
       // state rather than the state the process started from.
-      writeCachedBundle(this.cacheKey(), result.bundle);
+      if (!this.nativewindFailed) writeCachedBundle(this.cacheKey(), result.bundle);
 
       if (result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload) {
         this.recordHistory(null);
