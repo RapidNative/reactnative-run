@@ -108,8 +108,12 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
 
     // POST /nativewind-css: response is a pure function of the body, so cache
     // by body hash (spares a server tailwind compile per identical input).
-    if (method === "POST" && /\/nativewind-css$/.test(new URL(url).pathname) && typeof init?.body === "string" && !process.env.RNRUN_NO_PKG_CACHE) {
-      const key = fileKey(url + "#" + createHash("sha256").update(init.body).digest("hex"));
+    // The body is a gzipped JSON buffer (see project/nativewind.ts); gzip is
+    // deterministic for a given input + zlib, so hashing the bytes keys the
+    // same compile input to the same entry.
+    const nwBody = init?.body;
+    if (method === "POST" && /\/nativewind-css$/.test(new URL(url).pathname) && (typeof nwBody === "string" || nwBody instanceof Uint8Array) && !process.env.RNRUN_NO_PKG_CACHE) {
+      const key = fileKey(url + "#" + createHash("sha256").update(nwBody).digest("hex"));
       const cached = readEntry(key);
       if (cached && cached.meta.status === 200) {
         if (stats) stats.hits++;
