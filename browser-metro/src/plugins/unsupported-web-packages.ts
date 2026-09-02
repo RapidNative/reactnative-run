@@ -374,6 +374,295 @@ export const UNSUPPORTED_WEB_PACKAGES: Record<string, UnsupportedPackageEntry> =
       InCallManager.__esModule = true;
     `,
   },
+  // RevenueCat in-app purchases: a non-rendering native module (StoreKit /
+  // Play Billing) with no web analogue. Unsupported tier, imperative like
+  // incall-manager: the banner posts on the first SDK call. Read APIs resolve
+  // with sample offerings so AI-built paywalls render localized-price rows in
+  // the preview instead of crashing; purchase APIs reject with a clear message
+  // (never userCancelled, so well-written paywalls surface their error state).
+  // The rapidnative `revenuecat` skill routes all access through a facade that
+  // mocks these same shapes itself — this stub is the safety net for code that
+  // imports the SDK directly.
+  "react-native-purchases": {
+    mode: "unsupported",
+    stub: `
+      var __posted = false;
+      function __postNotice() {
+        if (__posted) return;
+        __posted = true;
+        try {
+          if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+            var route = '';
+            try { route = (window.location.hash || '').replace(/^#/, ''); } catch (e) {}
+            window.parent.postMessage({
+              type: 'iframe.preview.notice',
+              payload: {
+                package: 'react-native-purchases',
+                note: 'In-app purchases are simulated in this preview — sample prices are shown and buying is disabled. Real purchases work once your app runs as an installed build.',
+                route: route
+              }
+            }, '*');
+          }
+        } catch (e) {}
+      }
+
+      function _product(id, price, priceString) {
+        return {
+          identifier: id, price: price, priceString: priceString, currencyCode: 'USD',
+          title: 'Premium (preview)', description: 'Sample product shown in preview',
+          introPrice: null, discounts: [], defaultOption: null, productCategory: 'SUBSCRIPTION',
+          subscriptionPeriod: id === 'annual' ? 'P1Y' : 'P1M'
+        };
+      }
+      function _pkg(identifier, type, id, price, priceString) {
+        return {
+          identifier: identifier, packageType: type,
+          product: _product(id, price, priceString),
+          offeringIdentifier: 'default', presentedOfferingContext: { offeringIdentifier: 'default' }
+        };
+      }
+      var _annual = _pkg('$rc_annual', 'ANNUAL', 'annual', 49.99, '$49.99');
+      var _monthly = _pkg('$rc_monthly', 'MONTHLY', 'monthly', 5.99, '$5.99');
+      var _offering = {
+        identifier: 'default', serverDescription: 'Preview sample offering', metadata: {},
+        availablePackages: [_annual, _monthly],
+        annual: _annual, monthly: _monthly,
+        lifetime: null, sixMonth: null, threeMonth: null, twoMonth: null, weekly: null
+      };
+      function _emptyCustomerInfo() {
+        return {
+          entitlements: { active: {}, all: {}, verification: 'NOT_REQUESTED' },
+          activeSubscriptions: [], allPurchasedProductIdentifiers: [],
+          latestExpirationDate: null, firstSeen: new Date().toISOString(),
+          originalAppUserId: 'preview-user', requestDate: new Date().toISOString(),
+          allExpirationDates: {}, allPurchaseDates: {}, originalApplicationVersion: null,
+          originalPurchaseDate: null, managementURL: null, nonSubscriptionTransactions: []
+        };
+      }
+      function _rejectPurchase() {
+        __postNotice();
+        var err = new Error('Purchases are simulated in this preview. Real purchases work once your app runs as an installed build.');
+        err.userCancelled = false;
+        err.code = 'UnsupportedError';
+        return Promise.reject(err);
+      }
+      function _noopAsync() { __postNotice(); return Promise.resolve(); }
+
+      var Purchases = {
+        configure: function () { __postNotice(); },
+        isConfigured: function () { return Promise.resolve(true); },
+        setLogLevel: function () {},
+        setLogHandler: function () {},
+        getOfferings: function () { __postNotice(); return Promise.resolve({ current: _offering, all: { 'default': _offering } }); },
+        getProducts: function () { __postNotice(); return Promise.resolve([_annual.product, _monthly.product]); },
+        getCustomerInfo: function () { return Promise.resolve(_emptyCustomerInfo()); },
+        purchasePackage: _rejectPurchase,
+        purchaseStoreProduct: _rejectPurchase,
+        purchaseProduct: _rejectPurchase,
+        purchaseDiscountedPackage: _rejectPurchase,
+        purchaseSubscriptionOption: _rejectPurchase,
+        restorePurchases: function () { __postNotice(); return Promise.resolve(_emptyCustomerInfo()); },
+        syncPurchases: _noopAsync,
+        logIn: function () { return Promise.resolve({ customerInfo: _emptyCustomerInfo(), created: false }); },
+        logOut: function () { return Promise.resolve(_emptyCustomerInfo()); },
+        isAnonymous: function () { return Promise.resolve(true); },
+        getAppUserID: function () { return Promise.resolve('preview-user'); },
+        addCustomerInfoUpdateListener: function () {},
+        removeCustomerInfoUpdateListener: function () { return true; },
+        showManageSubscriptions: _noopAsync,
+        presentCodeRedemptionSheet: _noopAsync,
+        checkTrialOrIntroductoryPriceEligibility: function () { return Promise.resolve({}); },
+        setAttributes: _noopAsync, setEmail: _noopAsync, setDisplayName: _noopAsync,
+        setPushToken: _noopAsync, collectDeviceIdentifiers: _noopAsync,
+        enableAdServicesAttributionTokenCollection: _noopAsync,
+        invalidateCustomerInfoCache: _noopAsync,
+        canMakePayments: function () { return Promise.resolve(false); }
+      };
+
+      module.exports = Purchases;
+      Purchases.default = Purchases;
+      Purchases.__esModule = true;
+      Purchases.LOG_LEVEL = { VERBOSE: 'VERBOSE', DEBUG: 'DEBUG', INFO: 'INFO', WARN: 'WARN', ERROR: 'ERROR' };
+      Purchases.PACKAGE_TYPE = {
+        UNKNOWN: 'UNKNOWN', CUSTOM: 'CUSTOM', LIFETIME: 'LIFETIME', ANNUAL: 'ANNUAL',
+        SIX_MONTH: 'SIX_MONTH', THREE_MONTH: 'THREE_MONTH', TWO_MONTH: 'TWO_MONTH',
+        MONTHLY: 'MONTHLY', WEEKLY: 'WEEKLY'
+      };
+      Purchases.INTRO_ELIGIBILITY_STATUS = {
+        INTRO_ELIGIBILITY_STATUS_UNKNOWN: 0, INTRO_ELIGIBILITY_STATUS_INELIGIBLE: 1,
+        INTRO_ELIGIBILITY_STATUS_ELIGIBLE: 2, INTRO_ELIGIBILITY_STATUS_NO_INTRO_OFFER_EXISTS: 3
+      };
+      Purchases.PURCHASES_ERROR_CODE = {
+        UNKNOWN_ERROR: '0', PURCHASE_CANCELLED_ERROR: '1', STORE_PROBLEM_ERROR: '2',
+        PURCHASE_NOT_ALLOWED_ERROR: '3', PURCHASE_INVALID_ERROR: '4',
+        PRODUCT_NOT_AVAILABLE_FOR_PURCHASE_ERROR: '5', PRODUCT_ALREADY_PURCHASED_ERROR: '6',
+        RECEIPT_ALREADY_IN_USE_ERROR: '7', INVALID_RECEIPT_ERROR: '8',
+        MISSING_RECEIPT_FILE_ERROR: '9', NETWORK_ERROR: '10', INVALID_CREDENTIALS_ERROR: '11',
+        UNEXPECTED_BACKEND_RESPONSE_ERROR: '12', OPERATION_ALREADY_IN_PROGRESS_ERROR: '15',
+        UNSUPPORTED_ERROR: '24', CONFIGURATION_ERROR: '23'
+      };
+    `,
+  },
+  // Sentry crash reporting: JS-heavy SDK whose native hooks don't exist here, and
+  // whose bundle weight buys the preview nothing. Silent no-op tier — no banner:
+  // monitoring is invisible UI-wise, so a notice would only confuse. wrap()/
+  // ErrorBoundary pass children through untouched; capture/init/setUser are no-ops.
+  // The rapidnative `sentry` skill routes access through a facade that skips the
+  // SDK in the preview anyway — this stub is the safety net for direct imports.
+  "@sentry/react-native": {
+    mode: "unsupported",
+    stub: `
+      var React = require('react');
+      function _noop() {}
+      function _id(x) { return x; }
+      function ErrorBoundary(props) { return (props && props.children) || null; }
+      function TouchEventBoundary(props) { return (props && props.children) || null; }
+      var _scope = {
+        setUser: _noop, setTag: _noop, setTags: _noop, setExtra: _noop, setExtras: _noop,
+        setContext: _noop, setLevel: _noop, addBreadcrumb: _noop, clear: _noop
+      };
+      var Sentry = {
+        init: _noop, close: function () { return Promise.resolve(true); },
+        wrap: _id,
+        captureException: function () { return ''; },
+        captureMessage: function () { return ''; },
+        captureEvent: function () { return ''; },
+        setUser: _noop, setTag: _noop, setTags: _noop, setExtra: _noop, setExtras: _noop,
+        setContext: _noop, addBreadcrumb: _noop,
+        withScope: function (cb) { try { cb(_scope); } catch (e) {} },
+        configureScope: function (cb) { try { cb(_scope); } catch (e) {} },
+        getCurrentScope: function () { return _scope; },
+        startSpan: function (opts, cb) { return typeof cb === 'function' ? cb({ end: _noop, setStatus: _noop }) : undefined; },
+        startInactiveSpan: function () { return { end: _noop, setStatus: _noop }; },
+        addIntegration: _noop, lastEventId: function () { return undefined; },
+        flush: function () { return Promise.resolve(true); },
+        nativeCrash: _noop,
+        reactNavigationIntegration: function () { return { name: 'ReactNavigation' }; },
+        reactNativeTracingIntegration: function () { return { name: 'ReactNativeTracing' }; },
+        mobileReplayIntegration: function () { return { name: 'MobileReplay' }; },
+        feedbackIntegration: function () { return { name: 'Feedback' }; },
+        ErrorBoundary: ErrorBoundary,
+        TouchEventBoundary: TouchEventBoundary,
+        Mask: function (props) { return React.createElement(React.Fragment, null, (props && props.children) || null); },
+        Unmask: function (props) { return React.createElement(React.Fragment, null, (props && props.children) || null); }
+      };
+      module.exports = Sentry;
+      Sentry.default = Sentry;
+      Sentry.__esModule = true;
+    `,
+  },
+  // Google Mobile Ads (AdMob): native ad rendering with no web analogue. Uses the
+  // unsupported tier with a MANUAL mount-notice (not degraded) because the default
+  // export is a callable factory — mobileAds().initialize() — and degradedWrapper's
+  // forwardRef wrapping would make it non-callable. BannerAd renders a neutral
+  // placeholder and posts the banner notice on mount; imperative APIs resolve
+  // safely (consent "not required", interstitials load but never show).
+  "react-native-google-mobile-ads": {
+    mode: "unsupported",
+    stub: `
+      var React = require('react');
+      var RN = require('react-native');
+      var __posted = false;
+      function __postNotice() {
+        if (__posted) return;
+        __posted = true;
+        try {
+          if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+            var route = '';
+            try { route = (window.location.hash || '').replace(/^#/, ''); } catch (e) {}
+            window.parent.postMessage({
+              type: 'iframe.preview.notice',
+              payload: {
+                package: 'react-native-google-mobile-ads',
+                note: 'Ads show as a neutral placeholder here — real banner ads render once your app runs as an installed build.',
+                route: route
+              }
+            }, '*');
+          }
+        } catch (e) {}
+      }
+
+      function BannerAd(props) {
+        React.useEffect(function () {
+          __postNotice();
+          if (props && typeof props.onAdLoaded === 'function') {
+            try { props.onAdLoaded(); } catch (e) {}
+          }
+        }, []);
+        return React.createElement(
+          RN.View,
+          { style: { height: 56, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', backgroundColor: '#f3f4f6' } },
+          React.createElement(RN.Text, { style: { color: '#9ca3af', fontSize: 12 } }, 'Ad')
+        );
+      }
+
+      function _noop() {}
+      function _resolveVoid() { return Promise.resolve(); }
+      function _fullScreenAd() {
+        return {
+          load: _noop,
+          show: function () {
+            __postNotice();
+            return Promise.reject(new Error('Full-screen ads are not available in this preview.'));
+          },
+          addAdEventListener: function () { return _noop; },
+          removeAllListeners: _noop,
+          loaded: false
+        };
+      }
+
+      function mobileAds() {
+        return {
+          initialize: function () { return Promise.resolve([]); },
+          setRequestConfiguration: _resolveVoid,
+          openAdInspector: function () { return Promise.reject(new Error('Ad inspector unavailable in preview.')); },
+          openDebugMenu: _noop
+        };
+      }
+
+      module.exports = mobileAds;
+      mobileAds.default = mobileAds;
+      mobileAds.__esModule = true;
+      mobileAds.BannerAd = BannerAd;
+      mobileAds.GAMBannerAd = BannerAd;
+      mobileAds.BannerAdSize = {
+        BANNER: 'BANNER', FULL_BANNER: 'FULL_BANNER', LARGE_BANNER: 'LARGE_BANNER',
+        LEADERBOARD: 'LEADERBOARD', MEDIUM_RECTANGLE: 'MEDIUM_RECTANGLE',
+        ADAPTIVE_BANNER: 'ADAPTIVE_BANNER',
+        ANCHORED_ADAPTIVE_BANNER: 'ANCHORED_ADAPTIVE_BANNER',
+        INLINE_ADAPTIVE_BANNER: 'INLINE_ADAPTIVE_BANNER',
+        WIDE_SKYSCRAPER: 'WIDE_SKYSCRAPER'
+      };
+      mobileAds.TestIds = {
+        ADAPTIVE_BANNER: 'ca-app-pub-3940256099942544/9214589741',
+        BANNER: 'ca-app-pub-3940256099942544/6300978111',
+        INTERSTITIAL: 'ca-app-pub-3940256099942544/1033173712',
+        REWARDED: 'ca-app-pub-3940256099942544/5224354917',
+        REWARDED_INTERSTITIAL: 'ca-app-pub-3940256099942544/5354046379',
+        APP_OPEN: 'ca-app-pub-3940256099942544/9257395921',
+        NATIVE: 'ca-app-pub-3940256099942544/2247696110'
+      };
+      mobileAds.AdsConsent = {
+        requestInfoUpdate: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true, isConsentFormAvailable: false }); },
+        gatherConsent: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true }); },
+        showForm: function () { return Promise.resolve({ status: 'NOT_REQUIRED' }); },
+        loadAndShowConsentFormIfRequired: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true }); },
+        getConsentInfo: function () { return Promise.resolve({ status: 'NOT_REQUIRED', canRequestAds: true, isConsentFormAvailable: false }); },
+        getUserChoices: function () { return Promise.resolve({}); },
+        reset: _noop
+      };
+      mobileAds.AdEventType = {
+        LOADED: 'loaded', ERROR: 'error', OPENED: 'opened', CLOSED: 'closed',
+        CLICKED: 'clicked', PAID: 'paid'
+      };
+      mobileAds.RewardedAdEventType = { LOADED: 'rewarded_loaded', EARNED_REWARD: 'rewarded_earned_reward' };
+      mobileAds.MaxAdContentRating = { G: 'G', PG: 'PG', T: 'T', MA: 'MA' };
+      mobileAds.InterstitialAd = { createForAdRequest: _fullScreenAd };
+      mobileAds.RewardedAd = { createForAdRequest: _fullScreenAd };
+      mobileAds.RewardedInterstitialAd = { createForAdRequest: _fullScreenAd };
+      mobileAds.AppOpenAd = { createForAdRequest: _fullScreenAd };
+    `,
+  },
   // "react-native-keychain": {
   //   stub: `module.exports = {
   //     getGenericPassword: async () => false,
