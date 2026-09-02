@@ -12,7 +12,7 @@ import { createLogger } from "../ui/logger.js";
 import { printStartupBanner, attachInteractiveKeys } from "../ui/interactive.js";
 import { createCachedFetch } from "../project/pkg-cache.js";
 import { warnIfEphemeralCache, bundleCacheDir, BUNDLE_CACHE_ENV } from "../bundler/bundle-cache.js";
-import { createRequire } from "node:module";
+import { toolVersions } from "../project/tool-versions.js";
 
 export interface StartOptions {
   dir: string;
@@ -37,20 +37,12 @@ export interface StartOptions {
 export const DEFAULT_PACKAGE_SERVER = "https://esm.reactnative.run";
 export const LOCAL_PACKAGE_SERVER = "http://localhost:5200";
 
-/** rnrun + browser-metro versions: the bundle format depends on both, so they
- *  belong in the bundle-cache key. */
-function toolVersions(): string {
-  try {
-    const req = createRequire(import.meta.url);
-    return `rnrun@${req("../../package.json").version}+bm@${req("browser-metro/package.json").version}`;
-  } catch {
-    return "unknown";
-  }
-}
-
 export async function startCommand(options: StartOptions): Promise<void> {
   const log = createLogger(options.quiet);
   const tools = toolVersions();
+  if (tools.includes("unknown")) {
+    log.warn(`[cache] could not resolve tool versions (${tools}); the bundle cache will not invalidate on rnrun/browser-metro upgrades`);
+  }
   const rootDir = path.resolve(options.dir);
   const packageServerUrl = options.localPackages ? LOCAL_PACKAGE_SERVER : options.packageServer;
 
