@@ -33,6 +33,7 @@ import flowRemoveTypes from "flow-remove-types";
 import { sweepCache } from "./retention";
 import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } from "./output";
 import { isValidPackageName, isValidVersionRange } from "./validation";
+import { CODEGEN_SPEC_FILE_RE, RN_CORE_RE, codegenViewConfig } from "./codegen";
 import {
 	BuildPlatform,
 	normalizePlatform,
@@ -559,6 +560,35 @@ function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
 	};
 }
 
+/** codegenNativeComponent -> static JS view config (New Architecture).
+ *
+ *  On the New Architecture / bridgeless, RN's `codegenNativeComponent` REQUIRES
+ *  the build-time codegen transform or the component crashes with
+ *  `Invariant Violation: View config not found for component <Name>`. Metro runs
+ *  @react-native/babel-plugin-codegen (part of @react-native/babel-preset) over
+ *  every package; we do the same, narrowly. See src/codegen.ts for the full
+ *  rationale, the two filename conventions, and the loud log-and-skip.
+ *
+ *  Scope: native only (web gets these components from react-native-web).
+ *  react-native CORE is excluded: makeStripFlowPlugin already runs the full
+ *  preset (codegen included) over the react-native package and, being earlier
+ *  in the stack, claims those files first. Output mirrors makeStripFlowPlugin
+ *  (preset -> loader "js"). */
+function makeCodegenPlugin(platform: BuildPlatform): esbuild.Plugin {
+	return {
+		name: "codegen-native-component",
+		setup(build) {
+			if (platform === "web") return;
+			build.onLoad({ filter: CODEGEN_SPEC_FILE_RE }, async (args) => {
+				if (RN_CORE_RE.test(args.path)) return undefined;
+				const src = await fs.promises.readFile(args.path, "utf8");
+				const code = await codegenViewConfig(src, args.path);
+				return code != null ? { contents: code, loader: "js" } : undefined;
+			});
+		},
+	};
+}
+
 /** The plugin stack for RN/Expo package builds on a given platform.
  *  previewShims is web-only (it feeds the RapidNative editor's simulated
  *  chrome via DOM/postMessage -- meaningless and unwanted on a device).
@@ -571,6 +601,10 @@ function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch")
 		// After filterPlatforms so blanked platform variants stay blanked
 		// (esbuild uses the first onLoad that returns contents).
 		makeWorkletsPlugin(platform),
+		// After stripFlow so react-native core specs are claimed by the full
+		// preset there; this pass covers non-core packages (react-native-screens
+		// etc.) whose NativeComponent specs esbuild would otherwise ship raw.
+		makeCodegenPlugin(platform),
 		// Node-builtin stubbing scope preserves the HISTORICAL web behavior:
 		// only the /pkg path ever stubbed on web -- batch builds resolved the
 		// real npm polyfills (buffer/events/util) that some packages depend on,

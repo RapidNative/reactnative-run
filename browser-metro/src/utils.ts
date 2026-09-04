@@ -363,8 +363,9 @@ export function hashString(str: string): string {
 const DEPS_HASH_VERSION = "8";
 // Native-only bundle-format version; folded into non-web hashes (see hashDeps).
 // History: 2 = server-side worklets babel pass (PR #48);
-//          3 = loose class fields for Metro parity (PR #55).
-export const NATIVE_DEPS_VERSION = "3";
+//          3 = loose class fields for Metro parity (PR #55);
+//          4 = codegenNativeComponent view-config pass for New Arch (SDK 57 / RN 0.86).
+export const NATIVE_DEPS_VERSION = "4";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it
