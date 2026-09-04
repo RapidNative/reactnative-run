@@ -14,6 +14,12 @@ const START_FLAGS: FlagSpec[] = [
     type: "string",
     description: 'Build native bundles at startup instead of on first device request, e.g. "ios" or "ios,android" (env: RNRUN_PREWARM)',
   },
+  {
+    name: "--expo-go-anonymous",
+    type: "boolean",
+    default: false,
+    description: "Serve an anonymous manifest so Expo Go on iOS skips the SDK 57 sign-in gate for remote/public URLs (trades away Fast Refresh) (env: RNRUN_EXPO_GO_ANONYMOUS)",
+  },
 ];
 
 const BUNDLE_FLAGS: FlagSpec[] = [
@@ -53,6 +59,10 @@ async function main(): Promise<void> {
       host: parsed.flags.host as string,
       quiet: parsed.flags.quiet as boolean,
       prewarm: (parsed.flags.prewarm as string | undefined) ?? process.env.RNRUN_PREWARM,
+      expoGoAnonymous:
+        (parsed.flags.expoGoAnonymous as boolean) ||
+        process.env.RNRUN_EXPO_GO_ANONYMOUS === "1" ||
+        process.env.RNRUN_EXPO_GO_ANONYMOUS === "true",
     });
     return;
   }

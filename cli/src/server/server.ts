@@ -14,6 +14,9 @@ export interface ServerContext {
   rootDir: string;
   title: string;
   port: number;
+  /** Serve an anonymous manifest (no expoGo.developer.tool) so Expo Go iOS skips
+   *  the SDK 57 sign-in gate on remote URLs, at the cost of Fast Refresh. */
+  expoGoAnonymous?: boolean;
   log: (msg: string) => void;
   /**
    * Lazily create/reuse a bundler session for a native platform ("ios" |

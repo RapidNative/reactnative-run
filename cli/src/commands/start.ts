@@ -32,6 +32,16 @@ export interface StartOptions {
    * (retry-until-it-works). Pre-warming moves that build into the idle time.
    */
   prewarm?: string;
+  /**
+   * Serve an ANONYMOUS Expo manifest -- omit `expoGo.developer.tool` so Expo Go
+   * on a physical iOS device does NOT treat it as a dev server, which skips the
+   * SDK 57 sign-in gate (Expo Go blocks dev-server URLs unless you're signed in
+   * to a matching Expo account). The cost is that Expo Go no longer treats it as
+   * a dev client: Fast Refresh / bundle reload are given up. Localhost/LAN never
+   * hit the gate, so this is off by default; a hosted preview (orchd) turns it
+   * on. See docs on the Expo Go SDK 57 login requirement.
+   */
+  expoGoAnonymous?: boolean;
 }
 
 export const DEFAULT_PACKAGE_SERVER = "https://esm.reactnative.run";
@@ -163,6 +173,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     rootDir,
     title,
     port: options.port,
+    expoGoAnonymous: options.expoGoAnonymous ?? false,
     log: log.info,
     getPlatformSession: async (platform: string) => {
       if (platform !== "ios" && platform !== "android") return null;

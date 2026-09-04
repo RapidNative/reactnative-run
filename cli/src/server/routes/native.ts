@@ -32,7 +32,13 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
     (req, res, { url }) => {
       const platform = String(req.headers["expo-platform"] || url.searchParams.get("platform") || "ios");
       const host = req.headers.host || `localhost:${ctx.port}`;
-      const manifest = buildManifest(ctx, platform, host);
+      // Behind a TLS-terminating proxy (the orchd gateway, Caddy) the request
+      // reaches us over http but the device must fetch the bundle over the
+      // external scheme -- an http bundle URL on an https host is a mixed-load
+      // the device (iOS ATS) can reject. Trust X-Forwarded-Proto; default http.
+      const fwdProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+      const scheme = fwdProto === "https" ? "https" : "http";
+      const manifest = buildManifest(ctx, platform, host, scheme);
       const accept = req.headers.accept || "";
 
       if (accept.includes("multipart/mixed")) {
@@ -268,11 +274,24 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
   router.path("GET", "/json/version", (_req, res) => sendJson(res, 200, {}));
 }
 
-function buildManifest(ctx: ServerContext, platform: string, host: string): object {
+function buildManifest(ctx: ServerContext, platform: string, host: string, scheme: string): object {
   const app = ctx.config.app;
   const name = app.name || ctx.title || "rnrun-app";
   const slug = app.slug || slugify(name);
   const sdkVersion = app.sdkVersion || sdkVersionFromProject(ctx) || "54.0.0";
+
+  // Anonymous mode: omit `developer.tool` so Expo Go's `isUsingDeveloperTool`
+  // is false and the SDK 57 dev-server sign-in gate (physical iOS) is skipped.
+  // Everything else the bundle needs (debuggerHost, packagerOpts, mainModuleName)
+  // stays; only the dev-server flag -- and with it Fast Refresh -- is dropped.
+  const expoGo: Record<string, unknown> = {
+    debuggerHost: host,
+    packagerOpts: { dev: true },
+    mainModuleName: "index",
+  };
+  if (!ctx.expoGoAnonymous) {
+    expoGo.developer = { tool: "rnrun", projectRoot: ctx.rootDir };
+  }
 
   return {
     id: randomUUID(),
@@ -284,7 +303,7 @@ function buildManifest(ctx: ServerContext, platform: string, host: string): obje
       // One token per manifest fetch (i.e. per device launch). The device
       // registers on /hot with this exact URL and its SourceCode.scriptURL is
       // this URL, which is how the server knows which bundle it is running.
-      url: `http://${host}/index.bundle?platform=${platform}&dev=true&hot=false&lazy=true&${CLIENT_TOKEN_PARAM}=${newClientToken()}`,
+      url: `${scheme}://${host}/index.bundle?platform=${platform}&dev=true&hot=false&lazy=true&${CLIENT_TOKEN_PARAM}=${newClientToken()}`,
     },
     assets: [],
     metadata: {},
@@ -298,12 +317,7 @@ function buildManifest(ctx: ServerContext, platform: string, host: string): obje
         platforms: ["ios", "android", "web"],
         hostUri: host,
       },
-      expoGo: {
-        debuggerHost: host,
-        developer: { tool: "rnrun", projectRoot: ctx.rootDir },
-        packagerOpts: { dev: true },
-        mainModuleName: "index",
-      },
+      expoGo,
       // MUST be stable per project: Expo Go scopes storage by scopeKey, so a
       // per-request value (like the old prototype used) would make every load
       // look like a brand-new app.
