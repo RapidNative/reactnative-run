@@ -293,12 +293,27 @@ function buildManifest(ctx: ServerContext, platform: string, host: string, schem
     expoGo.developer = { tool: "rnrun", projectRoot: ctx.rootDir };
   }
 
+  // Expo Go's expo-updates dedupes the launch bundle by launchAsset.key
+  // (ExpoUpdatesUpdate.swift: UpdateAsset(key:) matched against its on-device DB).
+  // A CONSTANT key makes a device that already downloaded once REUSE that cached
+  // bundle forever and never re-fetch -- so an edit never shows in anonymous mode
+  // (a first-load device is fine because it has no cached "bundle" asset yet).
+  // Key it to the native session's epoch+bundleVersion, which bumps on every
+  // rebuild: an edit yields a new key -> Expo Go re-downloads; unchanged code
+  // keeps the key stable so a plain reload still serves from the device cache.
+  // (Dev mode loads JS via the RN dev-server path, not expo-updates, so this
+  // only matters for anonymous mode -- but it's correct and cheap either way.)
+  const nativeSession = ctx.peekPlatformSession?.(platform);
+  const bundleKey = nativeSession
+    ? `bundle-${nativeSession.epoch}-${nativeSession.bundleVersion}`
+    : `bundle-${newClientToken()}`;
+
   return {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
     runtimeVersion: `exposdk:${sdkVersion}`,
     launchAsset: {
-      key: "bundle",
+      key: bundleKey,
       contentType: "application/javascript",
       // One token per manifest fetch (i.e. per device launch). The device
       // registers on /hot with this exact URL and its SourceCode.scriptURL is
