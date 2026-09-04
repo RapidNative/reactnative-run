@@ -101,6 +101,15 @@ native)
   printf '%s' "$prelude" | grep -q "__accept"; check "/prelude serves metro-runtime hot machinery" $?
   printf '%s' "$prelude" | grep -qE "\bclass\s"; [ $? -ne 0 ]; check "prelude is Hermes-lowered (no class syntax)" $?
 
+  say "codegenNativeComponent view configs (New Arch; NATIVE_DEPS_VERSION 4)"
+  # react-native-screens' NativeComponent specs must compile to a static JS
+  # view config, or every expo-router Stack redboxes on bridgeless with
+  # "View config not found for component RNSScreenContentWrapper".
+  rns=$(curl -s --max-time 600 "$BASE/pkg/react-native-screens@4.26.0?platform=ios")
+  printf '%s' "$rns" | grep -q "RNSScreenContentWrapper"; check "ios screens bundle references RNSScreenContentWrapper" $?
+  printf '%s' "$rns" | grep -q "__INTERNAL_VIEW_CONFIG"; check "screens specs emit __INTERNAL_VIEW_CONFIG (codegen ran)" $?
+  printf '%s' "$rns" | grep -qE "codegenNativeComponent\("; [ $? -ne 0 ]; check "no raw codegenNativeComponent() call survives" $?
+
   [ "$FAIL" -eq 0 ] && say "NATIVE VERIFICATION PASSED" || die "native verification failed"
   ;;
 
