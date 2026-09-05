@@ -289,7 +289,15 @@ function buildManifest(ctx: ServerContext, platform: string, host: string, schem
     packagerOpts: { dev: true },
     mainModuleName: "index",
   };
-  if (!ctx.expoGoAnonymous) {
+  // Anonymous mode (drop `developer.tool`) exists ONLY to skip Expo Go's SDK 57
+  // sign-in gate, which Expo enforces on iOS only. On Android the gate isn't
+  // enforced, so an anonymous (non-dev) manifest buys nothing and actively hurts:
+  // it routes Android through expo-updates, which gets stuck on "New update
+  // available, downloading..." (the dev-server path, kept here, loads JS directly
+  // and also restores Fast Refresh). So go anonymous for iOS only; Android always
+  // stays a dev server.
+  const anonymous = ctx.expoGoAnonymous && platform === "ios";
+  if (!anonymous) {
     expoGo.developer = { tool: "rnrun", projectRoot: ctx.rootDir };
   }
 
@@ -303,10 +311,19 @@ function buildManifest(ctx: ServerContext, platform: string, host: string, schem
   // keeps the key stable so a plain reload still serves from the device cache.
   // (Dev mode loads JS via the RN dev-server path, not expo-updates, so this
   // only matters for anonymous mode -- but it's correct and cheap either way.)
+  // The fallback (no native session yet) MUST be stable across manifest fetches.
+  // A per-fetch random token here makes Expo Go's expo-updates see a "new update"
+  // on every poll and loop forever on "New update available, downloading..." --
+  // it never converges to a launch. This bit Android specifically: the image
+  // prewarms iOS only, so iOS always has a session (stable epoch-version key)
+  // while Android starts session-less and got a fresh random key each poll.
+  // A stable per-platform key can't loop; once the first bundle build creates
+  // the session it upgrades to the versioned key (one clean re-fetch), which is
+  // what busts the cache on later edits.
   const nativeSession = ctx.peekPlatformSession?.(platform);
   const bundleKey = nativeSession
     ? `bundle-${nativeSession.epoch}-${nativeSession.bundleVersion}`
-    : `bundle-${newClientToken()}`;
+    : `bundle-${platform}-pending`;
 
   return {
     id: randomUUID(),
