@@ -89,7 +89,7 @@ export function rnEsbuildSettings(platform: BuildPlatform): Partial<esbuild.Buil
 	if (platform === "web") {
 		return {
 			resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".js", ".json"],
-			loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl" },
+			loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl", ".jpg": "dataurl", ".jpeg": "dataurl", ".gif": "dataurl", ".webp": "dataurl", ".svg": "dataurl", ".xml": "dataurl" },
 			banner: { js: "var process = { env: { NODE_ENV: 'production' } }; var React = require('react');" },
 			define: { "__DEV__": "false" },
 		};
@@ -100,7 +100,7 @@ export function rnEsbuildSettings(platform: BuildPlatform): Partial<esbuild.Buil
 			".native.tsx", ".native.ts", ".native.js",
 			".tsx", ".ts", ".js", ".json",
 		],
-		loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl" },
+		loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl", ".jpg": "dataurl", ".jpeg": "dataurl", ".gif": "dataurl", ".webp": "dataurl", ".svg": "dataurl", ".xml": "dataurl" },
 		banner: { js: "var process = { env: { NODE_ENV: 'development' } }; var React = require('react');" },
 	};
 }
