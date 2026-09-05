@@ -365,7 +365,10 @@ const DEPS_HASH_VERSION = "8";
 // History: 2 = server-side worklets babel pass (PR #48);
 //          3 = loose class fields for Metro parity (PR #55);
 //          4 = codegenNativeComponent view-config pass for New Arch (SDK 57 / RN 0.86).
-export const NATIVE_DEPS_VERSION = "4";
+//          5 = .xml/image loaders so expo-router (and any .xml/.svg/image import)
+//              builds for android; a clean nv rather than purging 4 immutable
+//              cache layers (origin/CF/esm-cache proxy/tenant). See PR #87.
+export const NATIVE_DEPS_VERSION = "5";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it
