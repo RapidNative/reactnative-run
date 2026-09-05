@@ -1,6 +1,6 @@
 {
   "name": "rnrun",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "description": "Drop-in replacement for the Expo dev server with a tiny memory footprint. Powered by browser-metro and pre-bundled packages from esm.reactnative.run.",
   "bin": {
@@ -48,7 +48,7 @@
     "@babel/plugin-transform-shorthand-properties": "^7.29.7",
     "@babel/plugin-transform-template-literals": "^7.29.7",
     "@babel/preset-typescript": "^7.29.7",
-    "browser-metro": "^1.5.0",
+    "browser-metro": "^1.5.1",
     "chokidar": "^4.0.3",
     "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"

@@ -5,7 +5,9 @@ import type esbuild from "esbuild";
 // Must match DEPS_HASH_VERSION in browser-metro/src/utils.ts.
 export const SERVER_VERSION = "8";
 // Must stay equal to NATIVE_DEPS_VERSION in browser-metro/src/utils.ts.
-export const NATIVE_DEPS_VERSION = "4";
+// 5 = .xml/image loaders so expo-router builds for android (fresh nv instead of
+//     purging the origin/CF/esm-cache-proxy/tenant caches). See PR #87.
+export const NATIVE_DEPS_VERSION = "5";
 
 // ============================================================
 // Platform dimension (web | ios | android)
