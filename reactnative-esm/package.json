@@ -20,12 +20,14 @@
     "@react-native/babel-preset": "^0.87.0",
     "esbuild": "^0.27.3",
     "express": "^5.2.1",
-    "flow-remove-types": "^2.309.0"
+    "flow-remove-types": "^2.309.0",
+    "semver": "^7.8.5"
   },
   "devDependencies": {
     "@types/babel__core": "^7.20.5",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "@types/semver": "^7.8.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

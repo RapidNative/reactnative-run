@@ -5,6 +5,7 @@ import os from "os";
 import crypto from "crypto";
 import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
+import semver from "semver";
 
 // SECURITY: every subprocess in this file uses execFile/execFileSync with an
 // argv ARRAY, never a shell string. `exec`/`execSync` spawn `/bin/sh -c` and
@@ -749,6 +750,90 @@ async function resolveVersionAsync(pkgName: string, range: string): Promise<stri
 	} catch {
 		return null;
 	}
+}
+
+// ── Pre-install version resolution ──────────────────────────────────────────
+//
+// bun install is all-or-nothing and, on the origin, INTERMITTENTLY HANGS while
+// resolving a version range that matches nothing published (a hallucinated pin
+// like `expo-haptics@~57.0.3` when the real latest is 57.0.2, or
+// `expo-print@~57.0.2` when it is 57.0.1 — both agent-guessed SDK-57 versions
+// that were never released). The hang burns the full BUN_INSTALL_TIMEOUT_MS,
+// then the npm fallback ALSO fails on the same bad spec: ~110s for one build.
+//
+// So resolve every range up front against the registry's abbreviated packument
+// (one cached HTTP GET per package, no `npm view` process-spawn storm): repin a
+// satisfiable range to its exact max-satisfying version (a cache-friendly spec
+// bun never has to re-resolve) and DROP any range that matches no published
+// version, so the poison spec never reaches the installer. Dropped packages are
+// stubbed downstream (same as bun's own drop path), so `require()` no-ops rather
+// than crashing. On any resolver failure we keep the original spec — never drop
+// a package because the registry blipped.
+const PACKUMENT_TTL_MS = 30 * 60 * 1000;
+const packumentCache = new Map<string, { versions: string[]; tags: Record<string, string>; ts: number }>();
+
+async function getPackument(pkgName: string): Promise<{ versions: string[]; tags: Record<string, string> } | null> {
+	const cached = packumentCache.get(pkgName);
+	if (cached && Date.now() - cached.ts < PACKUMENT_TTL_MS) return cached;
+	try {
+		// @scope/name -> @scope%2fname (registry wants the slash encoded).
+		const encoded = pkgName.startsWith("@") ? pkgName.replace("/", "%2f") : encodeURIComponent(pkgName);
+		const resp = await fetch(`https://registry.npmjs.org/${encoded}`, {
+			// Abbreviated ("corgi") packument: versions + dist-tags only, far smaller
+			// than the full metadata document.
+			headers: { Accept: "application/vnd.npm.install-v1+json" },
+			signal: AbortSignal.timeout(8000),
+		});
+		if (resp.status === 404) {
+			const empty = { versions: [], tags: {} };
+			packumentCache.set(pkgName, { ...empty, ts: Date.now() });
+			return empty;
+		}
+		if (!resp.ok) return null;
+		const data = (await resp.json()) as { versions?: Record<string, unknown>; "dist-tags"?: Record<string, string> };
+		const result = { versions: Object.keys(data.versions ?? {}), tags: data["dist-tags"] ?? {} };
+		packumentCache.set(pkgName, { ...result, ts: Date.now() });
+		return result;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve a dep set for install: repin satisfiable ranges to an exact version,
+ * drop specs that match nothing published. Returns the install-ready deps and
+ * the names that were dropped (to be seeded into the drop/stub set).
+ */
+async function resolveInstallSpecs(
+	deps: Record<string, string>
+): Promise<{ resolved: Record<string, string>; dropped: string[] }> {
+	const resolved: Record<string, string> = {};
+	const dropped: string[] = [];
+	const names = Object.keys(deps);
+	const CONCURRENCY = 16;
+	for (let i = 0; i < names.length; i += CONCURRENCY) {
+		await Promise.all(
+			names.slice(i, i + CONCURRENCY).map(async (name) => {
+				const range = deps[name];
+				const pk = await getPackument(name);
+				// Resolver unavailable (network blip / non-404 error): keep the
+				// original spec and let the installer try — never drop on doubt.
+				if (!pk) { resolved[name] = range; return; }
+				// Package exists but has zero published versions, or 404'd: drop.
+				if (pk.versions.length === 0) { dropped.push(name); return; }
+				// dist-tag (latest/next/...): use the tag's exact version if present.
+				if (pk.tags[range]) { resolved[name] = pk.tags[range]; return; }
+				// Exact version that actually exists: keep it verbatim.
+				if (semver.valid(range) && pk.versions.includes(range)) { resolved[name] = range; return; }
+				// Range: pin to the highest published version that satisfies it.
+				const match = semver.maxSatisfying(pk.versions, range, { includePrerelease: true });
+				if (match) { resolved[name] = match; return; }
+				// Nothing satisfies (hallucinated pin) — drop it.
+				dropped.push(name);
+			})
+		);
+	}
+	return { resolved, dropped };
 }
 
 
@@ -1549,8 +1634,19 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		// of the deps still install. Dropped packages get a `module.exports = {}`
 		// stub later so `require()` doesn't crash at runtime (the offending dep
 		// just silently no-ops, same as a missing import).
-		const droppedPackages = new Set<string>();
-		let workingDeps: Record<string, string> = { ...dependencies };
+		// Repin satisfiable ranges to exact versions and drop hallucinated pins
+		// (a version range that matches nothing published) BEFORE install, so bun
+		// never hangs resolving a non-existent version — the cause of the ~110s
+		// bun-timeout -> npm-fallback -> fail ladder. See resolveInstallSpecs.
+		const { resolved: installDeps, dropped: preDropped } = await resolveInstallSpecs(dependencies);
+		if (preDropped.length > 0) {
+			console.warn(
+				`[bundle-deps] pre-resolve dropped ${preDropped.length} package(s) with no matching published version: ` +
+				preDropped.map((n) => `${n}@${dependencies[n]}`).join(", ")
+			);
+		}
+		const droppedPackages = new Set<string>(preDropped);
+		let workingDeps: Record<string, string> = { ...installDeps };
 		const MAX_RETRIES = 3;
 		let installed = false;
 		for (let attempt = 0; attempt < MAX_RETRIES && !installed; attempt++) {
