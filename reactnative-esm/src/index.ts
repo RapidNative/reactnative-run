@@ -449,6 +449,25 @@ const stubNodeBuiltinsPlugin: esbuild.Plugin = {
 	},
 };
 
+// `node:`-protocol imports ONLY. Unlike bare "buffer"/"events" (which the web
+// batch build deliberately leaves alone so real npm polyfills resolve), a
+// "node:async_hooks" specifier can never resolve in a browser bundle — there is
+// no polyfill to find, so leaving it un-stubbed just fails the package build.
+// expo-font >= 57 ships one (build/serverContext.web.js, RSC support, dead code
+// in a browser) and the web batch build was stubbing the WHOLE package with
+// `module.exports = {}` — every @expo-google-fonts/* consumer then crashed on
+// `loadAsync is not a function`.
+const stubNodeProtocolPlugin: esbuild.Plugin = {
+	name: "stub-node-protocol",
+	setup(build) {
+		build.onResolve({ filter: /^node:/ }, (args) => ({ path: args.path, namespace: "node-stub" }));
+		build.onLoad({ filter: /.*/, namespace: "node-stub" }, () => ({
+			contents: "module.exports = {};",
+			loader: "js",
+		}));
+	},
+};
+
 /** Worklet transforms for packages that ship raw 'worklet' directives
  *  (react-native-reanimated has ~80 such files; react-native-worklets ~17).
  *  Metro runs react-native-worklets/plugin over ALL files via babel.config;
@@ -611,7 +630,7 @@ function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch")
 		// real npm polyfills (buffer/events/util) that some packages depend on,
 		// and widening the stub there would change new web batch builds. Native
 		// (Hermes, no builtins at all) stubs everywhere.
-		...(platform !== "web" || site === "pkg" ? [stubNodeBuiltinsPlugin] : []),
+		...(platform !== "web" || site === "pkg" ? [stubNodeBuiltinsPlugin] : [stubNodeProtocolPlugin]),
 		patchUpstreamBugsPlugin,
 		...(platform === "web" ? [previewShimsPlugin] : []),
 	];
