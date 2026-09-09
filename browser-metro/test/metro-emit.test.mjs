@@ -76,6 +76,16 @@ test('EXPO_PUBLIC env vars land in the prelude, others are excluded', () => {
   assert.doesNotMatch(bundle, /SECRET_TOKEN/);
 });
 
+test('the target platform lands in the prelude as process.env.EXPO_OS', () => {
+  const ios = emitMetroWrappedBundle({ '/index.js': '' }, '/index.js', { platform: 'ios' });
+  assert.match(ios, /process\.env\.EXPO_OS = process\.env\.EXPO_OS \|\| "ios";/);
+  const android = emitMetroWrappedBundle({ '/index.js': '' }, '/index.js', { platform: 'android' });
+  assert.match(android, /process\.env\.EXPO_OS = process\.env\.EXPO_OS \|\| "android";/);
+  // No platform given: nothing is invented.
+  const none = emitMetroWrappedBundle({ '/index.js': '' }, '/index.js', {});
+  assert.doesNotMatch(none, /EXPO_OS/);
+});
+
 test('hashDeps: web/absent platform is byte-identical to the historical hash; native differs per platform', async () => {
   const deps = { react: '19.1.0', 'react-native': '0.81.4' };
   const subs = ['react/jsx-runtime'];

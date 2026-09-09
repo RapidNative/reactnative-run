@@ -349,6 +349,12 @@ export class IncrementalBundler {
    *  Node-side, never bundled. Shared by collectSubpaths and rebuild(). */
   private static readonly CONFIG_FILE_RE = /(?:^|\/)[^/]*\.config\.[cm]?[jt]sx?$/;
 
+  /** Files the JS transformer can take. Anything else (eas.json,
+   *  package-lock.json, README.md, *.sql, …) only ever enters the graph by
+   *  being imported, so a change to one that no module imports is not a
+   *  rebuild input. */
+  private static readonly SOURCE_FILE_RE = /\.(tsx?|jsx?|mjs|cjs)$/;
+
   /** Non-web target platform, or null for the historical web behavior. */
   private nativePlatform(): string | null {
     const p = this.config.platform;
@@ -857,6 +863,7 @@ export class IncrementalBundler {
           this.moduleIds,
           {
             env: this.config.env,
+            platform: this.config.platform,
             preRequires: this.config.output.preRequires,
             prelude: this.config.output.prelude,
             dev: true,
@@ -868,6 +875,7 @@ export class IncrementalBundler {
       }
       return emitMetroWrappedBundle(this.moduleMap, this.entryFile!, {
         env: this.config.env,
+        platform: this.config.platform,
         preRequires: this.config.output.preRequires,
         dev: true,
       });
@@ -1172,6 +1180,20 @@ export class IncrementalBundler {
         // imports (e.g. "eslint/config") trip assertDeclaredNpmDeps and kill
         // the entire rebuild. Same exclusion as collectSubpaths.
         if (IncrementalBundler.CONFIG_FILE_RE.test(change.path)) continue;
+        // Metro parity: only files reachable from the entry are modules. A
+        // changed file that is neither already in the graph nor a JS/TS
+        // source (a saved eas.json, an npm-rewritten package-lock.json, a
+        // README) must not be pushed through the transformer -- it fails
+        // with a bogus parse error ("/eas.json: Unexpected token") and
+        // kills the whole rebuild for an edit that never touched the app.
+        // An imported JSON stays covered: it is in the graph, so it is
+        // reprocessed when it changes.
+        if (
+          this.moduleMap[change.path] === undefined &&
+          !IncrementalBundler.SOURCE_FILE_RE.test(change.path)
+        ) {
+          continue;
+        }
         // Create or update: only reprocess the changed file itself.
         // Dependents don't need re-transformation -- the HMR runtime
         // handles re-execution by walking accept boundaries.

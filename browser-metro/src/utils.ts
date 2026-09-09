@@ -166,11 +166,19 @@ const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
  * Optionally injects public env vars (EXPO_PUBLIC_*, NEXT_PUBLIC_*).
  * Optionally appends the router shim for virtualizing History/Location APIs.
  */
-export function buildBundlePreamble(env?: Record<string, string>, routerShim?: boolean): string {
+export function buildBundlePreamble(
+  env?: Record<string, string>,
+  routerShim?: boolean,
+  /** This preamble serves the web bundle; native goes through metro-emit. */
+  platform: string = "web"
+): string {
   let preamble =
     "var process = globalThis.process || {};\n" +
     "process.env = process.env || {};\n" +
-    'process.env.NODE_ENV = process.env.NODE_ENV || "development";\n';
+    'process.env.NODE_ENV = process.env.NODE_ENV || "development";\n' +
+    // babel-preset-expo inlines this under Metro; expo / expo-router /
+    // expo-modules-core branch on it at runtime.
+    "process.env.EXPO_OS = process.env.EXPO_OS || " + JSON.stringify(platform) + ";\n";
 
   if (env) {
     for (const [key, value] of Object.entries(env)) {
@@ -368,7 +376,9 @@ const DEPS_HASH_VERSION = "8";
 //          5 = .xml/image loaders so expo-router (and any .xml/.svg/image import)
 //              builds for android; a clean nv rather than purging 4 immutable
 //              cache layers (origin/CF/esm-cache proxy/tenant). See PR #87.
-export const NATIVE_DEPS_VERSION = "5";
+//          6 = native chunk banners define process.env.EXPO_OS (see
+//              reactnative-esm/src/platform.ts rnEsbuildSettings).
+export const NATIVE_DEPS_VERSION = "6";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it

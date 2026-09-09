@@ -22,6 +22,15 @@ const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
 export interface MetroEmitOptions {
   env?: Record<string, string>;
   /**
+   * Target platform ("ios" | "android" | "web"). Emitted as
+   * `process.env.EXPO_OS`, which babel-preset-expo inlines under Metro and
+   * which expo, expo-router and expo-modules-core branch on at runtime
+   * (`process.env.EXPO_OS === "ios"`, `!== "web"`, …). Left undefined, every
+   * such check silently takes the wrong branch and expo-modules-core warns
+   * "The global process.env.EXPO_OS is not defined".
+   */
+  platform?: string;
+  /**
    * Module ids required before the entry (Metro's
    * "modulesRunBeforeMainModule"): react-native's InitializeCore sets up
    * error handling, timers, DEV tooling. Ids must exist in the module map.
@@ -52,6 +61,9 @@ export function buildMetroPrelude(opts: MetroEmitOptions): string {
     "var process = globalThis.process || {};\n" +
     "process.env = process.env || {};\n" +
     `process.env.NODE_ENV = process.env.NODE_ENV || ${JSON.stringify(dev ? "development" : "production")};\n`;
+  if (opts.platform) {
+    prelude += `process.env.EXPO_OS = process.env.EXPO_OS || ${JSON.stringify(opts.platform)};\n`;
+  }
   if (opts.env) {
     for (const [key, value] of Object.entries(opts.env)) {
       if (PUBLIC_ENV_PREFIXES.some((p) => key.startsWith(p))) {
