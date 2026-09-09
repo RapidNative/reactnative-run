@@ -85,6 +85,12 @@ test("rnEsbuildSettings: native has platform-first extensions and NO __DEV__ def
 		".native.tsx", ".native.ts", ".native.js",
 	]);
 	assert.match((android.banner as Record<string, string>).js, /development/);
+	// babel-preset-expo inlines process.env.EXPO_OS under Metro; the chunk's own
+	// `process` shim must carry it, or every `=== "ios"/"android"` check in
+	// expo-router / expo-modules-core is silently false.
+	assert.match((android.banner as Record<string, string>).js, /EXPO_OS: 'android'/);
+	assert.match((rnEsbuildSettings("ios").banner as Record<string, string>).js, /EXPO_OS: 'ios'/);
+	assert.doesNotMatch((web.banner as Record<string, string>).js, /EXPO_OS/); // web namespace is unversioned: byte-identical
 });
 
 test("blankedPlatformsRe: only OTHER platforms' files are dropped", () => {

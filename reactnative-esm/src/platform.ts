@@ -7,7 +7,10 @@ export const SERVER_VERSION = "8";
 // Must stay equal to NATIVE_DEPS_VERSION in browser-metro/src/utils.ts.
 // 5 = .xml/image loaders so expo-router builds for android (fresh nv instead of
 //     purging the origin/CF/esm-cache-proxy/tenant caches). See PR #87.
-export const NATIVE_DEPS_VERSION = "5";
+// 6 = native chunk banner defines process.env.EXPO_OS (babel-preset-expo
+//     inlines it under Metro; expo / expo-router / expo-modules-core branch
+//     on it at runtime, and every check was silently false under rnrun).
+export const NATIVE_DEPS_VERSION = "6";
 
 // ============================================================
 // Platform dimension (web | ios | android)
@@ -103,7 +106,13 @@ export function rnEsbuildSettings(platform: BuildPlatform): Partial<esbuild.Buil
 			".tsx", ".ts", ".js", ".json",
 		],
 		loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl", ".jpg": "dataurl", ".jpeg": "dataurl", ".gif": "dataurl", ".webp": "dataurl", ".svg": "dataurl", ".xml": "dataurl" },
-		banner: { js: "var process = { env: { NODE_ENV: 'development' } }; var React = require('react');" },
+		// Each chunk carries its own `process` shim, so the bundle prelude's
+		// process.env never reaches package code: EXPO_OS has to be defined
+		// HERE. Metro gets it from babel-preset-expo inlining; expo-router,
+		// expo and expo-modules-core all branch on `process.env.EXPO_OS`
+		// ("ios" header alignment, link previews, Android navigators, …).
+		// Web is deliberately untouched (its cache namespace is unversioned).
+		banner: { js: `var process = { env: { NODE_ENV: 'development', EXPO_OS: '${platform}' } }; var React = require('react');` },
 	};
 }
 
