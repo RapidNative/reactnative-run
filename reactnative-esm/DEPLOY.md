@@ -6,7 +6,7 @@ Server: `/opt/reactnative-run` (git checkout), systemd unit `reactnative-esm.ser
 The platform-dimension release is **additive by design**: requests without a
 `platform` take code paths byte-identical to the previous server (same esbuild
 settings, same cache keys, same `v8:` hash input — pinned by
-`test/platform.test.ts`), so the ~11GB web cache keeps serving untouched and
+`test/platform.test.ts`), so the web cache (~100GB as of 2026-09) keeps serving untouched and
 NO cache eviction is needed on deploy.
 
 ## Deploy
@@ -17,7 +17,14 @@ cd /opt/reactnative-run
 
 # 0. Record state + backup (repo convention)
 OLD_SHA=$(git rev-parse HEAD); echo "$OLD_SHA" > /root/esm-rollback-sha
-cp -a /opt/reactnative-run "/opt/reactnative-run-backup-$(date +%Y%m%d-%H%M%S)"
+# Code and config only. NEVER copy reactnative-esm/cache: it is ~100GB on a
+# 150GB disk (not the ~11GB it once was), so a plain `cp -a` fills the disk
+# mid-copy and leaves the LIVE server unable to write cache entries
+# (2026-09-09). The cache is regenerable and a deploy never rewrites web keys,
+# so it needs no backup. Delete stale partial backups under /opt before you
+# start if `df -h /` is tight.
+rsync -a --exclude 'reactnative-esm/cache' --exclude 'node_modules' \
+  /opt/reactnative-run/ "/opt/reactnative-run-backup-$(date +%Y%m%d-%H%M%S)/"
 
 # 1. BEFORE upgrading: capture the web-regression baseline
 bash reactnative-esm/scripts/verify-esm-deploy.sh capture http://127.0.0.1:5200
