@@ -1,0 +1,6 @@
+# Nightly cap on the reactnative-esm on-disk cache (see evict-cache.sh).
+# Install: cp reactnative-esm/scripts/reactnative-esm-cache.cron /etc/cron.d/reactnative-esm-cache
+# Log:     /var/log/reactnative-esm-evict.log (one block per run)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 3 * * * root /opt/reactnative-run/reactnative-esm/scripts/evict-cache.sh >> /var/log/reactnative-esm-evict.log 2>&1

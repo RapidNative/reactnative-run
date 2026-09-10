@@ -45,6 +45,30 @@ bash reactnative-esm/scripts/verify-esm-deploy.sh native http://127.0.0.1:5200
 Only after step 3 passes: purge Cloudflare (optional for web — bytes are
 unchanged; required only if stale error responses were cached).
 
+## Cache size cap (nightly cron)
+
+The on-disk cache has no eviction of its own and grows ~8 GB/day. Combined
+dependency bundles (`bundle-deps-*.js`) are >90% of the bytes; everything is
+regenerable on the next request. `scripts/evict-cache.sh` keeps it under a cap
+by deleting the least-recently-READ bundles first (never anything read in the
+last day), and `scripts/reactnative-esm-cache.cron` runs it nightly at 03:17.
+
+Install once per box (re-copy after changing the cron file; the script itself
+is picked up from the checkout on every run):
+
+```sh
+cp reactnative-esm/scripts/reactnative-esm-cache.cron /etc/cron.d/reactnative-esm-cache
+chmod 644 /etc/cron.d/reactnative-esm-cache
+reactnative-esm/scripts/evict-cache.sh --dry-run     # sanity check, deletes nothing
+tail -n 20 /var/log/reactnative-esm-evict.log        # after the first night
+```
+
+Defaults: cap 100 GB, evict down to 85 GB (env `ESM_CACHE_CAP_GB` /
+`ESM_CACHE_TARGET_GB` in the cron line to change). Size the cap to leave at
+least ~25 GB free for deploys and the live server's writes. If the log warns
+that everything left was read within a day, the working set outgrew the cap:
+raise the cap or the disk rather than lowering the age guard.
+
 ## Rollback
 
 ```sh
