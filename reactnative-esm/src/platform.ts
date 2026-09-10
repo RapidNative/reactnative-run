@@ -10,7 +10,9 @@ export const SERVER_VERSION = "8";
 // 6 = native chunk banner defines process.env.EXPO_OS (babel-preset-expo
 //     inlines it under Metro; expo / expo-router / expo-modules-core branch
 //     on it at runtime, and every check was silently false under rnrun).
-export const NATIVE_DEPS_VERSION = "6";
+// 7 = .fx side-effect re-exports are lazy (lazy-fx-reexports plugin), so
+//     expo-notifications no longer red-screens Android Expo Go at boot.
+export const NATIVE_DEPS_VERSION = "7";
 
 // ============================================================
 // Platform dimension (web | ios | android)

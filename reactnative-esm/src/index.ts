@@ -45,6 +45,7 @@ import {
 	blankedPlatformsRe,
 	NATIVE_DEPS_VERSION,
 } from "./platform";
+import { hasFxImport, rewriteFxImports } from "./lazy-fx";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -373,6 +374,28 @@ async function lowerClassesForHermes(code: string, platform: BuildPlatform): Pro
 }
 
 /** Platform-SELECTING replacement for the old blanket native filter. */
+/** Native only: defer `.fx` side-effect modules the way Metro's inline
+ *  requires do (see src/lazy-fx.ts). Registered first so it can claim files
+ *  that import a .fx module; it returns nothing for every other file, so the
+ *  rest of the stack sees them unchanged. Files carrying @flow are left to
+ *  strip-flow. */
+function makeLazyFxReexportsPlugin(platform: BuildPlatform): esbuild.Plugin {
+	return {
+		name: "lazy-fx-reexports",
+		setup(build) {
+			if (platform === "web") return;
+			build.onLoad({ filter: /\.[cm]?jsx?$/ }, async (args) => {
+				if (!/node_modules[/\\]/.test(args.path)) return undefined;
+				const src = await fs.promises.readFile(args.path, "utf8");
+				if (src.includes("@flow") || !hasFxImport(src)) return undefined;
+				const out = await rewriteFxImports(src, args.path);
+				if (out === src) return undefined;
+				return { contents: out, loader: "jsx" };
+			});
+		},
+	};
+}
+
 function makeFilterPlatformsPlugin(platform: BuildPlatform): esbuild.Plugin {
 	const re = blankedPlatformsRe(platform);
 	return {
@@ -616,6 +639,7 @@ function makeCodegenPlugin(platform: BuildPlatform): esbuild.Plugin {
  *  registered everywhere per the repo convention. */
 function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch"): esbuild.Plugin[] {
 	return [
+		makeLazyFxReexportsPlugin(platform),
 		makeStripFlowPlugin(platform),
 		makeFilterPlatformsPlugin(platform),
 		// After filterPlatforms so blanked platform variants stay blanked
@@ -998,11 +1022,18 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			const peerDeps = Object.keys(meta.peerDependencies || {});
 			externals = [...new Set([...deps, ...peerDeps])];
 			keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
+			// Navigation packages (expo-router's deps such as standard-navigation,
+			// @react-navigation/*) tag themselves with "expo-router" /
+			// "react-navigation" rather than "react-native"; they are RN packages
+			// all the same and need the RN plugin stack + implicit externals.
 			isReactNative =
 				pkgName.startsWith("@expo/") ||
 				pkgName.startsWith("@expo-google-fonts/") ||
+				pkgName.startsWith("@react-navigation/") ||
 				pkgName.includes("react-native") ||
-				keywords.some((k: string) => k === "react-native" || k === "expo");
+				keywords.some((k: string) =>
+					k === "react-native" || k === "expo" || k === "expo-router" || k === "react-navigation"
+				);
 
 			// For RN/Expo packages: don't externalize @react-native/* utility
 			// packages (e.g. @react-native/normalize-colors) that are installed
@@ -1122,6 +1153,19 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 						} catch {
 							return { path: args.path, external: true }; // not installed - externalize
 						}
+					}
+
+					// The runtime singletons must never be inlined, even when a package
+					// forgets to declare them (standard-navigation@0.0.5 imports
+					// "react" with no dependencies/peerDependencies at all). On web
+					// there is no leniency path below, so this would otherwise fail
+					// the whole build with `Could not resolve "react"`.
+					if (!externalSet.has(pkg) && alwaysExternalSubpaths.has(pkg) && pkg !== requireSpecifier && !requireSpecifier.startsWith(pkg + "/")) {
+						if (!externalizedMap[pkg]) {
+							const v = getInstalledVersion(pkg);
+							if (v) externalizedMap[pkg] = v;
+						}
+						return { path: args.path, external: true };
 					}
 
 					if (!externalSet.has(pkg)) {
