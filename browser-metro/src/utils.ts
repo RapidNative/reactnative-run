@@ -378,7 +378,9 @@ const DEPS_HASH_VERSION = "8";
 //              cache layers (origin/CF/esm-cache proxy/tenant). See PR #87.
 //          6 = native chunk banners define process.env.EXPO_OS (see
 //              reactnative-esm/src/platform.ts rnEsbuildSettings).
-export const NATIVE_DEPS_VERSION = "6";
+//          7 = .fx side-effect re-exports are lazy on the server
+//              (reactnative-esm lazy-fx-reexports plugin).
+export const NATIVE_DEPS_VERSION = "7";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it
