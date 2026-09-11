@@ -15,7 +15,8 @@ import type { BundlerPlugin } from "../types.js";
  */
 
 /**
- * `react-native`, re-exported from react-native-web with a working Alert.
+ * `react-native`, re-exported from react-native-web with a working Alert and
+ * an Appearance that supports setColorScheme (see the second shim below).
  *
  * react-native-web ships Alert as a silent no-op (Alert is an imperative
  * bridge into the OS dialog on native; there is no OS dialog on web, and RNW
@@ -165,14 +166,75 @@ var __alertShim = (function () {
     },
   };
 })();
+// Appearance with a working setColorScheme.
+//
+// react-native-web's Appearance only reads the OS preference (a
+// prefers-color-scheme media query): getColorScheme + addChangeListener,
+// nothing else. React Native has had Appearance.setColorScheme since 0.72,
+// and apps with a theme setting call it — a "system" option on RN 0.86 in
+// particular has to call Appearance.setColorScheme('unspecified') directly,
+// because NativeWind's own setColorScheme('system') crashes Android there.
+// That line is fine on a phone and threw "setColorScheme is not a function"
+// in the browser preview, blanking every artboard of the app.
+//
+// This wrapper keeps an override: 'light' | 'dark' pins the scheme, and
+// null / 'unspecified' clears it so the OS preference shows through again —
+// the same semantics as native. Listeners registered through
+// addChangeListener hear both override changes and OS changes, so hooks
+// built on Appearance (react-native-web's useColorScheme, NativeWind's
+// listener) update just as they would on a device.
+var __appearanceShim = (function (base) {
+  var override = null;
+  var listeners = [];
+  function current() {
+    if (override) return override;
+    return base && typeof base.getColorScheme === "function" ? base.getColorScheme() : "light";
+  }
+  function notify() {
+    var scheme = current();
+    for (var i = 0; i < listeners.length; i++) {
+      try { listeners[i]({ colorScheme: scheme }); } catch (e) { console.error("[Appearance shim]", e); }
+    }
+  }
+  return {
+    getColorScheme: current,
+    setColorScheme: function (scheme) {
+      var next = scheme === "light" || scheme === "dark" ? scheme : null;
+      if (next === override) return;
+      override = next;
+      notify();
+    },
+    addChangeListener: function (listener) {
+      if (typeof listener !== "function") return { remove: function () {} };
+      listeners.push(listener);
+      // Forward OS changes too, but only while no override pins the scheme.
+      var osSub = base && typeof base.addChangeListener === "function"
+        ? base.addChangeListener(function () { if (!override) notify(); })
+        : null;
+      return {
+        remove: function () {
+          var idx = listeners.indexOf(listener);
+          if (idx !== -1) listeners.splice(idx, 1);
+          if (osSub && typeof osSub.remove === "function") osSub.remove();
+        },
+      };
+    },
+    // Pre-0.65 API some libraries still call; harmless to support.
+    removeChangeListener: function (listener) {
+      var idx = listeners.indexOf(listener);
+      if (idx !== -1) listeners.splice(idx, 1);
+    },
+  };
+})(__rnw && __rnw.Appearance);
 try {
   module.exports = new Proxy(__rnw, {
     get: function (target, prop, receiver) {
       if (prop === "Alert") return __alertShim;
+      if (prop === "Appearance") return __appearanceShim;
       return Reflect.get(target, prop, receiver);
     },
   });
-  console.info("[browser-metro] Alert shim active (react-native shim)");
+  console.info("[browser-metro] Alert + Appearance shims active (react-native shim)");
 } catch (e) {
   /* Proxy misbehaving — keep the plain re-export (Alert stays a no-op) */
 }
