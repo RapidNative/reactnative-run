@@ -1231,7 +1231,9 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 			// For RN/Expo packages: platform-appropriate extensions, JSX in .js,
 			// and serve font assets as static files instead of inlining as data URLs.
 			...(isReactNative && {
-				...rnEsbuildSettings(platform),
+				// Font packages keep their own outdir/file-loader block below;
+				// everything else on native gets fonts as served files too.
+				...rnEsbuildSettings(platform, isFont ? undefined : (baseUrl || `http://localhost:${PORT}`)),
 				...(isFont && {
 					loader: {
 						".js": "jsx",
@@ -1254,6 +1256,8 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				selectiveExternalPlugin,
 			],
 		});
+
+		if (platform !== "web" && !isFont) harvestFontAssets(tmpDir);
 
 		// For font packages: move asset files to cache/assets/ for static serving,
 		// and read the JS output from the outdir.
@@ -1598,6 +1602,21 @@ app.get("/bundle-deps/:hash", (req: Request, res: Response) => {
 });
 
 // POST /bundle-deps - build a dep bundle
+/** Move font files esbuild's `file` loader wrote next to an outfile into the
+ *  static /assets dir (see rnEsbuildSettings(platform, assetBaseUrl)). Names
+ *  are content-hashed, so an existing file is byte-identical: skip it. */
+function harvestFontAssets(dir: string): void {
+	const ASSETS_DIR = path.join(CACHE_DIR, "assets");
+	let entries: string[];
+	try { entries = fs.readdirSync(dir); } catch { return; }
+	for (const f of entries) {
+		if (!/\.(ttf|otf)$/i.test(f)) continue;
+		fs.mkdirSync(ASSETS_DIR, { recursive: true });
+		const dest = path.join(ASSETS_DIR, f);
+		if (!fs.existsSync(dest)) fs.copyFileSync(path.join(dir, f), dest);
+	}
+}
+
 app.post("/bundle-deps", async (req: Request, res: Response) => {
 	const { hash, dependencies, subpaths: rawSubpaths, platform: rawPlatform } = req.body as { hash?: string; dependencies: Record<string, string>; subpaths?: string[]; platform?: string };
 
@@ -1627,6 +1646,9 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 	// Absent/unknown platform is "web" -- byte-identical to the platform-less
 	// protocol, so existing clients and cached hashes are unaffected.
 	const platform = normalizePlatform(rawPlatform);
+	// Native chunks reference emitted font files by absolute URL, so the host
+	// the client reached us on is the host the device will fetch them from.
+	const assetBaseUrl = `${req.protocol}://${req.get("host")}`;
 
 	// Subpaths of direct deps that user code imports (e.g. "expo-router/drawer").
 	// We bundle these combined with their base package so they share the base's
@@ -2099,7 +2121,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					globalName: "__module",
 					outfile: outFile,
 					...esbuildPlatformSettings(platform),
-					...(info.isRN && rnEsbuildSettings(platform)),
+					...(info.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
 					plugins: [
 						...(info.isRN ? rnPluginStack(platform) : []),
 						pkgExternalPlugin,
@@ -2121,6 +2143,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					await runBuild();
 				}
 
+				if (platform !== "web") harvestFontAssets(tmpDir);
 				const bundled = normalizeBuildPaths(
 					await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
 					tmpDir
@@ -2243,7 +2266,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					globalName: "__module",
 					outfile: outFile,
 					...esbuildPlatformSettings(platform),
-					...(info?.isRN && rnEsbuildSettings(platform)),
+					...(info?.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
 					plugins: [
 						...(info?.isRN ? rnPluginStack(platform) : []),
 						subExternalPlugin,
@@ -2251,6 +2274,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					logLevel: "silent",
 				});
 
+				if (platform !== "web") harvestFontAssets(tmpDir);
 				const bundled = normalizeBuildPaths(
 					await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
 					tmpDir

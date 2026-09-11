@@ -12,7 +12,7 @@ export const SERVER_VERSION = "8";
 //     on it at runtime, and every check was silently false under rnrun).
 // 7 = .fx side-effect re-exports are lazy (lazy-fx-reexports plugin), so
 //     expo-notifications no longer red-screens Android Expo Go at boot.
-export const NATIVE_DEPS_VERSION = "7";
+export const NATIVE_DEPS_VERSION = "8";
 
 // ============================================================
 // Platform dimension (web | ios | android)
@@ -92,7 +92,15 @@ export function esbuildPlatformSettings(platform: BuildPlatform): Partial<esbuil
  *  Native: platform/native extensions first, NO `__DEV__` define -- the
  *  identifier stays free so it binds to the bundle prelude's `var __DEV__`,
  *  keeping dev features (LogBox, warnings) alive in Expo Go. */
-export function rnEsbuildSettings(platform: BuildPlatform): Partial<esbuild.BuildOptions> {
+/** `assetBaseUrl` (native only): fonts are emitted as files served from
+ *  `<assetBaseUrl>/assets/<name>-<hash>.ttf` instead of base64 data URIs.
+ *  expo-font on Android loads a font through ExpoAsset.downloadAsync, which
+ *  rejects `data:` URIs ("Unable to download asset from url: data:font/ttf…"),
+ *  so every @expo-google-fonts/* and @expo/vector-icons face failed to
+ *  register under rnrun while Metro (which serves fonts over http) was fine.
+ *  Callers must copy the emitted *.ttf/*.otf next to the outfile into
+ *  CACHE_DIR/assets (see harvestFontAssets in index.ts). Web is untouched. */
+export function rnEsbuildSettings(platform: BuildPlatform, assetBaseUrl?: string): Partial<esbuild.BuildOptions> {
 	if (platform === "web") {
 		return {
 			resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".js", ".json"],
@@ -107,7 +115,13 @@ export function rnEsbuildSettings(platform: BuildPlatform): Partial<esbuild.Buil
 			".native.tsx", ".native.ts", ".native.js",
 			".tsx", ".ts", ".js", ".json",
 		],
-		loader: { ".js": "jsx", ".ttf": "dataurl", ".otf": "dataurl", ".png": "dataurl", ".jpg": "dataurl", ".jpeg": "dataurl", ".gif": "dataurl", ".webp": "dataurl", ".svg": "dataurl", ".xml": "dataurl" },
+		loader: {
+			".js": "jsx",
+			".ttf": assetBaseUrl ? "file" : "dataurl",
+			".otf": assetBaseUrl ? "file" : "dataurl",
+			".png": "dataurl", ".jpg": "dataurl", ".jpeg": "dataurl", ".gif": "dataurl", ".webp": "dataurl", ".svg": "dataurl", ".xml": "dataurl",
+		},
+		...(assetBaseUrl && { publicPath: `${assetBaseUrl}/assets`, assetNames: "[name]-[hash]" }),
 		// Each chunk carries its own `process` shim, so the bundle prelude's
 		// process.env never reaches package code: EXPO_OS has to be defined
 		// HERE. Metro gets it from babel-preset-expo inlining; expo-router,
