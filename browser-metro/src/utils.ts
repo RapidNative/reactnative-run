@@ -380,7 +380,7 @@ const DEPS_HASH_VERSION = "8";
 //              reactnative-esm/src/platform.ts rnEsbuildSettings).
 //          7 = .fx side-effect re-exports are lazy on the server
 //              (reactnative-esm lazy-fx-reexports plugin).
-export const NATIVE_DEPS_VERSION = "7";
+export const NATIVE_DEPS_VERSION = "8";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it

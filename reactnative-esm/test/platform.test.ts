@@ -106,3 +106,23 @@ test("blankedPlatformsRe: only OTHER platforms' files are dropped", () => {
 	assert.equal(web.test("Button.ios.tsx"), true);
 	assert.equal(web.test("Button.web.js"), false);
 });
+
+test("rnEsbuildSettings: native emits fonts as served files when given an asset base URL", () => {
+	// expo-font on Android rejects data: URIs (ExpoAsset.downloadAsync), so
+	// native chunks must reference fonts by URL. Web stays byte-identical.
+	const android = rnEsbuildSettings("android", "https://esm.example");
+	const loader = android.loader as Record<string, string>;
+	assert.equal(loader[".ttf"], "file");
+	assert.equal(loader[".otf"], "file");
+	assert.equal(loader[".png"], "dataurl");
+	assert.equal(android.publicPath, "https://esm.example/assets");
+	assert.equal(android.assetNames, "[name]-[hash]");
+
+	const plain = rnEsbuildSettings("android");
+	assert.equal((plain.loader as Record<string, string>)[".ttf"], "dataurl");
+	assert.equal(plain.publicPath, undefined);
+
+	const web = rnEsbuildSettings("web", "https://esm.example");
+	assert.equal((web.loader as Record<string, string>)[".ttf"], "dataurl");
+	assert.equal(web.publicPath, undefined);
+});
