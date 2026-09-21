@@ -12,7 +12,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, NATIVE_DEPS_VERSION } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, nativePostCoreSubpaths, NATIVE_DEPS_VERSION } from "./utils.js";
 import { formatTransformError } from "./transform-error.js";
 import type {
   BundlerConfig,
@@ -1019,11 +1019,12 @@ export class IncrementalBundler {
 
     // Native: Metro's prelude modules must be in the module map so the
     // metro-format emitter can run them before the entry (nothing in user
-    // code requires them): js-polyfills (global.ErrorUtils, console) and
-    // then InitializeCore.
+    // code requires them): js-polyfills (global.ErrorUtils, console), then
+    // InitializeCore, then Expo's streams polyfill (global ReadableStream).
     if (this.nativePlatform() && this.packageVersions["react-native"]) {
       for (const polyfill of NATIVE_POLYFILL_SUBPATHS) npmPackagesNeeded.add(polyfill);
       npmPackagesNeeded.add(INITIALIZE_CORE_SUBPATH);
+      for (const sub of nativePostCoreSubpaths(this.packageVersions)) npmPackagesNeeded.add(sub);
     }
 
     await this.fetchNpmPackages(npmPackagesNeeded);

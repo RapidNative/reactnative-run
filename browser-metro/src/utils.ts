@@ -396,6 +396,31 @@ export const NATIVE_POLYFILL_SUBPATHS = [
   "@react-native/js-polyfills/error-guard",
 ];
 
+/** Expo's web-streams polyfill (global ReadableStream/WritableStream/
+ *  TransformStream). expo/src/winter/runtime.native.ts does NOT install
+ *  ReadableStream itself -- "ReadableStream is injected by Metro as a global":
+ *  @expo/cli appends this file to Metro's getPolyfills(). We replace Metro, so
+ *  without it expo/fetch's `response.body` getter (`new ReadableStream(...)`)
+ *  throws "Property 'ReadableStream' doesn't exist" on Hermes. */
+export const EXPO_STREAMS_POLYFILL_SUBPATH = "expo/virtual/streams.js";
+
+/** First Expo SDK whose package ships virtual/streams.js (52 and below 404). */
+const EXPO_STREAMS_POLYFILL_MIN_SDK = 53;
+
+/** Subpaths a native bundle must run AFTER InitializeCore and before the
+ *  entry. Metro runs the streams polyfill as a standalone prelude script, but
+ *  here a subpath is served inside its package's combined chunk, so requiring
+ *  it evaluates all of `expo` -- which must not happen before InitializeCore
+ *  has set up the native environment. Nothing needs ReadableStream until app
+ *  code runs, so after-core is equivalent for the app and safe for boot.
+ *  `versions` is the project's dependency map; an expo version with no
+ *  readable major (e.g. "latest") is skipped rather than risk requesting a
+ *  file that isn't in the package. */
+export function nativePostCoreSubpaths(versions: Record<string, string | undefined>): string[] {
+  const major = Number(versions["expo"]?.match(/(\d+)/)?.[1]);
+  return major >= EXPO_STREAMS_POLYFILL_MIN_SDK ? [EXPO_STREAMS_POLYFILL_SUBPATH] : [];
+}
+
 /** Hash a dependencies object to a stable cache key.
  *  Uses SHA-256 (via Web Crypto or Node crypto) truncated to 16 hex chars
  *  for collision resistance while keeping URLs short.
