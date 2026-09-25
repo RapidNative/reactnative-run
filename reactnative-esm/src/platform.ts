@@ -95,6 +95,25 @@ export function esbuildPlatformSettings(platform: BuildPlatform): Partial<esbuil
 		target: "es2018",
 		mainFields: ["react-native", "browser", "main"],
 		conditions: ["react-native"],
+		// TypeScript DECLARATION-ONLY class fields (`getNativeComponent!: () =>
+		// X;` with no initializer) must be ERASED, not emitted.
+		//
+		// Metro compiles packages with @babel/plugin-transform-typescript, which
+		// drops them. esbuild, finding no tsconfig inside an installed package,
+		// defaults to useDefineForClassFields: true and emits
+		// `__publicField(this, "getNativeComponent")` -- an OWN property whose
+		// value is undefined, which SHADOWS the prototype method of the same
+		// name. Any package that declares a field for TypeScript and assigns the
+		// real implementation onto the prototype then breaks at runtime, and only
+		// on device: react-native-maps does exactly this for
+		// getNativeComponent/getUIManagerCommand/getMapManagerCommand/context
+		// (its own comment says "declaration only, as they are set through
+		// decorateMap"), so every <Marker> threw "undefined is not a function".
+		//
+		// false matches Metro. Fields WITH an initializer still emit, as they
+		// must. Native only -- the web key namespace is byte-frozen (see
+		// cacheKeyFor), and carries the same latent bug.
+		tsconfigRaw: { compilerOptions: { useDefineForClassFields: false } },
 	};
 }
 
