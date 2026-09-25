@@ -16,6 +16,7 @@ import {
 	rnEsbuildSettings,
 	blankedPlatformsRe,
 	NATIVE_DEPS_VERSION,
+	type BuildPlatform,
 } from "../src/platform";
 
 test("normalizePlatform: anything unknown is web", () => {
@@ -125,4 +126,42 @@ test("rnEsbuildSettings: native emits fonts as served files when given an asset 
 	const web = rnEsbuildSettings("web", "https://esm.example");
 	assert.equal((web.loader as Record<string, string>)[".ttf"], "dataurl");
 	assert.equal(web.publicPath, undefined);
+});
+
+// ── declaration-only TypeScript class fields ────────────────────────────────
+// react-native-maps declares `getNativeComponent!: () => ...` with no
+// initializer and assigns the implementation onto the prototype. esbuild's
+// default (useDefineForClassFields: true) emits the field as an OWN property
+// valued undefined, which shadows that prototype method -- every <Marker>
+// threw "undefined is not a function" on device. Metro erases such fields.
+test("native builds erase declaration-only class fields (Metro parity)", async () => {
+	const esbuild = require("esbuild") as typeof import("esbuild");
+	const src = [
+		"export class C {",
+		"  declared!: () => string;",
+		"  initialised?: boolean = undefined;",
+		"  run() { return this.declared(); }",
+		"}",
+	].join("\n");
+
+	const build = async (platform: BuildPlatform) => {
+		const out = await esbuild.build({
+			stdin: { contents: src, loader: "ts", sourcefile: "in.ts" },
+			write: false,
+			format: "cjs",
+			...esbuildPlatformSettings(platform),
+		});
+		return out.outputFiles[0].text;
+	};
+
+	for (const platform of ["ios", "android"] as const) {
+		const code = await build(platform);
+		assert.ok(!/__publicField\(this, "declared"\)/.test(code), `${platform}: declared field must be erased`);
+		assert.ok(!/this\.declared\s*=/.test(code), `${platform}: declared field must not be assigned`);
+		assert.match(code, /initialised/, `${platform}: a field WITH an initializer still emits`);
+	}
+
+	// Web is byte-frozen: its behaviour must not move.
+	const web = await build("web");
+	assert.match(web, /__publicField\(this, "declared"\)|this\.declared\s*=/, "web keeps its historical output");
 });

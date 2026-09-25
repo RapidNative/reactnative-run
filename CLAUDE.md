@@ -48,6 +48,38 @@ Conventions when adding to either:
 - **Check which file actually gets loaded.** If a package's `exports` map names an exact path (e.g. `"./src/StatusBar.ts"`), that bypasses `resolveExtensions` entirely and the `.web.*` variant is never resolved -- patching it compiles fine and does nothing.
 - Verify against the **served bundle**, never the source on disk.
 
+## Worklets on native (reactnative-esm)
+
+`src/worklets.ts` runs `react-native-worklets/plugin` over npm package sources.
+Metro runs that plugin over every file via the project's `babel.config.js`;
+rnrun covers user code (`cli/src/bundler/worklets.ts`), so this is the only
+place packages can get it. Without it, reanimated throws on first render
+("Passed handlers that are not worklets", "Failed to create a worklet") --
+on device only, never on web.
+
+Two things here are easy to get wrong:
+
+- **Scope is every package, not just reanimated.** The gate is content, not
+  package name: any package that animates ships worklets
+  (react-native-keyboard-controller, @gorhom/bottom-sheet,
+  react-native-gesture-handler). And the gate is wider than a `'worklet'`
+  directive -- the plugin auto-workletizes callbacks passed to
+  `useAnimatedStyle` and friends, so a package that never writes the directive
+  still depends on this pass. `WORKLET_HINT_RE` mirrors rnrun's; keep them
+  in sync.
+- **The plugin needs a coherent babel tree of its own.** It resolves
+  `@babel/core`, `@babel/generator` and the rest from ITS OWN location, i.e.
+  whatever the build root hoisted -- and `bun install` hoists a babel 8 subset
+  (core, generator, parser, template, helpers, code-frame) while the plugin's
+  own deps stay on 7. Every transform then throws, is caught per file, and the
+  chunk ships unworkletized. `pinBabelForPlugin` symlinks our own copies beside
+  the plugin to fix this; a `[worklets] could not pin` warning means files are
+  shipping untransformed.
+
+Verify by counting `__workletHash` in the served bundle, per package -- not by
+reading the source. A correct build of keyboard-controller + reanimated +
+worklets + bottom-sheet + gesture-handler has hundreds; the broken one had 19.
+
 ## Cache invalidation (reactnative-esm)
 
 `reactnative-esm` writes bundles to `cache/` and serves them on later requests, so **after changing bundling logic the affected entries must be evicted or the change ships inert.** There are two layers, and they are easy to get wrong:
