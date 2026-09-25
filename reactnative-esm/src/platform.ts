@@ -12,7 +12,11 @@ export const SERVER_VERSION = "8";
 //     on it at runtime, and every check was silently false under rnrun).
 // 7 = .fx side-effect re-exports are lazy (lazy-fx-reexports plugin), so
 //     expo-notifications no longer red-screens Android Expo Go at boot.
-export const NATIVE_DEPS_VERSION = "8";
+// 9 = the worklets babel pass covers EVERY package that can contain worklets,
+//     not just reanimated/worklets themselves (src/worklets.ts). Packages like
+//     react-native-keyboard-controller and @gorhom/bottom-sheet shipped
+//     unworkletized and crashed on first render.
+export const NATIVE_DEPS_VERSION = "9";
 
 // ============================================================
 // Platform dimension (web | ios | android)
@@ -62,6 +66,13 @@ export function cacheKeyFor(pkgName: string, version: string, subpath: string, p
 	// Bumping the version mints a fresh native namespace; the web namespace --
 	// and the ~12GB of production web cache behind it -- is untouched, which is
 	// exactly the blunt-instrument problem described above.
+	//
+	// KNOWN GAP (worklets): a /pkg build installs the package ALONE, so the
+	// worklets plugin it is transformed with comes from reanimated's own peer
+	// range, not from the requesting app -- and the /pkg URL carries no worklets
+	// version to key on. The combined /bundle-deps path (which is what native
+	// apps actually fetch; /pkg is browser-metro's per-package fallback) does
+	// install the app's own versions and DOES fold them into its chunk key.
 	const plat = platform && platform !== "web" ? `.${platform}.nv${NATIVE_DEPS_VERSION}` : "";
 	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}${plat}`;
 }

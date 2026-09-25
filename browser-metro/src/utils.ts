@@ -380,7 +380,12 @@ const DEPS_HASH_VERSION = "8";
 //              reactnative-esm/src/platform.ts rnEsbuildSettings).
 //          7 = .fx side-effect re-exports are lazy on the server
 //              (reactnative-esm lazy-fx-reexports plugin).
-export const NATIVE_DEPS_VERSION = "8";
+//          9 = the worklets babel pass covers EVERY package that can contain
+//              worklets, not just reanimated/worklets themselves -- so
+//              react-native-keyboard-controller, @gorhom/bottom-sheet and any
+//              other animating package stop red-screening ("Passed handlers
+//              that are not worklets"). See reactnative-esm/src/worklets.ts.
+export const NATIVE_DEPS_VERSION = "9";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it
