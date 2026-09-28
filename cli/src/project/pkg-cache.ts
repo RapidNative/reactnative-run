@@ -17,7 +17,8 @@ import { createHash } from "node:crypto";
  *  - VERSIONLESS /pkg (server resolves a tag): 200s cached for 24h.
  *  - /pkg failures (500): negative-cached for 1h -- these are Node-side
  *    packages the client stubs anyway, and each retry costs the server an
- *    npm-install attempt.
+ *    npm-install attempt. Server-side transient failures (full disk, network,
+ *    gateway timeouts -- see isTransientFailure) are NOT cached.
  *
  * Headers the client consumes (X-Externals) are preserved. Disable with
  * RNRUN_NO_PKG_CACHE=1; wipe with `rm -rf ~/.rnrun/pkg-cache`.
@@ -83,6 +84,24 @@ function writeEntry(key: string, meta: Meta, body: Buffer): void {
   } catch {
     // Cache write failure is non-fatal.
   }
+}
+
+// Failures of the package SERVER rather than of the package: a full disk,
+// a flaky registry, a gateway timeout. Negative-caching one of these pins a
+// healthy package as broken for TTL_NEGATIVE_MS on every machine that saw it
+// -- 2026-09-28 the esm origin's disk filled (ENOSPC, and npm TAR_ENTRY_ERROR
+// from the same cause) and projects kept failing for the full hour after it
+// was fixed. The negative cache is only for packages that genuinely cannot
+// build (Node-side modules the client stubs anyway).
+const TRANSIENT_STATUSES = new Set([502, 503, 504, 520, 522, 524]);
+const TRANSIENT_BODY_RE =
+  /ENOSPC|ENOMEM|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|TAR_ENTRY_ERROR|socket hang up|timed out/i;
+
+export function isTransientFailure(status: number, body: Buffer | string): boolean {
+  if (TRANSIENT_STATUSES.has(status)) return true;
+  // Error bodies are short; don't scan a large one.
+  const text = typeof body === "string" ? body : body.subarray(0, 64 * 1024).toString("utf8");
+  return TRANSIENT_BODY_RE.test(text);
 }
 
 function keptHeaders(res: Response): Record<string, string> {
@@ -178,7 +197,8 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
 
     const res = await fetch(url, init);
     const buf = Buffer.from(await res.arrayBuffer());
-    if (res.status === 200 || (res.status >= 500 && url.includes("/pkg/"))) {
+    const negative = res.status >= 500 && url.includes("/pkg/") && !isTransientFailure(res.status, buf);
+    if (res.status === 200 || negative) {
       writeEntry(key, { url, status: res.status, headers: keptHeaders(res), savedAt: Date.now(), cacheClass }, buf);
       if (debug) console.warn(`[pkg-cache] STORE (${res.status}) ${url} (${buf.length}B)`);
     } else if (debug) {
