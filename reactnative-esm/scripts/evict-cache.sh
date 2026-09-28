@@ -17,9 +17,19 @@
 # MIN_AGE_DAYS is deleted even if we stay over the cap; that is reported so
 # the cap or the disk can be raised instead.
 #
+# Package-manager install caches are capped too. The service runs with
+# HOME=/opt/rnesm, so every bun/npm install behind /pkg and /bundle-deps also
+# fills ~/.bun/install/cache, ~/.npm/_cacache and $XDG_CACHE_HOME/.bun/install.
+# Nothing evicted those: they reached 38 GB beside the 100 GB bundle cache and
+# filled the disk (2026-09-22..28, every new install failed with ENOSPC). They
+# are pure download caches -- removing one only means the next install
+# re-downloads -- so when their total exceeds PM_CAP_GB they are wiped whole
+# (npm's cacache and bun both treat a missing cache as a miss).
+#
 # Usage:
-#   evict-cache.sh [--dry-run] [--cap-gb N] [--target-gb N] [--min-age-days N]
-# Env overrides: ESM_CACHE_DIR, ESM_CACHE_CAP_GB, ESM_CACHE_TARGET_GB, ESM_CACHE_MIN_AGE_DAYS
+#   evict-cache.sh [--dry-run] [--cap-gb N] [--target-gb N] [--min-age-days N] [--pm-cap-gb N]
+# Env overrides: ESM_CACHE_DIR, ESM_CACHE_CAP_GB, ESM_CACHE_TARGET_GB, ESM_CACHE_MIN_AGE_DAYS,
+#                ESM_PM_CACHE_DIRS (space-separated), ESM_PM_CACHE_CAP_GB
 # Exit 0 always unless the cache dir is missing; output is one line per
 # decision so it reads cleanly in a cron log / journal.
 set -euo pipefail
@@ -28,6 +38,8 @@ CACHE_DIR="${ESM_CACHE_DIR:-/opt/reactnative-run/reactnative-esm/cache}"
 CAP_GB="${ESM_CACHE_CAP_GB:-100}"        # evict when the cache exceeds this
 TARGET_GB="${ESM_CACHE_TARGET_GB:-85}"   # ...down to this (headroom so it doesn't run every night)
 MIN_AGE_DAYS="${ESM_CACHE_MIN_AGE_DAYS:-1}"
+PM_CACHE_DIRS="${ESM_PM_CACHE_DIRS:-/opt/rnesm/.bun/install/cache /opt/rnesm/.npm/_cacache /opt/rnesm/.cache/.bun/install}"
+PM_CAP_GB="${ESM_PM_CACHE_CAP_GB:-10}"   # wipe the install caches when together they exceed this
 DRY_RUN=0
 
 while [ $# -gt 0 ]; do
@@ -36,6 +48,7 @@ while [ $# -gt 0 ]; do
     --cap-gb) CAP_GB="$2"; shift ;;
     --target-gb) TARGET_GB="$2"; shift ;;
     --min-age-days) MIN_AGE_DAYS="$2"; shift ;;
+    --pm-cap-gb) PM_CAP_GB="$2"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -46,6 +59,24 @@ done
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 gb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }
 mb() { awk -v b="$1" 'BEGIN { printf "%d", b / 1048576 }'; }
+
+# Install caches first: the bundle-cache check below exits early when under cap.
+pm_bytes=0
+for d in $PM_CACHE_DIRS; do
+  if [ -d "$d" ]; then pm_bytes=$(( pm_bytes + $(du -sb "$d" | cut -f1) )); fi
+done
+echo "$(stamp) evict-cache: install-caches=$(gb "$pm_bytes")G pm-cap=${PM_CAP_GB}G"
+if [ "$pm_bytes" -gt $(( PM_CAP_GB * 1073741824 )) ]; then
+  for d in $PM_CACHE_DIRS; do
+    [ -d "$d" ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "$(stamp) evict-cache: would wipe $d"
+    else
+      rm -rf -- "$d"
+      echo "$(stamp) evict-cache: wiped $d"
+    fi
+  done
+fi
 
 cap_bytes=$(( CAP_GB * 1073741824 ))
 target_bytes=$(( TARGET_GB * 1073741824 ))
