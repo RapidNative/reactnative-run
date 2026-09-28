@@ -84,6 +84,26 @@ install cap + ~25 GB headroom.
 If new builds start returning 500 with `ENOSPC` in the body, check `df -h /`
 first, then `du -sh /opt/rnesm reactnative-esm/cache`.
 
+## Disk alert (Slack, every 5 min)
+
+`scripts/disk-alert.sh` posts to Slack when the disk reaches 85% (warning) or
+95% (critical), once per level plus a recovery message, and whenever the
+service journal shows `ENOSPC` (at most hourly while it continues). The
+eviction above runs once a night; this catches whatever fills the disk in
+between. The webhook lives only on the box:
+
+```sh
+install -m 600 /dev/null /etc/reactnative-esm-alert.env
+echo 'SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...' > /etc/reactnative-esm-alert.env
+reactnative-esm/scripts/disk-alert.sh --dry-run      # prints the message, posts nothing
+cp reactnative-esm/scripts/reactnative-esm-disk-alert.cron /etc/cron.d/reactnative-esm-disk-alert
+chmod 644 /etc/cron.d/reactnative-esm-disk-alert
+tail /var/log/reactnative-esm-disk-alert.log
+```
+
+Thresholds: `WARN_PCT` / `CRIT_PCT` in the env file. Alert state is kept in
+`/var/lib/reactnative-esm-alert/`.
+
 ## Rollback
 
 ```sh
