@@ -166,6 +166,10 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // unaffected and the device should get a redbox it can act on. Record the
   // reason and let the route report it.
   const nativeSessionErrors = new Map<string, string>();
+  // In-flight retry of a failed first build, and when the last one started.
+  const nativeRetries = new Map<string, Promise<void>>();
+  const nativeRetryAt = new Map<string, number>();
+  const NATIVE_RETRY_MIN_MS = 10_000;
 
   const ctx: ServerContext = {
     session,
@@ -191,11 +195,32 @@ export async function startCommand(options: StartOptions): Promise<void> {
           })
         );
       }
+      let native: BundlerSession;
       try {
-        return await nativeSessions.get(platform)!;
+        native = await nativeSessions.get(platform)!;
       } catch {
         return null;
       }
+      // A first build that failed leaves a session with no bundle, and every
+      // device request used to replay that error until the process restarted
+      // -- even after the cause went away (2026-09-28: the package server's
+      // disk filled, was fixed, and workloads kept serving the failure).
+      // Retry on the device's next request instead, like Metro rebuilding per
+      // request, throttled so a genuine code error doesn't rebuild in a loop.
+      if (!native.getBundle() && native.buildError) {
+        let retry = nativeRetries.get(platform);
+        if (!retry && Date.now() - (nativeRetryAt.get(platform) ?? 0) >= NATIVE_RETRY_MIN_MS) {
+          nativeRetryAt.set(platform, Date.now());
+          log.info(`[${platform}] retrying failed build ...`);
+          retry = native.build().then((ok) => {
+            if (ok) log.info(`[${platform}] bundled on retry (${(native.getBundle().length / 1024).toFixed(0)} KB)`);
+            else log.error(`[${platform}] build failed:\n${native.buildError}`);
+          }).finally(() => nativeRetries.delete(platform));
+          nativeRetries.set(platform, retry);
+        }
+        if (retry) await retry;
+      }
+      return native;
     },
     getPlatformError: (platform: string) => nativeSessionErrors.get(platform) ?? null,
     peekPlatformSession: (platform: string) => readyNative.get(platform) ?? null,
