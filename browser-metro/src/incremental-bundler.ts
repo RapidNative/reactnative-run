@@ -422,6 +422,16 @@ export class IncrementalBundler {
         if (!subpaths.includes(sub)) subpaths.push(sub);
       }
     }
+    // nativewind/jsx-runtime: when babel's jsxImportSource is "nativewind",
+    // Sucrase emits require("nativewind/jsx-runtime") — but collectSubpaths
+    // scans pre-transformed source and never sees it. Without an explicit
+    // subpath the standalone fetch builds it in a separate esbuild context
+    // with its own css-interop copy (duplicate runtime singletons).
+    if (platform && versions["nativewind"]) {
+      for (const sub of ["nativewind/jsx-runtime", "nativewind/jsx-dev-runtime"]) {
+        if (!subpaths.includes(sub)) subpaths.push(sub);
+      }
+    }
 
     const hash = await hashDeps(versions, subpaths, platform ?? undefined);
     const baseUrl = this.config.server.packageServerUrl;
@@ -575,7 +585,20 @@ export class IncrementalBundler {
     }
 
     if (this.prefetchedPackages[baseName]) {
-      return { code: lowerDynamicImports(this.prefetchedPackages[baseName]), externals: {} };
+      const chunk = this.prefetchedPackages[baseName];
+      // Guard against empty or stub chunks from the combined bundle.
+      // When the server fails to build a package it may emit an empty or
+      // boilerplate-only dep-start/end block (just the IIFE wrapper with no
+      // real code inside, typically <500 chars). The module evaluates to {}
+      // — silently returning an object with no exports instead of throwing.
+      // Fall through to the individual /pkg/ fetch which builds the package
+      // in isolation (and surfaces a real HTTP error if it truly can't build).
+      const stripped = chunk.replace(/\/\/[^\n]*/g, "").trim();
+      if (stripped.length > 500) {
+        return { code: lowerDynamicImports(chunk), externals: {} };
+      }
+      // Stub/empty chunk — fall through to individual fetch below
+      console.warn(`[bundler] prefetched chunk for "${baseName}" is suspiciously small (${chunk.length} chars); falling back to individual fetch`);
     }
 
     // Fallback to individual fetch.
