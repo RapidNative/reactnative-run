@@ -580,20 +580,19 @@ export class IncrementalBundler {
 
     if (this.prefetchedPackages[baseName]) {
       const chunk = this.prefetchedPackages[baseName];
-      // Guard against empty or stub-only chunks: if the server failed to build
-      // a package inside the combined bundle it may emit an empty dep-start/end
-      // block or one containing only a comment. An empty factory body leaves
-      // module.exports as {} — silently returning an object with no exports
-      // instead of throwing, which downstream manifests as "ExpoRoot is
-      // undefined" or similar missing-export errors. Fall through to the
-      // individual /pkg/ fetch so the server builds the package in isolation
-      // (which surfaces a real HTTP 500 if it truly can't be built).
+      // Guard against empty or stub chunks from the combined bundle.
+      // When the server fails to build a package it may emit an empty or
+      // boilerplate-only dep-start/end block (just the IIFE wrapper with no
+      // real code inside, typically <500 chars). The module evaluates to {}
+      // — silently returning an object with no exports instead of throwing.
+      // Fall through to the individual /pkg/ fetch which builds the package
+      // in isolation (and surfaces a real HTTP error if it truly can't build).
       const stripped = chunk.replace(/\/\/[^\n]*/g, "").trim();
-      if (stripped.length > 0) {
+      if (stripped.length > 500) {
         return { code: lowerDynamicImports(chunk), externals: {} };
       }
-      // Empty chunk — fall through to individual fetch below
-      console.warn(`[bundler] prefetched chunk for "${baseName}" is empty; falling back to individual fetch`);
+      // Stub/empty chunk — fall through to individual fetch below
+      console.warn(`[bundler] prefetched chunk for "${baseName}" is suspiciously small (${chunk.length} chars); falling back to individual fetch`);
     }
 
     // Fallback to individual fetch.
