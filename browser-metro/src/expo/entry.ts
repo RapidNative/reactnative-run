@@ -137,15 +137,39 @@ ${loads}
  * Build the synthetic entry that imports the route context and renders ExpoRoot.
  * This is a .tsx file so React Refresh instruments App with module.hot.accept(),
  * making it an HMR accept boundary for route context changes.
+ *
+ * Defensive: expo-router's ExpoRoot can be undefined when the package server's
+ * esbuild bundle fails to initialize at runtime (e.g. a transitive dependency
+ * wasn't resolved, or the IIFE threw during module evaluation leaving
+ * module.exports as {}). We detect the missing export and show a clear
+ * diagnostic instead of letting React crash with "Element type is invalid".
  */
 export function buildExpoRouterEntry(): string {
   return `import { registerRootComponent } from "expo";
-import { ExpoRoot } from "expo-router";
 import React from "react";
+
+var _expoRouter;
+try { _expoRouter = require("expo-router"); } catch(e) {
+  console.error("[expo-entry] Failed to load expo-router:", e);
+}
+var ExpoRoot = _expoRouter && _expoRouter.ExpoRoot;
+if (!ExpoRoot) {
+  console.error("[expo-entry] ExpoRoot is " + (ExpoRoot === undefined ? "undefined" : "falsy") +
+    ". expo-router exports: " + (_expoRouter ? Object.keys(_expoRouter).join(", ") : "(module failed to load)"));
+}
 
 const ctx = require("./__expo_ctx");
 
 function App() {
+  if (!ExpoRoot) {
+    var RN = require("react-native");
+    return React.createElement(RN.View, { style: { flex: 1, justifyContent: "center", alignItems: "center", padding: 24 } },
+      React.createElement(RN.Text, { style: { color: "#e11d48", fontSize: 15, textAlign: "center", lineHeight: 22 } },
+        "expo-router failed to initialize: ExpoRoot is undefined.\\n\\n" +
+        "Available exports: " + (_expoRouter ? Object.keys(_expoRouter).join(", ") : "none") +
+        "\\n\\nThis usually means a dependency of expo-router failed to load. Check the browser console for details.")
+    );
+  }
   return React.createElement(ExpoRoot, { context: ctx });
 }
 
