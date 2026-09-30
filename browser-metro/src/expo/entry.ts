@@ -154,8 +154,13 @@ try { _expoRouter = require("expo-router"); } catch(e) {
 }
 var ExpoRoot = _expoRouter && _expoRouter.ExpoRoot;
 if (!ExpoRoot) {
+  var _keys = _expoRouter ? Object.keys(_expoRouter) : null;
   console.error("[expo-entry] ExpoRoot is " + (ExpoRoot === undefined ? "undefined" : "falsy") +
-    ". expo-router exports: " + (_expoRouter ? Object.keys(_expoRouter).join(", ") : "(module failed to load)"));
+    ". expo-router exports: " + (_keys ? (_keys.length ? _keys.join(", ") : "(empty object — package chunk may be missing from bundle)") : "(module failed to load)"));
+  if (_expoRouter && _keys && _keys.length === 0 && typeof globalThis !== "undefined" && globalThis.__BUNDLER_HMR__) {
+    var _src = globalThis.__BUNDLER_HMR__.modules["expo-router"];
+    console.error("[expo-entry] expo-router module source length:", _src ? _src.toString().length : "not in module map");
+  }
 }
 
 const ctx = require("./__expo_ctx");

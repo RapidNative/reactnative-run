@@ -416,6 +416,16 @@ export class IncrementalBundler {
         if (!subpaths.includes(sub)) subpaths.push(sub);
       }
     }
+    // nativewind/jsx-runtime: when babel's jsxImportSource is "nativewind",
+    // Sucrase emits require("nativewind/jsx-runtime") — but collectSubpaths
+    // scans pre-transformed source and never sees it. Without an explicit
+    // subpath the standalone fetch builds it in a separate esbuild context
+    // with its own css-interop copy (duplicate runtime singletons).
+    if (platform && versions["nativewind"]) {
+      for (const sub of ["nativewind/jsx-runtime", "nativewind/jsx-dev-runtime"]) {
+        if (!subpaths.includes(sub)) subpaths.push(sub);
+      }
+    }
 
     const hash = await hashDeps(versions, subpaths, platform ?? undefined);
     const baseUrl = this.config.server.packageServerUrl;
@@ -569,7 +579,21 @@ export class IncrementalBundler {
     }
 
     if (this.prefetchedPackages[baseName]) {
-      return { code: lowerDynamicImports(this.prefetchedPackages[baseName]), externals: {} };
+      const chunk = this.prefetchedPackages[baseName];
+      // Guard against empty or stub-only chunks: if the server failed to build
+      // a package inside the combined bundle it may emit an empty dep-start/end
+      // block or one containing only a comment. An empty factory body leaves
+      // module.exports as {} — silently returning an object with no exports
+      // instead of throwing, which downstream manifests as "ExpoRoot is
+      // undefined" or similar missing-export errors. Fall through to the
+      // individual /pkg/ fetch so the server builds the package in isolation
+      // (which surfaces a real HTTP 500 if it truly can't be built).
+      const stripped = chunk.replace(/\/\/[^\n]*/g, "").trim();
+      if (stripped.length > 0) {
+        return { code: lowerDynamicImports(chunk), externals: {} };
+      }
+      // Empty chunk — fall through to individual fetch below
+      console.warn(`[bundler] prefetched chunk for "${baseName}" is empty; falling back to individual fetch`);
     }
 
     // Fallback to individual fetch.
