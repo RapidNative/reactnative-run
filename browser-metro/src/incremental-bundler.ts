@@ -589,16 +589,21 @@ export class IncrementalBundler {
       // Guard against empty or stub chunks from the combined bundle.
       // When the server fails to build a package it may emit an empty or
       // boilerplate-only dep-start/end block (just the IIFE wrapper with no
-      // real code inside, typically <500 chars). The module evaluates to {}
-      // — silently returning an object with no exports instead of throwing.
-      // Fall through to the individual /pkg/ fetch which builds the package
-      // in isolation (and surfaces a real HTTP error if it truly can't build).
+      // real code inside). The module evaluates to {} — silently returning
+      // an object with no exports instead of throwing.
+      //
+      // However, VALID small chunks exist: subpath re-export stubs like
+      //   module.exports = (require("expo-router"), globalThis.__rnSubpaths["expo-router/js-tabs"]);
+      // These share internals with the base package via __rnSubpaths and
+      // must NOT fall through to /pkg/ (which would re-bundle the base,
+      // creating duplicate singletons like CurrentRouteContext).
       const stripped = chunk.replace(/\/\/[^\n]*/g, "").trim();
-      if (stripped.length > 500) {
+      const isSubpathStub = stripped.includes("__rnSubpaths");
+      if (stripped.length > 0 && (stripped.length > 500 || isSubpathStub)) {
         return { code: lowerDynamicImports(chunk), externals: {} };
       }
-      // Stub/empty chunk — fall through to individual fetch below
-      console.warn(`[bundler] prefetched chunk for "${baseName}" is suspiciously small (${chunk.length} chars); falling back to individual fetch`);
+      // Empty/broken chunk — fall through to individual fetch below
+      console.warn(`[bundler] prefetched chunk for "${baseName}" is empty or broken (${chunk.length} chars); falling back to individual fetch`);
     }
 
     // Fallback to individual fetch.
