@@ -105,6 +105,9 @@ module.exports = { routes: routes, match: match };
  */
 export function buildExpoRouteContext(vfs: VirtualFS): string {
   const entries: { contextKey: string; requirePath: string }[] = [];
+  // Track which directories under /app/ have route files and which have layouts
+  const dirsWithRoutes = new Set<string>();
+  const dirsWithLayouts = new Set<string>();
 
   for (const filePath of vfs.list()) {
     if (!filePath.startsWith("/app/")) continue;
@@ -112,12 +115,32 @@ export function buildExpoRouteContext(vfs: VirtualFS): string {
     if (!ROUTE_EXTS.has(ext)) continue;
     // Exclude API route files from the client route context
     if (isApiRouteFile(filePath)) continue;
+
+    // Track directory info for layout auto-generation
+    const dir = filePath.slice(0, filePath.lastIndexOf("/") + 1); // e.g. "/app/settings/"
+    dirsWithRoutes.add(dir);
+    const basename = filePath.slice(dir.length).replace(/\.[^.]+$/, "");
+    if (basename === "_layout") dirsWithLayouts.add(dir);
+
     // Context keys are relative to /app/ with "./" prefix, e.g. "./(tabs)/index.tsx"
     // Require paths are relative to project root, e.g. "./app/(tabs)/index"
     entries.push({
       contextKey: "./" + filePath.slice("/app/".length),
       requirePath: "." + filePath.replace(/\.[^.]+$/, ""),
     });
+  }
+
+  // Auto-generate default _layout files for directories that have route files
+  // but no _layout. Without a layout, expo-router can't create the Route context
+  // provider, causing "No filename found" errors at runtime.
+  for (const dir of dirsWithRoutes) {
+    if (dirsWithLayouts.has(dir)) continue;
+    const layoutPath = dir + "_layout.tsx";
+    const defaultLayout = `import { Slot } from "expo-router";\nexport default function Layout() { return <Slot />; }\n`;
+    vfs.write(layoutPath, defaultLayout);
+    const contextKey = "./" + layoutPath.slice("/app/".length);
+    const requirePath = "." + layoutPath.replace(/\.[^.]+$/, "");
+    entries.push({ contextKey, requirePath });
   }
 
   const loads = entries
