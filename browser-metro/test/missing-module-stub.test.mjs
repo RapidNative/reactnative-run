@@ -118,3 +118,29 @@ test('the stub is replaced by the real module on the rebuild that creates the fi
   assert.ok(!/Unable to resolve/.test(mod), 'the stub must be replaced by the real asset module');
   assert.ok(!STUB_RE.test(result.bundle), 'the full bundle must no longer carry the stub');
 });
+
+// An extensionless import (`./lib/id`, or an alias such as `@/src/lib/id`)
+// cannot be resolved to a path until the file exists, so the importer's
+// require keeps the raw specifier and the stub is registered under it.
+// Creating `/lib/id.ts` later defines a module at the real path, which no
+// require points at: the importer's cache entry is still valid (its source
+// did not change), so it kept requiring the throwing stub until a full page
+// reload. Seen in production when the agent wrote a screen importing
+// `@/src/lib/id` a few tool calls before writing `src/lib/id.ts`.
+test('an importer whose extensionless import was stubbed re-resolves when the file is created', async () => {
+  const fs = makeFs({
+    '/index.js': 'module.exports = require("./screen.js");',
+    '/screen.js': 'module.exports = require("./lib/id").newId;',
+  });
+  const bundler = new IncrementalBundler(fs, CONFIG);
+  const first = await bundler.build('/index.js');
+  assert.match(first.bundle, /Unable to resolve/);
+
+  fs.write('/lib/id.ts', 'export const newId = () => "x";');
+  const result = await bundler.rebuild([{ path: '/lib/id.ts', type: 'create' }]);
+
+  assert.ok(result.hmrUpdate, 'expected an HMR update');
+  assert.ok(result.hmrUpdate.updatedModules['/screen.js'], 'the importer must be re-sent so its require points at the new file');
+  assert.ok(!/Unable to resolve/.test(result.bundle), 'no module may still require the stub');
+  assertNoDanglingIds(result.bundle);
+});

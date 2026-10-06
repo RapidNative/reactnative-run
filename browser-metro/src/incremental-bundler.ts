@@ -725,6 +725,20 @@ export class IncrementalBundler {
   }
 
   /**
+   * Importers of each stubbed (missing) dependency, keyed by the stub's id.
+   *
+   * An import that cannot be resolved to a file -- an extensionless path or an
+   * alias such as `@/src/lib/id`, written before the file exists -- keeps its
+   * raw specifier, so the stub is registered under that specifier, not under
+   * the path the file is later created at. Creating the file therefore replaces
+   * nothing, and the importer's cache entry stays valid because its source did
+   * not change: it kept requiring the throwing stub until a full page reload.
+   * rebuild() uses this map to re-resolve exactly those importers when a file
+   * is created.
+   */
+  private stubImporters = new Map<string, Set<string>>();
+
+  /**
    * A resolved local dep with no VFS content can't be processed, but its
    * importer's dependency map still references it — on metro-format output
    * that mints a numeric id the bundle never defines, and the device throws
@@ -737,6 +751,11 @@ export class IncrementalBundler {
    * the real file, Metro-style.
    */
   private stubMissingModule(filePath: string, importer?: string): void {
+    if (importer) {
+      let importers = this.stubImporters.get(filePath);
+      if (!importers) this.stubImporters.set(filePath, (importers = new Set()));
+      importers.add(importer);
+    }
     if (this.moduleMap[filePath] !== undefined) return;
     const from = importer ? ` from "${importer}"` : "";
     const hint = this.resolver.isAssetFile(filePath)
@@ -1199,6 +1218,39 @@ export class IncrementalBundler {
         // handles re-execution by walking accept boundaries.
         this.cache.invalidateModule(change.path);
         filesToReprocess.add(change.path);
+      }
+    }
+
+    // Phase 1b: a created file may be what a stubbed import was waiting for.
+    // Re-process the importers of stubs that are not themselves the created
+    // path (those are replaced directly by reprocessing the new file) and that
+    // now resolve. Only importers with a missing dependency are touched.
+    if (this.stubImporters.size > 0 && changes.some((c) => c.type !== "delete")) {
+      for (const [stubId, importers] of [...this.stubImporters]) {
+        if (this.fs.exists(stubId)) {
+          // Stub keyed by a real path: the created file replaces it in place.
+          this.stubImporters.delete(stubId);
+          continue;
+        }
+        let resolvedAny = false;
+        for (const importer of importers) {
+          if (!this.fs.exists(importer)) {
+            importers.delete(importer);
+            continue;
+          }
+          if (this.makeResolveTarget(importer)(stubId) === null) continue;
+          this.cache.invalidateModule(importer);
+          filesToReprocess.add(importer);
+          importers.delete(importer);
+          resolvedAny = true;
+        }
+        if (importers.size === 0) {
+          this.stubImporters.delete(stubId);
+          if (resolvedAny) {
+            delete this.moduleMap[stubId];
+            delete this.sourceMapMap[stubId];
+          }
+        }
       }
     }
 
