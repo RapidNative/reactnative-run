@@ -35,6 +35,7 @@ import { sweepCache } from "./retention";
 import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } from "./output";
 import { isValidPackageName, isValidVersionRange } from "./validation";
 import { CODEGEN_SPEC_FILE_RE, RN_CORE_RE, codegenViewConfig } from "./codegen";
+import { makeWorkletsPlugin, workletsRuntimeVersion, mayWorkletize } from "./worklets";
 import {
 	BuildPlatform,
 	normalizePlatform,
@@ -491,118 +492,6 @@ const stubNodeProtocolPlugin: esbuild.Plugin = {
 	},
 };
 
-/** Worklet transforms for packages that ship raw 'worklet' directives
- *  (react-native-reanimated has ~80 such files; react-native-worklets ~17).
- *  Metro runs react-native-worklets/plugin over ALL files via babel.config;
- *  here it runs only on files that can contain worklets (cheap regex gate)
- *  and only on native builds. The plugin is resolved from the build's own
- *  install so its version matches the app's worklets runtime; if it isn't
- *  installed there (project doesn't use reanimated), the plugin is inert.
- *
- *  disableSourceMaps: the plugin otherwise embeds sourcesContent by reading
- *  state.filename from disk, which doubles output size for zero dev value
- *  here (worklet code strings keep their location field regardless). */
-const WORKLET_HINT_RE = /['"]worklet['"]/;
-function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
-	// Per-directory-tree plugin resolution cache (one entry per tmpdir).
-	const pluginPathCache = new Map<string, Promise<string | null>>();
-	const resolveNow = (root: string): string | null => {
-		for (const spec of ["react-native-worklets/plugin", "react-native-reanimated/plugin"]) {
-			try {
-				const resolved = require.resolve(spec, { paths: [root] });
-				// Must actually LOAD: reanimated 4.x ships a plugin/ shim that
-				// re-exports react-native-worklets/plugin -- it resolves even when
-				// the worklets peer is missing, then explodes inside babel.
-				require(resolved);
-				return resolved;
-			} catch { /* try next */ }
-		}
-		return null;
-	};
-	const resolvePlugin = (fromFile: string): Promise<string | null> => {
-		// Find the install root (the path segment before node_modules).
-		const idx = fromFile.lastIndexOf(`node_modules${path.sep}`);
-		if (idx === -1) return Promise.resolve(null);
-		const root = fromFile.slice(0, idx);
-		let cached = pluginPathCache.get(root);
-		if (!cached) {
-			cached = (async () => {
-				let resolved = resolveNow(root);
-				if (!resolved) {
-					// Standalone /pkg builds install with --legacy-peer-deps, which
-					// skips react-native-worklets (reanimated's peer). WITHOUT the
-					// plugin the chunk ships unworkletized and crashes at runtime
-					// ("Failed to create a worklet"), so failing the build would be
-					// better than skipping -- but installing the peer fixes it.
-					const range = (() => {
-						try {
-							const pkg = JSON.parse(
-								fs.readFileSync(path.join(root, "node_modules", "react-native-reanimated", "package.json"), "utf8")
-							);
-							return pkg.peerDependencies?.["react-native-worklets"] || "latest";
-						} catch {
-							return "latest";
-						}
-					})();
-					console.log(`[worklets] installing react-native-worklets@${range} into build root for the babel plugin`);
-					try {
-						await execFileAsync("npm", ["install", "--ignore-scripts", `react-native-worklets@${range}`, "--no-save", "--no-audit", "--no-fund"], {
-							cwd: root,
-							killSignal: "SIGKILL",
-							timeout: 120000,
-							maxBuffer: 16 * 1024 * 1024,
-						});
-						resolved = resolveNow(root);
-					} catch (err) {
-						console.warn(`[worklets] peer install failed: ${(err as Error).message.slice(0, 200)}`);
-					}
-				}
-				if (!resolved) console.warn(`[worklets] plugin not resolvable from ${root}; worklet files ship untransformed`);
-				return resolved;
-			})();
-			pluginPathCache.set(root, cached);
-		}
-		return cached;
-	};
-	return {
-		name: "workletize",
-		setup(build) {
-			if (platform === "web") return;
-			build.onLoad({ filter: /node_modules[/\\](react-native-reanimated|react-native-worklets)[/\\].*\.[cm]?[jt]sx?$/ }, async (args) => {
-				const src = await fs.promises.readFile(args.path, "utf8");
-				if (!WORKLET_HINT_RE.test(src)) return undefined;
-				const pluginPath = await resolvePlugin(args.path);
-				if (!pluginPath) return undefined;
-				const ext = args.path.slice(args.path.lastIndexOf(".") + 1).replace(/^[cm]/, "");
-				const parserPlugins: ("typescript" | "jsx" | "flow")[] =
-					ext === "ts" ? ["typescript"] : ext === "tsx" ? ["typescript", "jsx"] : ["flow", "jsx"];
-				try {
-					// eslint-disable-next-line @typescript-eslint/no-var-requires
-					const babel = require("@babel/core") as typeof import("@babel/core");
-					const result = await babel.transformAsync(src, {
-						filename: args.path,
-						plugins: [[pluginPath, { disableSourceMaps: true }]],
-						parserOpts: { plugins: parserPlugins },
-						babelrc: false,
-						configFile: false,
-						compact: false,
-						sourceMaps: false,
-					});
-					if (result?.code != null) {
-						// Loader must match the REAL extension: "tsx" on a .ts file
-						// parses generics like useAnimatedRef<T>() as JSX and fails.
-						const loader = (ext === "ts" ? "ts" : ext === "tsx" ? "tsx" : "jsx") as esbuild.Loader;
-						return { contents: result.code, loader };
-					}
-				} catch (err) {
-					console.warn(`[worklets] transform failed for ${args.path}: ${(err as Error).message.slice(0, 200)}`);
-				}
-				return undefined;
-			});
-		},
-	};
-}
-
 /** codegenNativeComponent -> static JS view config (New Architecture).
  *
  *  On the New Architecture / bridgeless, RN's `codegenNativeComponent` REQUIRES
@@ -643,7 +532,10 @@ function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch")
 		makeStripFlowPlugin(platform),
 		makeFilterPlatformsPlugin(platform),
 		// After filterPlatforms so blanked platform variants stay blanked
-		// (esbuild uses the first onLoad that returns contents).
+		// (esbuild uses the first onLoad that returns contents). The same rule
+		// means stripFlow, above, claims any node_modules .js carrying @flow
+		// before this pass sees it -- fine today because every worklet-shipping
+		// package is TypeScript, but a Flow-typed one would ship unworkletized.
 		makeWorkletsPlugin(platform),
 		// After stripFlow so react-native core specs are claimed by the full
 		// preset there; this pass covers non-core packages (react-native-screens
@@ -1982,10 +1874,18 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				return [];
 			}
 		};
+		// The worklets babel plugin generates factories the app's worklets RUNTIME
+		// evaluates and version-checks, so a chunk workletized against 0.10 is not
+		// reusable by an app on a different version. Only packages that can carry
+		// worklets take it into their key (everything else keeps sharing chunks
+		// across apps regardless of what reanimated version each pins), and only
+		// on native -- the pass does not run on web, so web keys stay as they are.
+		const workletsVersion = platform === "web" ? null : workletsRuntimeVersion(tmpDir);
 		const chunkKeyFor = (pkgName: string, version: string, subs: string[]): string => {
 			// Only batch members that this package might import can affect its
 			// externals, so the key stays stable when unrelated deps come and go.
-			const relevant = declaredDepsOf(pkgName).filter((d) => batchSet.has(d));
+			const declared = declaredDepsOf(pkgName);
+			const relevant = declared.filter((d) => batchSet.has(d));
 			const input = JSON.stringify({
 				pkg: pkgName,
 				version,
@@ -1993,6 +1893,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				nv: NATIVE_DEPS_VERSION,
 				subs: [...subs].sort(),
 				externals: relevant,
+				...(workletsVersion && mayWorkletize(pkgName, declared) ? { worklets: workletsVersion } : {}),
 			});
 			return crypto.createHash("sha256").update(input).digest("hex").slice(0, 24);
 		};

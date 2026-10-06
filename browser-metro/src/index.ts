@@ -22,7 +22,12 @@ export type { UnsupportedPackageEntry } from "./plugins/unsupported-web-packages
 export { emitMetroWrappedBundle, emitMetroModulesBundle, emitMetroModule, buildMetroPrelude, buildMetroHmrBody } from "./metro-emit.js";
 export { ModuleIdRegistry } from "./module-ids.js";
 export type { MetroEmitOptions, MetroHmrBody, MetroHmrModuleEntry, BundleLineIndexEntry } from "./metro-emit.js";
-export { INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS } from "./utils.js";
+export {
+  INITIALIZE_CORE_SUBPATH,
+  NATIVE_POLYFILL_SUBPATHS,
+  EXPO_STREAMS_POLYFILL_SUBPATH,
+  nativePostCoreSubpaths,
+} from "./utils.js";
 export {
   isApiRouteFile,
   filePathToApiRoute,

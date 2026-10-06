@@ -1,0 +1,7 @@
+# Slack alert when the esm origin disk fills up or builds hit ENOSPC (see disk-alert.sh).
+# Install: cp reactnative-esm/scripts/reactnative-esm-disk-alert.cron /etc/cron.d/reactnative-esm-disk-alert
+# Webhook: /etc/reactnative-esm-alert.env (root-only, chmod 600) -- SLACK_WEBHOOK_URL=...
+# Log:     /var/log/reactnative-esm-disk-alert.log
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root /opt/reactnative-run/reactnative-esm/scripts/disk-alert.sh >> /var/log/reactnative-esm-disk-alert.log 2>&1

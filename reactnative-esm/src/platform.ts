@@ -12,7 +12,11 @@ export const SERVER_VERSION = "8";
 //     on it at runtime, and every check was silently false under rnrun).
 // 7 = .fx side-effect re-exports are lazy (lazy-fx-reexports plugin), so
 //     expo-notifications no longer red-screens Android Expo Go at boot.
-export const NATIVE_DEPS_VERSION = "8";
+// 9 = the worklets babel pass covers EVERY package that can contain worklets,
+//     not just reanimated/worklets themselves (src/worklets.ts). Packages like
+//     react-native-keyboard-controller and @gorhom/bottom-sheet shipped
+//     unworkletized and crashed on first render.
+export const NATIVE_DEPS_VERSION = "9";
 
 // ============================================================
 // Platform dimension (web | ios | android)
@@ -62,6 +66,13 @@ export function cacheKeyFor(pkgName: string, version: string, subpath: string, p
 	// Bumping the version mints a fresh native namespace; the web namespace --
 	// and the ~12GB of production web cache behind it -- is untouched, which is
 	// exactly the blunt-instrument problem described above.
+	//
+	// KNOWN GAP (worklets): a /pkg build installs the package ALONE, so the
+	// worklets plugin it is transformed with comes from reanimated's own peer
+	// range, not from the requesting app -- and the /pkg URL carries no worklets
+	// version to key on. The combined /bundle-deps path (which is what native
+	// apps actually fetch; /pkg is browser-metro's per-package fallback) does
+	// install the app's own versions and DOES fold them into its chunk key.
 	const plat = platform && platform !== "web" ? `.${platform}.nv${NATIVE_DEPS_VERSION}` : "";
 	return `${pkgName.replace(/\//g, "__")}@${version}${subpath.replace(/\//g, "__")}${plat}`;
 }
@@ -84,6 +95,25 @@ export function esbuildPlatformSettings(platform: BuildPlatform): Partial<esbuil
 		target: "es2018",
 		mainFields: ["react-native", "browser", "main"],
 		conditions: ["react-native"],
+		// TypeScript DECLARATION-ONLY class fields (`getNativeComponent!: () =>
+		// X;` with no initializer) must be ERASED, not emitted.
+		//
+		// Metro compiles packages with @babel/plugin-transform-typescript, which
+		// drops them. esbuild, finding no tsconfig inside an installed package,
+		// defaults to useDefineForClassFields: true and emits
+		// `__publicField(this, "getNativeComponent")` -- an OWN property whose
+		// value is undefined, which SHADOWS the prototype method of the same
+		// name. Any package that declares a field for TypeScript and assigns the
+		// real implementation onto the prototype then breaks at runtime, and only
+		// on device: react-native-maps does exactly this for
+		// getNativeComponent/getUIManagerCommand/getMapManagerCommand/context
+		// (its own comment says "declaration only, as they are set through
+		// decorateMap"), so every <Marker> threw "undefined is not a function".
+		//
+		// false matches Metro. Fields WITH an initializer still emit, as they
+		// must. Native only -- the web key namespace is byte-frozen (see
+		// cacheKeyFor), and carries the same latent bug.
+		tsconfigRaw: { compilerOptions: { useDefineForClassFields: false } },
 	};
 }
 

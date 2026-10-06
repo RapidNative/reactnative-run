@@ -14,6 +14,7 @@ import {
   platformSourceExts,
   INITIALIZE_CORE_SUBPATH,
   NATIVE_POLYFILL_SUBPATHS,
+  nativePostCoreSubpaths,
 } from "browser-metro";
 import { randomUUID } from "node:crypto";
 import { createHermesLoweringPlugin } from "./hermes-lowering.js";
@@ -241,9 +242,13 @@ export class BundlerSession {
         output: {
           format: "metro",
           // Metro's prelude order: polyfills (console, error-guard) install
-          // global.ErrorUtils etc., then InitializeCore, then the entry.
+          // global.ErrorUtils etc., then InitializeCore, then the entry. Expo's
+          // streams polyfill (global ReadableStream) goes after InitializeCore:
+          // requiring it evaluates the whole expo chunk (see nativePostCoreSubpaths).
           preRequires:
-            "react-native" in deps ? [...NATIVE_POLYFILL_SUBPATHS, INITIALIZE_CORE_SUBPATH] : [],
+            "react-native" in deps
+              ? [...NATIVE_POLYFILL_SUBPATHS, INITIALIZE_CORE_SUBPATH, ...nativePostCoreSubpaths(deps)]
+              : [],
           prelude: this.options.metroPrelude,
         },
         plugins: [

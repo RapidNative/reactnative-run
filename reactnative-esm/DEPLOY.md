@@ -69,6 +69,41 @@ least ~25 GB free for deploys and the live server's writes. If the log warns
 that everything left was read within a day, the working set outgrew the cap:
 raise the cap or the disk rather than lowering the age guard.
 
+The same run also caps the **package-manager install caches**. The service runs
+with `HOME=/opt/rnesm`, so every bun/npm install fills
+`/opt/rnesm/.bun/install/cache`, `/opt/rnesm/.npm/_cacache` and
+`/opt/rnesm/.cache/.bun/install`, which live outside `cache/` and used to have no
+eviction at all. They reached 38 GB and filled the disk (2026-09-22..28: every
+new `/pkg` and `/bundle-deps` build failed with `ENOSPC`, while already-cached
+bundles kept serving). When together they exceed 10 GB (`ESM_PM_CACHE_CAP_GB`)
+they are wiped whole -- they are download caches, so the only cost is the next
+install re-downloading. Override the list with `ESM_PM_CACHE_DIRS` if the
+service's `HOME`/`XDG_CACHE_HOME` changes. Budget the disk as bundle cap +
+install cap + ~25 GB headroom.
+
+If new builds start returning 500 with `ENOSPC` in the body, check `df -h /`
+first, then `du -sh /opt/rnesm reactnative-esm/cache`.
+
+## Disk alert (Slack, every 5 min)
+
+`scripts/disk-alert.sh` posts to Slack when the disk reaches 85% (warning) or
+95% (critical), once per level plus a recovery message, and whenever the
+service journal shows `ENOSPC` (at most hourly while it continues). The
+eviction above runs once a night; this catches whatever fills the disk in
+between. The webhook lives only on the box:
+
+```sh
+install -m 600 /dev/null /etc/reactnative-esm-alert.env
+echo 'SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...' > /etc/reactnative-esm-alert.env
+reactnative-esm/scripts/disk-alert.sh --dry-run      # prints the message, posts nothing
+cp reactnative-esm/scripts/reactnative-esm-disk-alert.cron /etc/cron.d/reactnative-esm-disk-alert
+chmod 644 /etc/cron.d/reactnative-esm-disk-alert
+tail /var/log/reactnative-esm-disk-alert.log
+```
+
+Thresholds: `WARN_PCT` / `CRIT_PCT` in the env file. Alert state is kept in
+`/var/lib/reactnative-esm-alert/`.
+
 ## Rollback
 
 ```sh
