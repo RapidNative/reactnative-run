@@ -9,7 +9,7 @@ import {
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
 import { formatTransformError } from "./transform-error.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, jsonModule } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -384,6 +384,12 @@ export class Bundler {
       const source = this.fs.read(filePath);
       if (source === undefined) {
         throw new Error("File not found: " + filePath);
+      }
+
+      // Imported .json: leaf module, never through the JS transformer.
+      if (filePath.endsWith(".json")) {
+        moduleMap[filePath] = jsonModule(filePath, source);
+        return;
       }
 
       // Transform the file (TS -> JS, JSX -> JS, etc.)

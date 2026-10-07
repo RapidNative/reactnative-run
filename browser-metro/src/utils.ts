@@ -367,6 +367,18 @@ export function hashString(str: string): string {
   return (hash >>> 0).toString(36);
 }
 
+/** Module body for an imported .json file: `module.exports = <value>`.
+ *  Parsed first so a malformed file reports a JSON error, not a JS one. */
+export function jsonModule(filePath: string, source: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(source.charCodeAt(0) === 0xfeff ? source.slice(1) : source);
+  } catch (err) {
+    throw new Error(filePath + ": Invalid JSON: " + (err instanceof Error ? err.message : String(err)));
+  }
+  return "module.exports = " + JSON.stringify(value) + ";";
+}
+
 // Must match SERVER_VERSION in reactnative-esm/src/index.ts
 const DEPS_HASH_VERSION = "8";
 // Native-only bundle-format version; folded into non-web hashes (see hashDeps).
