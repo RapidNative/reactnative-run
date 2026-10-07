@@ -12,7 +12,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, nativePostCoreSubpaths, NATIVE_DEPS_VERSION } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, nativePostCoreSubpaths, NATIVE_DEPS_VERSION, jsonModule } from "./utils.js";
 import { formatTransformError } from "./transform-error.js";
 import type {
   BundlerConfig,
@@ -660,6 +660,14 @@ export class IncrementalBundler {
     const source = virtualSource ?? this.fs.read(filePath);
     if (source === undefined) {
       throw new Error("File not found: " + filePath);
+    }
+
+    // Imported .json is a leaf module whose value is the parsed document
+    // (Metro parity). It must not reach the JS transformer, which parses
+    // `{ "scale": 0.82 }` as a block statement and fails the whole bundle.
+    if (virtualSource === undefined && filePath.endsWith(".json")) {
+      this.moduleMap[filePath] = jsonModule(filePath, source);
+      return { localDeps: [], npmDeps: [] };
     }
 
     const sourceHash = hashString(source);
