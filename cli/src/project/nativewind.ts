@@ -30,6 +30,13 @@ export function encodeNativewindRequest(body: object): { bytes: Uint8Array; rawB
 }
 
 const CONTENT_EXT_RE = /\.(?:tsx?|jsx?|html|mdx)$/;
+/** Also materialized on the server, though not scanned for classes: the
+ *  config runs there with plain Node `require`, so a `require("./theme.json")`
+ *  in tailwind.config.js needs the file in the workdir or the compile 500s
+ *  ("Cannot find module './text-scale.json'") and the app gets no styles.
+ *  Lockfiles are skipped -- they can be megabytes and no config reads them. */
+const CONFIG_DATA_RE = /\.json$/;
+const LOCKFILE_RE = /(?:^|\/)package-lock\.json$/;
 
 export interface NativewindDetection {
   enabled: boolean;
@@ -99,7 +106,7 @@ export async function compileNativewindCss(opts: {
 
   const content: Record<string, string> = {};
   for (const p of allPaths) {
-    if (!CONTENT_EXT_RE.test(p)) continue;
+    if (!CONTENT_EXT_RE.test(p) && !(CONFIG_DATA_RE.test(p) && !LOCKFILE_RE.test(p))) continue;
     const src = vfs.read(p);
     if (src) content[p] = src;
   }

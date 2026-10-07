@@ -49,7 +49,7 @@ test("compile request is gzipped and decodes to the full JSON body", async () =>
   assert.deepStrictEqual(body.versions, { nativewind: "4.2.1", tailwindcss: "3.4.18", "react-native-css-interop": "0.2.1", "react-native": "0.81.4" });
   assert.strictEqual(body.tailwindConfig, files["/tailwind.config.js"]);
   assert.strictEqual(body.css, files["/global.css"]);
-  assert.deepStrictEqual(Object.keys(body.content).sort(), ["/app/index.tsx", "/tailwind.config.js"]);
+  assert.deepStrictEqual(Object.keys(body.content).sort(), ["/app/index.tsx", "/package.json", "/tailwind.config.js"]);
 
   assert.ok(out.get("/global.css").includes('"darkMode":"class dark"'), "compiled flags reach the injectData module");
 });
@@ -68,4 +68,26 @@ test("encodeNativewindRequest is deterministic (cache key stability)", () => {
   const b = encodeNativewindRequest({ x: 1, content: { "/a.tsx": "hi" } });
   assert.deepStrictEqual(Buffer.from(a.bytes), Buffer.from(b.bytes));
   assert.strictEqual(a.rawBytes, Buffer.byteLength(JSON.stringify({ x: 1, content: { "/a.tsx": "hi" } })));
+});
+
+// tailwind.config.js runs on the server with plain Node `require`, so a JSON
+// file it requires must travel with the request. Without it the server 500'd
+// with "Cannot find module './text-scale.json'" and the app booted unstyled
+// (rnrun only; Lifo's artboard compiles tailwind locally, so it looked fine).
+test("JSON files the tailwind config can require are sent; lockfiles are not", async () => {
+  let captured;
+  const fetch = async (url, init) => {
+    captured = init;
+    return new Response(JSON.stringify({ data: {} }), { status: 200 });
+  };
+  const withJson = {
+    ...files,
+    "/tailwind.config.js": "const { scale } = require('./text-scale.json');\nmodule.exports = { darkMode: 'class', content: [] };",
+    "/text-scale.json": '{\n  "scale": 0.82\n}\n',
+    "/package-lock.json": '{ "lockfileVersion": 3 }',
+  };
+  await compileNativewindCss({ vfs: fakeVfs(withJson), platform: "ios", packageServerUrl: "https://esm.example", fetch, warn: () => {} });
+  const body = JSON.parse(gunzipSync(captured.body).toString("utf8"));
+  assert.strictEqual(body.content["/text-scale.json"], withJson["/text-scale.json"]);
+  assert.ok(!("/package-lock.json" in body.content), "lockfile stays out of the request");
 });
