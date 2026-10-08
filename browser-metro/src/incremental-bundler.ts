@@ -184,7 +184,13 @@ export class IncrementalBundler {
   private async applyOverrideModules(skipNames: Set<string>): Promise<void> {
     const overrides = this.getOverrideModules();
     for (const [name, code] of Object.entries(overrides)) {
-      if (this.moduleMap[name] !== undefined && !this.moduleMap[name + "__original"]) {
+      // Only wrap what this project fetched. An override for a package it never
+      // imports (expo-sensors, for every app without sensors) would otherwise
+      // sit in the bundle and send the transitive pass below fetching
+      // "<name>__original", which is not a package. The wrap happens on the
+      // build that first fetches the package.
+      if (this.moduleMap[name] === undefined) continue;
+      if (!this.moduleMap[name + "__original"]) {
         this.moduleMap[name + "__original"] = this.moduleMap[name];
       }
       this.moduleMap[name] = code;

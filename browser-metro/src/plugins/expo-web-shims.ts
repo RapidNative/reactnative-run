@@ -240,12 +240,77 @@ try {
 }
 `;
 
+/**
+ * `expo-sensors`, wrapped so its sensors can be subscribed to on web.
+ *
+ * Since expo-sensors 57, `DeviceSensor.addListener` subscribes through its
+ * native module's event emitter (`this._nativeModule.addListener(...)`), but
+ * the package's web modules (ExponentAccelerometer.web.js and friends) are
+ * still plain objects that emit on `DeviceEventEmitter` from
+ * startObserving(). So on web every `Accelerometer.addListener(...)` threw
+ * "this._nativeModule.addListener is not a function" and the preview showed
+ * an error for an app that works on a phone. This is the same code under
+ * `expo start --web`; nothing in the app is wrong.
+ *
+ * Give each sensor's web module the three methods DeviceSensor calls, backed
+ * by DeviceEventEmitter, and start/stop observing with the first/last
+ * listener as the native module does. A module that already has
+ * addListener (native, or a fixed upstream) is left alone. Sensors with no
+ * web support keep reporting isAvailableAsync() === false and simply never
+ * emit. Pedometer subscribes through a module the package does not export,
+ * so it is out of reach here. ES5 only: overrides skip the transform pipeline.
+ */
+const EXPO_SENSORS_WEB_EVENTS = `
+var sensors = require("expo-sensors__original");
+var events = require("react-native").DeviceEventEmitter;
+function withEvents(nativeModule) {
+  if (!nativeModule || typeof nativeModule.addListener === "function" || !events) return;
+  var count = 0;
+  function stop() {
+    if (typeof nativeModule.stopObserving === "function") nativeModule.stopObserving();
+  }
+  nativeModule.addListener = function (eventName, listener) {
+    var subscription = events.addListener(eventName, listener);
+    if (count++ === 0 && typeof nativeModule.startObserving === "function") nativeModule.startObserving();
+    var removed = false;
+    return {
+      remove: function () {
+        if (removed) return;
+        removed = true;
+        subscription.remove();
+        if (--count === 0) stop();
+      },
+    };
+  };
+  nativeModule.listenerCount = function () {
+    return count;
+  };
+  nativeModule.removeAllListeners = function (eventName) {
+    events.removeAllListeners(eventName);
+    if (count > 0) {
+      count = 0;
+      stop();
+    }
+  };
+}
+["Accelerometer", "Barometer", "DeviceMotion", "Gyroscope", "LightSensor", "Magnetometer", "MagnetometerUncalibrated"].forEach(function (name) {
+  var sensor = sensors[name];
+  if (sensor) withEvents(sensor._nativeModule);
+});
+module.exports = sensors;
+`;
+
 export function createExpoWebShimsPlugin(): BundlerPlugin {
   return {
     name: "expo-web-shims",
     shimModules() {
       return {
         "react-native": REACT_NATIVE_WITH_ALERT,
+      };
+    },
+    overrideModules() {
+      return {
+        "expo-sensors": EXPO_SENSORS_WEB_EVENTS,
       };
     },
   };
