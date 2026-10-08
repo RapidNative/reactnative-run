@@ -47,6 +47,7 @@ import {
 	NATIVE_DEPS_VERSION,
 } from "./platform";
 import { hasFxImport, rewriteFxImports } from "./lazy-fx";
+import { makePackageMapsPlugin } from "./package-maps";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -1144,6 +1145,10 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				}),
 			}),
 			plugins: [
+				// First, and outside rnPluginStack: a redirect must win over the
+				// externals and builtin stubs below, exactly as Metro applies it
+				// before resolving, and plain-JS packages need it too.
+				makePackageMapsPlugin(platform),
 				...(isReactNative ? rnPluginStack(platform, "pkg") : []),
 				selectiveExternalPlugin,
 			],
@@ -2024,6 +2029,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					...esbuildPlatformSettings(platform),
 					...(info.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
 					plugins: [
+						makePackageMapsPlugin(platform),
 						...(info.isRN ? rnPluginStack(platform) : []),
 						pkgExternalPlugin,
 					],
@@ -2169,6 +2175,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 					...esbuildPlatformSettings(platform),
 					...(info?.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
 					plugins: [
+						makePackageMapsPlugin(platform),
 						...(info?.isRN ? rnPluginStack(platform) : []),
 						subExternalPlugin,
 					],
