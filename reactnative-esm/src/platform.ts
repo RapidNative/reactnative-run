@@ -16,7 +16,10 @@ export const SERVER_VERSION = "8";
 //     not just reanimated/worklets themselves (src/worklets.ts). Packages like
 //     react-native-keyboard-controller and @gorhom/bottom-sheet shipped
 //     unworkletized and crashed on first render.
-export const NATIVE_DEPS_VERSION = "9";
+// 10 = package.json "react-native"/"browser" object maps apply on native, as
+//      under Metro (src/package-maps.ts). socket.io-client stops pulling in
+//      Node's `ws`, so @base44/sdk no longer ships as `module.exports = {}`.
+export const NATIVE_DEPS_VERSION = "10";
 
 // ============================================================
 // Platform dimension (web | ios | android)

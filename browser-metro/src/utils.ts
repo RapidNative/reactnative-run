@@ -397,7 +397,11 @@ const DEPS_HASH_VERSION = "8";
 //              react-native-keyboard-controller, @gorhom/bottom-sheet and any
 //              other animating package stop red-screening ("Passed handlers
 //              that are not worklets"). See reactnative-esm/src/worklets.ts.
-export const NATIVE_DEPS_VERSION = "9";
+//         10 = package.json "react-native"/"browser" object maps apply on
+//              native, as under Metro, so socket.io-client (and @base44/sdk,
+//              which depends on it) stops bundling Node's `ws` and shipping
+//              empty. See reactnative-esm/src/package-maps.ts.
+export const NATIVE_DEPS_VERSION = "10";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it
