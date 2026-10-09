@@ -19,7 +19,10 @@ export const SERVER_VERSION = "8";
 // 10 = package.json "react-native"/"browser" object maps apply on native, as
 //      under Metro (src/package-maps.ts). socket.io-client stops pulling in
 //      Node's `ws`, so @base44/sdk no longer ships as `module.exports = {}`.
-export const NATIVE_DEPS_VERSION = "10";
+// 11 = react-native-css-interop's dev-only upgrade warning no longer red-screens
+//      with "Couldn't find a navigation context" when a className gains a shadow,
+//      transition or container after the first render (src/native-patches.ts).
+export const NATIVE_DEPS_VERSION = "11";
 
 // ============================================================
 // Platform dimension (web | ios | android)

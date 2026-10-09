@@ -50,6 +50,7 @@ import {
 import { hasFxImport, rewriteFxImports } from "./lazy-fx";
 import { makePackageMapsPlugin } from "./package-maps";
 import { failedChunk } from "./failed-chunk";
+import { makeNativePatchesPlugin } from "./native-patches";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -540,6 +541,10 @@ function rnPluginStack(platform: BuildPlatform, site: "pkg" | "batch" = "batch")
 		// before this pass sees it -- fine today because every worklet-shipping
 		// package is TypeScript, but a Flow-typed one would ship unworkletized.
 		makeWorkletsPlugin(platform),
+		// After worklets, which applies the same patches itself before babel: it claims any file
+		// that animates (css-interop's render-component calls useAnimatedStyle). This catches the
+		// files it leaves alone. Native only, so web bytes are untouched.
+		makeNativePatchesPlugin(platform),
 		// After stripFlow so react-native core specs are claimed by the full
 		// preset there; this pass covers non-core packages (react-native-screens
 		// etc.) whose NativeComponent specs esbuild would otherwise ship raw.
