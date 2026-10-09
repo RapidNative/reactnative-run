@@ -48,6 +48,7 @@ import {
 } from "./platform";
 import { hasFxImport, rewriteFxImports } from "./lazy-fx";
 import { makePackageMapsPlugin } from "./package-maps";
+import { failedChunk } from "./failed-chunk";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -2078,12 +2079,9 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				const msg = err instanceof Error ? err.message : String(err);
 				errors.push(`${pkgName}: ${msg}`);
 				console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 2000));
-				// Add a stub so require() doesn't fail. Collapse whitespace/newlines —
-				// a multi-line esbuild error after a single `//` leaves later lines as
-				// live JS (e.g. a relative path starting with `.` → SyntaxError that
-				// breaks the whole bundle).
-				const safeMsg = msg.replace(/[\r\n\t]+/g, " ").slice(0, 200);
-				chunks.push(`// @dep-start ${pkgName}\n// Error bundling: ${safeMsg}\nmodule.exports = {};\n// @dep-end ${pkgName}`);
+				// Add a stub so require() doesn't fail; on native it names the cause when
+				// the app requires it (failed-chunk.ts).
+				chunks.push(failedChunk(pkgName, platform, msg));
 			}
 		}
 
@@ -2192,8 +2190,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				chunks.push(subChunkBody);
 				chunkStats.built++;
 				writeChunk(subChunkKey, subChunkBody);
-			} catch {
-				chunks.push(`// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`);
+			} catch (err: unknown) {
+				chunks.push(
+					platform === "web"
+						? `// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`
+						: failedChunk(subpath, platform, err instanceof Error ? err.message : String(err))
+				);
 			}
 		}
 
@@ -2204,7 +2206,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		// ranges). Runtime `require("<name>")` returns {} instead of crashing.
 		for (const name of droppedPackages) {
 			chunks.push(
-				`// @dep-start ${name}\n// Dropped: install spec unsatisfiable\nmodule.exports = {};\n// @dep-end ${name}`
+				failedChunk(name, platform, "install spec unsatisfiable", "Dropped")
 			);
 			manifest[name] = "stub";
 		}
