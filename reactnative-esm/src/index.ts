@@ -34,6 +34,7 @@ import flowRemoveTypes from "flow-remove-types";
 import { sweepCache } from "./retention";
 import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } from "./output";
 import { isValidPackageName, isValidVersionRange } from "./validation";
+import { relevantExternals } from "./chunk-externals";
 import { CODEGEN_SPEC_FILE_RE, RN_CORE_RE, codegenViewConfig } from "./codegen";
 import { makeWorkletsPlugin, workletsRuntimeVersion, mayWorkletize } from "./worklets";
 import {
@@ -1870,15 +1871,21 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		// nothing declares -- the common case -- leaves every key untouched.
 		const chunkCacheDir = path.join(CACHE_DIR, "chunks");
 		const chunkStats = { hit: 0, built: 0 };
+		const declaredCache = new Map<string, string[]>();
 		const declaredDepsOf = (pkgName: string): string[] => {
+			const cached = declaredCache.get(pkgName);
+			if (cached) return cached;
+			let deps: string[] = [];
 			try {
 				const pj = JSON.parse(
 					fs.readFileSync(path.join(tmpDir, "node_modules", pkgName, "package.json"), "utf8")
 				);
-				return Object.keys({ ...(pj.dependencies ?? {}), ...(pj.peerDependencies ?? {}) }).sort();
+				deps = Object.keys({ ...(pj.dependencies ?? {}), ...(pj.peerDependencies ?? {}) }).sort();
 			} catch {
-				return [];
+				/* no package.json at that path (a subpath, or not hoisted) */
 			}
+			declaredCache.set(pkgName, deps);
+			return deps;
 		};
 		// The worklets babel plugin generates factories the app's worklets RUNTIME
 		// evaluates and version-checks, so a chunk workletized against 0.10 is not
@@ -1888,10 +1895,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 		// on native -- the pass does not run on web, so web keys stay as they are.
 		const workletsVersion = platform === "web" ? null : workletsRuntimeVersion(tmpDir);
 		const chunkKeyFor = (pkgName: string, version: string, subs: string[]): string => {
-			// Only batch members that this package might import can affect its
-			// externals, so the key stays stable when unrelated deps come and go.
+			// Only batch members this package's code can reach affect its externals,
+			// so the key stays stable when unrelated deps come and go. That is the
+			// whole dependency closure (an inlined dependency's imports count too),
+			// and a subpath's base package (chunk-externals.ts).
 			const declared = declaredDepsOf(pkgName);
-			const relevant = declared.filter((d) => batchSet.has(d));
+			const relevant = relevantExternals(pkgName, batchSet, declaredDepsOf);
 			const input = JSON.stringify({
 				pkg: pkgName,
 				version,
