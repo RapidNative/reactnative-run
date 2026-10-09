@@ -34,6 +34,7 @@ import flowRemoveTypes from "flow-remove-types";
 import { sweepCache } from "./retention";
 import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } from "./output";
 import { isValidPackageName, isValidVersionRange } from "./validation";
+import { relevantExternals } from "./chunk-externals";
 import { CODEGEN_SPEC_FILE_RE, RN_CORE_RE, codegenViewConfig } from "./codegen";
 import { makeWorkletsPlugin, workletsRuntimeVersion, mayWorkletize } from "./worklets";
 import {
@@ -48,7 +49,6 @@ import {
 } from "./platform";
 import { hasFxImport, rewriteFxImports } from "./lazy-fx";
 import { makePackageMapsPlugin } from "./package-maps";
-import { relevantExternals } from "./chunk-externals";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
