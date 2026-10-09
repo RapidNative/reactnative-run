@@ -401,7 +401,11 @@ const DEPS_HASH_VERSION = "8";
 //              native, as under Metro, so socket.io-client (and @base44/sdk,
 //              which depends on it) stops bundling Node's `ws` and shipping
 //              empty. See reactnative-esm/src/package-maps.ts.
-export const NATIVE_DEPS_VERSION = "10";
+//         11 = react-native-css-interop's dev-only upgrade warning stops
+//              red-screening ("Couldn't find a navigation context") when a
+//              className gains a shadow, transition or container after the
+//              first render. See reactnative-esm/src/native-patches.ts.
+export const NATIVE_DEPS_VERSION = "11";
 
 /** Metro's "modulesRunBeforeMainModule": native bundles must execute this
  *  before the entry. Requested as a combined subpath so the server builds it

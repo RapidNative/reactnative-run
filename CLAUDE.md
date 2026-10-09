@@ -40,7 +40,9 @@ Two esbuild `onLoad` plugins in `reactnative-esm/src/index.ts` rewrite package s
 - **`patchUpstreamBugsPlugin`** -- fixes upstream bugs. Currently normalises a partial `edges` prop in `react-native-safe-area-context`'s web `SafeAreaView` (only needed below 5.7.0; upstream fixed it there).
 - **`previewShimsPlugin`** -- makes web builds publish state the RapidNative editor needs. Currently shims `expo-status-bar`, which is otherwise a no-op on web, so the editor's simulated status bar can follow `<StatusBar style="..." />`.
 
-Conventions when adding to either:
+Native-only upstream fixes live in `reactnative-esm/src/native-patches.ts` (web bytes stay frozen). Currently it swaps `react-native-css-interop`'s dev-only upgrade-warning serializer, which red-screened apps with "Couldn't find a navigation context" (nativewind/nativewind#1812). **A native patch to a file that animates must also run inside the worklets pass:** that pass claims any file that looks like it animates and esbuild stops at the first `onLoad` that returns contents, so a plugin registered after it never sees those files. `worklets.ts` calls `patchNativeSource` before babel; `makeNativePatchesPlugin` covers the rest. A change to native output needs a `NATIVE_DEPS_VERSION` bump.
+
+Conventions when adding to any of these:
 
 - Register on **all three** `esbuild.build` plugin arrays, otherwise a subpath import bypasses the patch.
 - Anchor on something specific and **log-and-skip** (`return null`) if the anchor is missing, so an upstream refactor cannot silently ship an unpatched or clobbered build.

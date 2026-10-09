@@ -23,6 +23,7 @@ import semver from "semver";
 import type esbuild from "esbuild";
 import type { BuildPlatform } from "./platform";
 import { RN_CORE_RE } from "./codegen";
+import { patchNativeSource } from "./native-patches";
 
 const execFileAsync = promisify(execFile);
 
@@ -194,7 +195,9 @@ export function makeWorkletsPlugin(platform: BuildPlatform): esbuild.Plugin {
 				// Cheap path first: most package files never reach babel. The read is
 				// the only cost esbuild would not have paid anyway.
 				if (RN_CORE_RE.test(args.path)) return undefined;
-				const src = await fs.promises.readFile(args.path, "utf8");
+				// Native patches go in first: returning contents here ends esbuild's onLoad chain, so the
+				// native-patches plugin registered after this one never sees the files claimed here.
+				const src = patchNativeSource(args.path, await fs.promises.readFile(args.path, "utf8"));
 				if (!shouldWorkletize(args.path, src)) return undefined;
 				const pluginPath = await resolvePlugin(args.path);
 				if (!pluginPath) return undefined;
