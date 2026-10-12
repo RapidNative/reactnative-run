@@ -185,7 +185,7 @@ When the bundler encounters `require("lodash")`, it fetches from reactnative-esm
 1. Server receives `GET /pkg/lodash@4.17.21`
 2. Creates temp directory, runs `npm install lodash@4.17.21`
 3. Reads the installed package's `dependencies` + `peerDependencies` -- all are externalized
-4. Bundles with esbuild (IIFE format, browser platform) with a selective external plugin
+4. Bundles with esbuild (IIFE format, browser platform) with a selective external plugin. If the build fails only because the package requires a helper runtime it doesn't declare (`@babel/runtime`, `tslib`, `regenerator-runtime`; see `helper-runtimes.ts`), the server installs that runtime and builds again, so the helpers are inlined
 5. Wraps output with `module.exports = __module`
 6. Returns the bundle with an `X-Externals` header containing `{bareName: installedVersion}` for all externalized deps
 7. Caches both the `.js` bundle and `.externals.json` manifest to disk
