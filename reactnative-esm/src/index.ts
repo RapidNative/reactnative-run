@@ -51,6 +51,7 @@ import { hasFxImport, rewriteFxImports } from "./lazy-fx";
 import { makePackageMapsPlugin } from "./package-maps";
 import { failedChunk } from "./failed-chunk";
 import { makeNativePatchesPlugin } from "./native-patches";
+import { helperRuntimesToInstall } from "./helper-runtimes";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -1119,7 +1120,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		const outFile = path.join(tmpDir, "__out.js");
 		const isFont = pkgName.startsWith("@expo-google-fonts/");
 		const outdir = isFont ? path.join(tmpDir, "__outdir") : undefined;
-		await buildTolerant({
+		const build = () => buildTolerant({
 			entryPoints: [entryFile],
 			bundle: true,
 			format: "iife",
@@ -1160,6 +1161,24 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 				selectiveExternalPlugin,
 			],
 		});
+		// A package can require a helper runtime it doesn't declare (helper-runtimes.ts), which fails
+		// the web build. Install the runtime and build again, so its helpers inline like a declared one's.
+		try {
+			await build();
+		} catch (err: unknown) {
+			const runtimes = helperRuntimesToInstall((err as esbuild.BuildFailure)?.errors ?? [], (dep) =>
+				fs.existsSync(path.join(tmpDir, "node_modules", dep, "package.json"))
+			);
+			if (runtimes.length === 0) throw err;
+			console.log(`[bundling] ${requireSpecifier}@${resolvedVersion}${platLabel}: installing undeclared ${runtimes.join(", ")}`);
+			await execFileAsync("npm", ["install", "--ignore-scripts", ...runtimes, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
+				cwd: tmpDir,
+				killSignal: "SIGKILL",
+				timeout: 180000,
+				maxBuffer: 16 * 1024 * 1024,
+			});
+			await build();
+		}
 
 		if (platform !== "web" && !isFont) harvestFontAssets(tmpDir);
 
