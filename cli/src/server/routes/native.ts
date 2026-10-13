@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { formatDeviceLog, formatStackLine } from "../device-log.js";
 import { mimeFor } from "../../project/assets.js";
 import { vfsToDisk } from "../../project/scan.js";
 import type { Router } from "../router.js";
@@ -203,6 +204,10 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
           }
           return out;
         });
+        // The stack of a crash reaches the server only here (LogBox symbolicates when it opens),
+        // so log it next to the [device:error] line it belongs to.
+        const stackLine = formatStackLine(mapped);
+        if (stackLine) ctx.log(stackLine);
         sendJson(res, 200, { stack: mapped, codeFrame });
       } catch {
         sendJson(res, 200, { stack: [], codeFrame: null });
@@ -255,8 +260,7 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
         const entries = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         for (const entry of Array.isArray(entries) ? entries : []) {
           const level = entry?.level || "info";
-          const body = Array.isArray(entry?.body) ? entry.body.join(" ") : String(entry?.body ?? "");
-          ctx.log(`[device:${level}] ${body}`);
+          ctx.log(formatDeviceLog(level, Array.isArray(entry?.body) ? entry.body : [entry?.body ?? ""]));
         }
       } catch {
         // Ignore malformed log payloads.
