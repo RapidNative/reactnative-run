@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { formatDeviceLog } from "./device-log.js";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { buildMetroHmrBody } from "browser-metro";
@@ -98,10 +99,7 @@ export class HmrHub {
           this.registerHotClient(ws, Array.isArray(msg.entryPoints) ? (msg.entryPoints as unknown[]) : []);
         } else if (msg.type === "log") {
           // RN's HMRClient forwards console.* here in dev.
-          const body = (msg.data || [])
-            .map((d) => (typeof d === "string" ? d : JSON.stringify(d)))
-            .join(" ");
-          this.onDeviceLog?.(`[device:${msg.level || "log"}] ${body}`);
+          this.onDeviceLog?.(formatDeviceLog(msg.level, msg.data));
         }
       });
     });
