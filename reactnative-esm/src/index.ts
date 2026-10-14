@@ -50,6 +50,7 @@ import {
 import { hasFxImport, rewriteFxImports } from "./lazy-fx";
 import { makePackageMapsPlugin } from "./package-maps";
 import { failedChunk } from "./failed-chunk";
+import { unresolvableOnWeb } from "./web-leniency";
 import { makeNativePatchesPlugin } from "./native-patches";
 
 /**
@@ -1023,7 +1024,7 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 		const selectiveExternalPlugin: esbuild.Plugin = {
 			name: "selective-external",
 			setup(build) {
-				build.onResolve({ filter: /^[^./]/ }, (args) => {
+				build.onResolve({ filter: /^[^./]/ }, async (args) => {
 					let pkg: string;
 					if (args.path.startsWith("@")) {
 						const parts = args.path.split("/");
@@ -1085,6 +1086,11 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 								}
 								return { path: args.path, external: true };
 							}
+						}
+						// Web: only an import that would fail the build (see web-leniency.ts).
+						if (await unresolvableOnWeb(build, args)) {
+							console.warn(`[pkg] ${requireSpecifier}: externalizing unresolvable "${args.path}" (web leniency)`);
+							return { path: args.path, external: true };
 						}
 						return null;
 					}
@@ -1987,7 +1993,7 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 				const pkgExternalPlugin: esbuild.Plugin = {
 					name: "batch-external",
 					setup(build) {
-						build.onResolve({ filter: /^[^./]/ }, (args) => {
+						build.onResolve({ filter: /^[^./]/ }, async (args) => {
 							let dep: string;
 							if (args.path.startsWith("@")) {
 								const parts = args.path.split("/");
@@ -2028,6 +2034,12 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 									console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (native leniency)`);
 									return { path: args.path, external: true };
 								}
+							}
+
+							// Web: only an import that would fail the chunk (see web-leniency.ts).
+							if (await unresolvableOnWeb(build, args)) {
+								console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (web leniency)`);
+								return { path: args.path, external: true };
 							}
 
 							return null;
