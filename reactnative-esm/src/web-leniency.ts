@@ -1,5 +1,7 @@
 import type esbuild from "esbuild";
 import { builtinModules } from "module";
+import fs from "fs";
+import path from "path";
 
 /**
  * Web leniency: should this bare import be left external because the build cannot resolve it?
@@ -36,9 +38,53 @@ export function isNodeBuiltin(specifier: string): boolean {
 	return NODE_BUILTINS.has(specifier.split("/")[0]);
 }
 
+/** "@scope/pkg/sub" -> "@scope/pkg"; "pkg/sub" -> "pkg". */
+function baseName(specifier: string): string {
+	const parts = specifier.split("/");
+	return specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+}
+
+const manifestCache = new Map<string, Record<string, unknown> | null>();
+/** The package.json of the package that owns `file`: the nearest one above it with a name. */
+function owningManifest(file: string): Record<string, unknown> | null {
+	let dir = path.dirname(file);
+	while (true) {
+		const cached = manifestCache.get(dir);
+		if (cached !== undefined) return cached;
+		const candidate = path.join(dir, "package.json");
+		if (fs.existsSync(candidate)) {
+			try {
+				const json = JSON.parse(fs.readFileSync(candidate, "utf-8"));
+				if (json && typeof json.name === "string") {
+					manifestCache.set(dir, json);
+					return json;
+				}
+			} catch {}
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+/**
+ * Only an import the importing package declares in its own devDependencies: the "forgot to
+ * declare it at runtime" bug (@firebase/database -> @firebase/app, slider -> @babel/runtime).
+ * Anything else stays a build failure, because the client fails the whole web preview on an
+ * external it can't fetch (a types-only package, a bare "firebase", a package that doesn't build
+ * for web), while a failed build is only an empty stub.
+ */
+export function declaredAsDevDependency(importer: string, specifier: string): boolean {
+	if (!importer) return false;
+	const manifest = owningManifest(importer);
+	const dev = (manifest?.devDependencies ?? {}) as Record<string, unknown>;
+	return Object.prototype.hasOwnProperty.call(dev, baseName(specifier));
+}
+
 export async function unresolvableOnWeb(build: esbuild.PluginBuild, args: esbuild.OnResolveArgs): Promise<boolean> {
 	if (args.pluginData?.[WEB_LENIENCY_PROBE]) return false;
 	if (isNodeBuiltin(args.path)) return false;
+	if (!declaredAsDevDependency(args.importer, args.path)) return false;
 	const result = await build.resolve(args.path, {
 		kind: args.kind,
 		importer: args.importer,
