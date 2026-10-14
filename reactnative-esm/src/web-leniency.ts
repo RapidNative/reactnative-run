@@ -1,4 +1,5 @@
 import type esbuild from "esbuild";
+import { builtinModules } from "module";
 
 /**
  * Web leniency: should this bare import be left external because the build cannot resolve it?
@@ -22,8 +23,22 @@ import type esbuild from "esbuild";
  */
 export const WEB_LENIENCY_PROBE = "rnWebLeniencyProbe";
 
+/**
+ * Node built-ins are never externalized here. On web the client fetches every external it finds
+ * and a fetch that fails fails the whole preview, while a package that fails to build is only an
+ * empty stub. `react-dom/server` and `sql.js` import `util`, `node:fs` and friends and sit in most
+ * apps' dependency sets as harmless empty stubs; externalizing their built-ins would have turned
+ * that into a broken preview for every one of those apps.
+ */
+const NODE_BUILTINS = new Set(builtinModules);
+export function isNodeBuiltin(specifier: string): boolean {
+	if (specifier.startsWith("node:")) return true;
+	return NODE_BUILTINS.has(specifier.split("/")[0]);
+}
+
 export async function unresolvableOnWeb(build: esbuild.PluginBuild, args: esbuild.OnResolveArgs): Promise<boolean> {
 	if (args.pluginData?.[WEB_LENIENCY_PROBE]) return false;
+	if (isNodeBuiltin(args.path)) return false;
 	const result = await build.resolve(args.path, {
 		kind: args.kind,
 		importer: args.importer,

@@ -8,7 +8,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import esbuild from "esbuild";
-import { unresolvableOnWeb } from "../src/web-leniency";
+import { isNodeBuiltin, unresolvableOnWeb } from "../src/web-leniency";
 
 function fixture(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-leniency-"));
@@ -76,4 +76,21 @@ test("a build that already works produces identical bytes", async () => {
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+// react-dom/server and sql.js import Node built-ins and fail on web today as harmless empty stubs.
+// Externalizing those built-ins would make the client fetch "node:fs" and fail the whole preview.
+test("Node built-ins still fail the build, exactly as before", async () => {
+	const dir = fixture();
+	try {
+		fs.writeFileSync(path.join(dir, "node_modules/pkg/index.js"), "module.exports = [require('node:fs'), require('util'), require('path/posix')];\n");
+		await assert.rejects(build(dir, true), /Could not resolve "node:fs"/);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("isNodeBuiltin", () => {
+	for (const s of ["fs", "node:fs", "util", "path/posix", "stream", "timers", "module"]) assert.equal(isNodeBuiltin(s), true, s);
+	for (const s of ["@firebase/app", "@babel/runtime/helpers/x", "firebase", "utils", "react"]) assert.equal(isNodeBuiltin(s), false, s);
 });
