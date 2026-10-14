@@ -8,7 +8,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import esbuild from "esbuild";
-import { unresolvableOnWeb } from "../src/web-leniency";
+import { declaredAsDevDependency, isNodeBuiltin, unresolvableOnWeb } from "../src/web-leniency";
 
 function fixture(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-leniency-"));
@@ -21,7 +21,7 @@ function fixture(): string {
 	// Only a browser build can resolve this one: Node's require.resolve would not.
 	write("node_modules/browser-only/package.json", JSON.stringify({ name: "browser-only", exports: { browser: "./web.js" } }));
 	write("node_modules/browser-only/web.js", "module.exports = 'browser-only';\n");
-	write("node_modules/pkg/package.json", JSON.stringify({ name: "pkg", main: "index.js" }));
+	write("node_modules/pkg/package.json", JSON.stringify({ name: "pkg", main: "index.js", devDependencies: { "@firebase/app": "1.0.0" } }));
 	write(
 		"node_modules/pkg/index.js",
 		"module.exports = [require('present'), require('browser-only'), require('@firebase/app')];\n",
@@ -73,6 +73,38 @@ test("a build that already works produces identical bytes", async () => {
 		const before = (await build(dir, false)).outputFiles[0].text;
 		const after = (await build(dir, true)).outputFiles[0].text;
 		assert.equal(after, before);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// react-dom/server and sql.js import Node built-ins and fail on web today as harmless empty stubs.
+// Externalizing those built-ins would make the client fetch "node:fs" and fail the whole preview.
+test("Node built-ins still fail the build, exactly as before", async () => {
+	const dir = fixture();
+	try {
+		fs.writeFileSync(path.join(dir, "node_modules/pkg/index.js"), "module.exports = [require('node:fs'), require('util'), require('path/posix')];\n");
+		await assert.rejects(build(dir, true), /Could not resolve "node:fs"/);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("isNodeBuiltin", () => {
+	for (const s of ["fs", "node:fs", "util", "path/posix", "stream", "timers", "module"]) assert.equal(isNodeBuiltin(s), true, s);
+	for (const s of ["@firebase/app", "@babel/runtime/helpers/x", "firebase", "utils", "react"]) assert.equal(isNodeBuiltin(s), false, s);
+});
+
+// Only the "declared it as a devDependency" bug is externalized: a types-only package or one that
+// doesn't build for web would fail the whole preview once the client tried to fetch it.
+test("an unresolvable import the package doesn't declare as a devDependency still fails", async () => {
+	const dir = fixture();
+	try {
+		fs.writeFileSync(path.join(dir, "node_modules/pkg/index.js"), "module.exports = require('@types/leaflet');\n");
+		await assert.rejects(build(dir, true), /Could not resolve "@types\/leaflet"/);
+		assert.equal(declaredAsDevDependency(path.join(dir, "node_modules/pkg/index.js"), "@firebase/app/sub"), true);
+		assert.equal(declaredAsDevDependency(path.join(dir, "node_modules/pkg/index.js"), "@types/leaflet"), false);
+		assert.equal(declaredAsDevDependency("", "@firebase/app"), false);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
