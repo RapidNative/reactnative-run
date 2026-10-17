@@ -1,4 +1,68 @@
 /**
+ * Simulated safe-area insets, for a page shown inside a drawn phone frame (an
+ * editor's player iframe). A desktop iframe has no notch or home indicator, so
+ * env(safe-area-inset-*) resolves to 0 and apps render under the drawn chrome.
+ *
+ * Opt-in per page load: `?safeArea=top,right,bottom,left` in CSS px, e.g.
+ * `?safeArea=59,0,34,0`. Without it nothing changes, so a phone opening the
+ * same URL gets its real insets.
+ *
+ * Every reader has to see the same values:
+ *  - react-native-safe-area-context (web) measures a hidden probe div whose
+ *    INLINE paddings are env(safe-area-inset-*), synchronously after inserting
+ *    it. An author !important rule outranks inline styles, so a stylesheet
+ *    targeting the probe (the only element with both an env() inset padding
+ *    and z-index -1 inline) controls what it reads back.
+ *  - React Native's deprecated SafeAreaView (react-native-web) and any other
+ *    CSS put env(safe-area-inset-*) in stylesheet rules, which react-native-web
+ *    inserts at runtime. Those rules are rewritten to the px values as they go
+ *    in (insertRule, replace/replaceSync, and <style> text), so the computed
+ *    padding is the simulated inset.
+ *
+ * Runs before the bundle; inert on a malformed value; never throws.
+ */
+const SIMULATED_SAFE_AREA_SCRIPT = `(function () {
+  try {
+    var m = /[?&]safeArea=([0-9.]+),([0-9.]+),([0-9.]+),([0-9.]+)(?:&|$)/.exec(location.search);
+    if (!m) return;
+    var px = { top: +m[1], right: +m[2], bottom: +m[3], left: +m[4] };
+    globalThis.__RNRUN_SAFE_AREA__ = px;
+    var ENV = /env\\(\\s*safe-area-inset-(top|right|bottom|left)\\s*(?:,[^()]*(?:\\([^()]*\\)[^()]*)*)?\\)/g;
+    function rewrite(css) {
+      return typeof css === "string" && css.indexOf("safe-area-inset") !== -1
+        ? css.replace(ENV, function (_, side) { return px[side] + "px"; })
+        : css;
+    }
+    var P = CSSStyleSheet.prototype;
+    var insertRule = P.insertRule;
+    P.insertRule = function (rule, index) { return insertRule.call(this, rewrite(rule), index); };
+    if (P.replaceSync) { var rs = P.replaceSync; P.replaceSync = function (t) { return rs.call(this, rewrite(t)); }; }
+    if (P.replace) { var rp = P.replace; P.replace = function (t) { return rp.call(this, rewrite(t)); }; }
+    function fixStyle(el) {
+      var t = el.textContent;
+      var r = rewrite(t);
+      if (r !== t) el.textContent = r;
+    }
+    new MutationObserver(function (records) {
+      for (var i = 0; i < records.length; i++) {
+        var rec = records[i];
+        var target = rec.target.nodeType === 3 ? rec.target.parentNode : rec.target;
+        if (target && target.tagName === "STYLE") fixStyle(target);
+        for (var j = 0; j < rec.addedNodes.length; j++) {
+          var n = rec.addedNodes[j];
+          if (n.tagName === "STYLE") fixStyle(n);
+        }
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    var probe = document.createElement("style");
+    probe.textContent = 'div[style*="safe-area-inset"][style*="z-index: -1"]{' +
+      "padding-top:" + px.top + "px!important;padding-right:" + px.right + "px!important;" +
+      "padding-bottom:" + px.bottom + "px!important;padding-left:" + px.left + "px!important}";
+    document.head.appendChild(probe);
+  } catch (e) {}
+})();`;
+
+/**
  * HTML shell for the web preview. Responsibilities:
  *  - define __DEV__/global before the bundle loads (react-native-web expects them);
  *  - load /index.bundle;
@@ -34,6 +98,7 @@ export function pageHtml(opts: { title: string; bundleVersion: number }): string
   globalThis.__DEV__ = true;
   globalThis.global = globalThis;
 </script>
+<script>${SIMULATED_SAFE_AREA_SCRIPT}</script>
 </head>
 <body>
 <div id="root"></div>
