@@ -25,6 +25,7 @@ import {
   NATIVE_DEV_CLIENT_PATH,
   NATIVE_DEV_CLIENT_SOURCE,
   NATIVE_ENTRY_WRAPPER_PATH,
+  NATIVE_PRE_ENTRY_PATH,
   nativeEntryWrapperSource,
 } from "./native-dev-client.js";
 import type {
@@ -338,7 +339,8 @@ export class BundlerSession {
     if (this.platform === "web" || !this.options.metroPrelude) return entry;
     if (!("react-native" in this.projectDeps())) return entry;
     this.vfs.write(NATIVE_DEV_CLIENT_PATH, NATIVE_DEV_CLIENT_SOURCE);
-    this.vfs.write(NATIVE_ENTRY_WRAPPER_PATH, nativeEntryWrapperSource(entry));
+    const preEntry = this.vfs.read(NATIVE_PRE_ENTRY_PATH) ? NATIVE_PRE_ENTRY_PATH : null;
+    this.vfs.write(NATIVE_ENTRY_WRAPPER_PATH, nativeEntryWrapperSource(entry, preEntry));
     this.syntheticPaths.add(NATIVE_DEV_CLIENT_PATH);
     this.syntheticPaths.add(NATIVE_ENTRY_WRAPPER_PATH);
     return NATIVE_ENTRY_WRAPPER_PATH;

@@ -64,7 +64,20 @@ export const NATIVE_DEV_CLIENT_SOURCE = `/* rnrun native dev client */
 })();
 `;
 
-/** Entry wrapper: the dev client first (it is inert on failure), then the app. */
-export function nativeEntryWrapperSource(entry: string): string {
-  return `require(".${NATIVE_DEV_CLIENT_PATH}");\nrequire(".${entry}");\n`;
+/**
+ * Optional project-supplied module that runs after the dev client and before
+ * the app's entry, on native (Expo Go) bundles only. A host that serves
+ * projects through rnrun can drop a file here to add device-only behaviour
+ * (an overlay, instrumentation) without touching the project's own code:
+ * nothing in the app imports it. Its presence is read when the bundle is
+ * built from scratch, so a file added to a running server takes effect on the
+ * next full build (a restart).
+ */
+export const NATIVE_PRE_ENTRY_PATH = "/.rnrun/pre-entry.js";
+
+/** Entry wrapper: the dev client first (it is inert on failure), then the
+ *  optional pre-entry module, then the app. */
+export function nativeEntryWrapperSource(entry: string, preEntry?: string | null): string {
+  const pre = preEntry ? `require(".${preEntry}");\n` : "";
+  return `require(".${NATIVE_DEV_CLIENT_PATH}");\n${pre}require(".${entry}");\n`;
 }
