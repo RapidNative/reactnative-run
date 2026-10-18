@@ -7,6 +7,10 @@ import type { Router } from "../router.js";
 import { sendText, sendJson } from "../router.js";
 import type { ServerContext } from "../server.js";
 import { CLIENT_TOKEN_PARAM, clientTokenFromUrl, newClientToken } from "../clients.js";
+import { acceptsMultipart, startMultipart, type MultipartResponse } from "../multipart.js";
+
+/** How often a device waiting on a cold native build hears from us. */
+const PROGRESS_EVERY_MS = 5000;
 
 /**
  * Metro/Expo-compatible endpoint surface. The bundle route serves web today
@@ -72,21 +76,51 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
   );
 
   // --- Bundle (any path ending in .bundle; platform via query) ---
-  router.pattern("GET", /\.bundle$/, async (_req, res, { url }) => {
+  router.pattern("GET", /\.bundle$/, async (req, res, { url }) => {
     const platform = url.searchParams.get("platform") || "web";
     let session = ctx.session;
+    // Set while a device waits out a cold native build: every reply below then
+    // goes out as the last part of the multipart response (see multipart.ts).
+    let streaming: MultipartResponse | null = null;
+    const reply = (status: number, headers: Record<string, string | number>, body: string) => {
+      if (streaming) return streaming.end(status, headers, body);
+      res.writeHead(status, headers);
+      res.end(body);
+    };
+    const replyText = (status: number, type: string, body: string) =>
+      streaming ? streaming.end(status, { "Content-Type": type }, body) : sendText(res, status, type, body);
     if (platform === "web") {
       // Web is built lazily when startup pre-warmed only native platforms.
       await session.ensureBuilt();
     }
     if (platform !== "web") {
+      // A device that scans before the session is ready would otherwise wait in
+      // silence for the whole build (minutes when the dependency bundle is
+      // cold) and give up. Answer now, and tell it what we are doing.
+      if (ctx.getPlatformSession && !ctx.peekPlatformSession?.(platform) && acceptsMultipart(req.headers.accept)) {
+        const live = startMultipart(res);
+        streaming = live;
+        const started = Date.now();
+        const tell = () => {
+          const s = Math.round((Date.now() - started) / 1000);
+          live.progress(s < 10 ? `Building the ${platform} bundle` : `Building the ${platform} bundle (${s}s, first run for these packages)`);
+        };
+        tell();
+        const ticker = setInterval(tell, PROGRESS_EVERY_MS);
+        res.on("close", () => clearInterval(ticker));
+        try {
+          await ctx.getPlatformSession(platform);
+        } finally {
+          clearInterval(ticker);
+        }
+      }
       const native = ctx.getPlatformSession ? await ctx.getPlatformSession(platform) : null;
       if (!native) {
         const reason = ctx.getPlatformError?.(platform);
         if (reason) {
           // Metro-shaped error body: Expo Go renders it as a redbox with the
           // message, instead of the app silently misbehaving later.
-          sendText(res, 500, "application/json", JSON.stringify({
+          replyText(500, "application/json", JSON.stringify({
             type: "TransformError",
             name: "BuildError",
             message: reason,
@@ -94,8 +128,7 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
           }));
           return;
         }
-        sendText(
-          res,
+        replyText(
           501,
           "application/javascript",
           `// rnrun: ${platform} bundles are not implemented yet -- native support is in progress.\n` +
@@ -110,8 +143,7 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
       // proper redbox with the message instead of a blank app. (Web's shell
       // reads the same shape for its overlay.)
       const message = session.buildError || "Bundle is not ready";
-      sendText(
-        res,
+      replyText(
         500,
         "application/json",
         JSON.stringify({
@@ -129,7 +161,7 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
     if (token) {
       ctx.clients?.record(token, { platform, epoch: session.epoch, version: session.bundleVersion });
     }
-    res.writeHead(200, {
+    reply(200, {
       "Content-Type": "application/javascript",
       "Cache-Control": "no-cache",
       "Access-Control-Allow-Origin": "*",
@@ -138,8 +170,7 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
       // download percentage from the total size, so without this the device
       // just says "Downloading..." with no progress. Metro sends it too.
       "Content-Length": Buffer.byteLength(session.getBundle()),
-    });
-    res.end(session.getBundle());
+    }, session.getBundle());
   });
 
   // --- DEBUG: inject raw code via /hot (dev-only diagnostics) ---
