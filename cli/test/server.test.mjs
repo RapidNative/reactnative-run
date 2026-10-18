@@ -269,3 +269,32 @@ test('the served bundle executes in Node and produces the fixture export', async
   assert.match(globalThis.__PLAIN_APP__, /^(hello|hi) world$/);
   delete globalThis.__PLAIN_APP__;
 });
+
+test('a cold native bundle request with multipart Accept streams progress, then the bundle (Metro format)', async () => {
+  // The fixture context has no peekPlatformSession, so the session counts as not ready.
+  const res = await fetch(base + '/index.bundle?platform=android', { headers: { Accept: 'multipart/mixed' } });
+  assert.equal(res.status, 200);
+  const boundary = /boundary="([^"]+)"/.exec(res.headers.get('content-type'))?.[1];
+  assert.ok(boundary, 'multipart content type with a boundary');
+  const body = await res.text();
+  const parts = body.split(`\r\n--${boundary}`).slice(1);
+  assert.equal(parts.at(-1), '--\r\n', 'closing boundary');
+  const parsed = parts.slice(0, -1).map((p) => {
+    const [head, ...rest] = p.replace(/^\r\n/, '').split('\r\n\r\n');
+    return { headers: Object.fromEntries(head.split('\r\n').map((l) => l.split(': '))), data: rest.join('\r\n\r\n') };
+  });
+  const progress = parsed[0];
+  assert.equal(progress.headers['Content-Type'], 'application/json');
+  assert.match(JSON.parse(progress.data).status, /Building the android bundle/);
+  const last = parsed.at(-1);
+  assert.equal(last.headers['X-Http-Status'], '200');
+  assert.equal(last.headers['Content-Type'], 'application/javascript');
+  assert.equal(Number(last.headers['Content-Length']), Buffer.byteLength(last.data));
+  assert.match(last.data, /__r\(0\);/);
+});
+
+test('a native bundle request without multipart Accept is a plain response', async () => {
+  const res = await fetch(base + '/index.bundle?platform=android');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /application\/javascript/);
+});

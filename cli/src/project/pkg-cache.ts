@@ -26,7 +26,9 @@ import { createHash } from "node:crypto";
 // alongside RNRUN_BUNDLE_CACHE_DIR / RNRUN_TOOLS_DIR -- otherwise a container
 // whose $HOME is an ephemeral writable layer re-fetches every package on wake.
 const CACHE_DIR = process.env.RNRUN_PKG_CACHE_DIR || path.join(os.homedir(), ".rnrun", "pkg-cache");
-const KEPT_HEADERS = ["content-type", "x-externals", "x-resolved-version"];
+// x-build-status: the dependency-bundle poll keeps waiting while the server says "building"
+// (browser-metro incremental-bundler.ts); dropping it here cut native cold builds short.
+const KEPT_HEADERS = ["content-type", "x-externals", "x-resolved-version", "x-build-status"];
 const TTL_VERSIONLESS_MS = 24 * 60 * 60 * 1000;
 const TTL_NEGATIVE_MS = 60 * 60 * 1000;
 
