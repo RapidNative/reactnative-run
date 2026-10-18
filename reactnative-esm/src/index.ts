@@ -581,7 +581,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 	res.header("Access-Control-Allow-Origin", "*");
 	res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 	res.header("Access-Control-Allow-Headers", "Content-Type");
-	res.header("Access-Control-Expose-Headers", "X-Externals");
+	// X-Build-Status: browsers can read it only when exposed, and the dependency-bundle poll
+	// (browser-metro) waits on it; hidden, a web cold build was abandoned after 90s.
+	res.header("Access-Control-Expose-Headers", "X-Externals, X-Build-Status");
 	if (req.method === "OPTIONS") { res.sendStatus(204); return; }
 	next();
 });
