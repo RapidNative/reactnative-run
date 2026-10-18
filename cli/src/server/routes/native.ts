@@ -9,6 +9,9 @@ import type { ServerContext } from "../server.js";
 import { CLIENT_TOKEN_PARAM, clientTokenFromUrl, newClientToken } from "../clients.js";
 import { acceptsMultipart, startMultipart, type MultipartResponse } from "../multipart.js";
 
+/** The pending launch-asset key's fallback when the context names no generation: one per process. */
+const PROCESS_GENERATION = randomUUID().slice(0, 8);
+
 /** How often a device waiting on a cold native build hears from us. */
 const PROGRESS_EVERY_MS = 5000;
 
@@ -355,10 +358,18 @@ function buildManifest(ctx: ServerContext, platform: string, host: string, schem
   // A stable per-platform key can't loop; once the first bundle build creates
   // the session it upgrades to the versioned key (one clean re-fetch), which is
   // what busts the cache on later edits.
+  //
+  // The fallback must ALSO be unique to this server and these sessions. Expo Go
+  // keeps one asset store for every project it opens, so a constant
+  // `bundle-ios-pending` made a device that had once loaded project A under it
+  // launch A's bundle for project B, without ever requesting B's: scanning
+  // Printo showed EQ Lab (2026-10-18). Nothing was requested, so B's session
+  // never got built, and every rescan did it again. The generation is stable
+  // between fetches (no loop) and new at boot and on every re-init.
   const nativeSession = ctx.peekPlatformSession?.(platform);
   const bundleKey = nativeSession
     ? `bundle-${nativeSession.epoch}-${nativeSession.bundleVersion}`
-    : `bundle-${platform}-pending`;
+    : `bundle-${platform}-pending-${ctx.nativeGeneration ?? PROCESS_GENERATION}`;
 
   return {
     id: randomUUID(),

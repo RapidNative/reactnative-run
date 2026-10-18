@@ -17,6 +17,7 @@ let session;
 let dev;
 let watcher;
 let base;
+let ctx;
 
 before(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rnrun-server-'));
@@ -33,7 +34,7 @@ before(async () => {
   });
 
   const nativeSessions = new Map();
-  const ctx = {
+  ctx = {
     session,
     config: { app: { name: 'Plain App', slug: 'plain-app' }, env: {}, pkg: { dependencies: {} } },
     rootDir: dir,
@@ -297,4 +298,17 @@ test('a native bundle request without multipart Accept is a plain response', asy
   const res = await fetch(base + '/index.bundle?platform=android');
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /application\/javascript/);
+});
+
+test('manifest: a pending launch-asset key is stable between fetches, and unique to this server generation', async () => {
+  // Expo Go keeps one asset store for every project: a shared pending key made it launch
+  // project A's bundle for project B without requesting B's (Printo showed EQ Lab).
+  const key = async () =>
+    (await (await fetch(base + '/manifest?platform=android', { headers: { Accept: 'application/expo+json' } })).json()).launchAsset.key;
+  ctx.nativeGeneration = 'gen-a';
+  const first = await key();
+  assert.equal(first, 'bundle-android-pending-gen-a');
+  assert.equal(await key(), first, 'stable between fetches, or expo-updates loops on "New update available"');
+  ctx.nativeGeneration = 'gen-b'; // a re-init, or another project's server
+  assert.notEqual(await key(), first);
 });
