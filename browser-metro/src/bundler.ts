@@ -9,7 +9,7 @@ import {
 } from "./source-map.js";
 import { BundlerConfig, BundlerPlugin, ModuleMap } from "./types.js";
 import { formatTransformError } from "./transform-error.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, jsonModule } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, expoSdkVersionFor, INITIALIZE_CORE_SUBPATH, jsonModule } from "./utils.js";
 
 export class Bundler {
   private fs: VirtualFS;
@@ -306,6 +306,7 @@ export class Bundler {
       versions[baseName] ||
       reactDomVersionFor(baseName, versions) ||
       (transitiveDepsVersions && transitiveDepsVersions[baseName]) ||
+      expoSdkVersionFor(baseName, versions) ||
       rnCoreVersionFor(baseName, versions);
     if (!version) return specifier;
 

@@ -605,3 +605,43 @@ export function reactDomVersionFor(
   if (baseName !== "react-dom") return undefined;
   return versions["react"];
 }
+
+/** `@expo/*` packages whose major follows the Expo SDK, like the `expo-*` packages. */
+const SDK_ALIGNED_EXPO_SCOPED = new Set(["@expo/metro-runtime", "@expo/log-box", "@expo/ui"]);
+
+/**
+ * The version to fetch an undeclared Expo package at: the project's Expo SDK line.
+ *
+ * From SDK 55 on, every `expo-*` package (and the few `@expo/*` ones in SDK_ALIGNED_EXPO_SCOPED)
+ * shares its major with the SDK: a project on expo 57 uses expo-asset 57.x, expo-font 57.x,
+ * expo-constants 57.x. So `^<sdk>.0.0` is the right line for any of them the project does not
+ * declare itself.
+ *
+ * WHY THIS EXISTS
+ * Some Expo packages import siblings they do not declare: expo-font requires `expo-asset` with no
+ * dependency on it (it arrives under `expo`). The package server builds expo-font in isolation, so
+ * expo-asset is never installed there and `X-Externals` has no version for it; `expo`'s own
+ * externals don't list it either. On the per-package path (a missed `/bundle-deps`, or a package
+ * fetched outside the deps bundle) the specifier stayed bare, which the server resolves as `@latest`.
+ *
+ * That followed npm into the next SDK. expo-asset@58.0.16 (published 2026-10-15) imports
+ * `expo/internal/bundle-origin`, a module expo 57 does not have. The importer's `expo` resolves to the
+ * project's declared expo, so the server answered HTTP 500 "Could not resolve
+ * expo/internal/bundle-origin" and the preview failed to build, with no project change of its own.
+ *
+ * Declared and transitive pins still win: callers consult this after transitiveDepsVersions.
+ * Below SDK 55 the majors are not aligned (expo 54 ships expo-asset 12.x), and the `sdk-54` dist-tags
+ * are missing on several packages, so those projects are left unchanged. A tag or URL in place of a
+ * version (`latest`, `next`, a git URL) is not an SDK line and is left alone too.
+ */
+export function expoSdkVersionFor(
+  baseName: string,
+  versions: Record<string, string>,
+): string | undefined {
+  if (!baseName.startsWith("expo-") && !SDK_ALIGNED_EXPO_SCOPED.has(baseName)) return undefined;
+  const match = /^\s*[\^~=v]?\s*(\d+)\.\d+/.exec(versions["expo"] ?? "");
+  if (!match) return undefined;
+  const sdk = Number(match[1]);
+  if (sdk < 55) return undefined;
+  return `^${sdk}.0.0`;
+}
