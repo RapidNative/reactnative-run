@@ -12,7 +12,7 @@ import {
   inlineSourceMap,
   shiftSourceMapOrigLines,
 } from "./source-map.js";
-import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, nativePostCoreSubpaths, NATIVE_DEPS_VERSION, jsonModule } from "./utils.js";
+import { findRequires, rewriteRequires, lowerDynamicImports, hashString, buildBundlePreamble, parseExternalsFromBody, hashDeps, parseDepBundle, collectUsedSubpaths, rnCoreVersionFor, reactDomVersionFor, expoSdkVersionFor, INITIALIZE_CORE_SUBPATH, NATIVE_POLYFILL_SUBPATHS, nativePostCoreSubpaths, NATIVE_DEPS_VERSION, jsonModule } from "./utils.js";
 import { formatTransformError } from "./transform-error.js";
 import type {
   BundlerConfig,
@@ -330,8 +330,8 @@ export class IncrementalBundler {
 
   /** Resolve an npm specifier to a versioned form.
    *  Priority: user's package.json > react's version for `react-dom` >
-   *  transitive dep versions from manifests > react-native's version for
-   *  `@react-native/*` > bare name */
+   *  transitive dep versions from manifests > the Expo SDK line for
+   *  `expo-*` > react-native's version for `@react-native/*` > bare name */
   private resolveNpmSpecifier(
     specifier: string,
     versions: Record<string, string>,
@@ -341,6 +341,7 @@ export class IncrementalBundler {
       versions[baseName] ||
       reactDomVersionFor(baseName, versions) ||
       this.transitiveDepsVersions[baseName] ||
+      expoSdkVersionFor(baseName, versions) ||
       rnCoreVersionFor(baseName, versions);
     if (!version) return specifier;
     const subpath = specifier.slice(baseName.length);
