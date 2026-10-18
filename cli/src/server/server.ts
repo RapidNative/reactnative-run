@@ -33,6 +33,11 @@ export interface ServerContext {
    * the ws hub compares a device's recorded bundle against.
    */
   peekPlatformSession?: (platform: string) => BundlerSession | null;
+  /**
+   * Names the current set of native sessions: new at boot and on every re-init (which drops them).
+   * The manifest's launchAsset.key falls back to it while a platform has no session yet.
+   */
+  nativeGeneration?: string;
   /** What each device was served (created by startServer when absent). */
   clients?: ClientRegistry;
   /** Set by startServer once the ws hub exists. */

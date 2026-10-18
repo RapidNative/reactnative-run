@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { scanProject } from "../project/scan.js";
 import { watchProject } from "../project/watch.js";
@@ -169,6 +170,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   const ctx: ServerContext = {
     session,
+    nativeGeneration: randomUUID().slice(0, 8),
     config,
     rootDir,
     title,
@@ -330,6 +332,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     nativeUnsubs.clear();
     readyNative.clear();
     nativeSessions.clear();
+    ctx.nativeGeneration = randomUUID().slice(0, 8);
     session = fresh;
     ctx.session = fresh;
     ctx.config = newConfig;
