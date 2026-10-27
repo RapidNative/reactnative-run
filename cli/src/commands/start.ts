@@ -258,12 +258,17 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // stop the server (the device request will retry the build).
   if (prewarmList.length > 0) {
     log.info(`Pre-warming ${prewarmList.join(", ")} bundle(s) ...`);
-    for (const platform of prewarmList) {
-      // getPlatformSession already swallows the rejection and records it; the
-      // catch here is belt-and-braces against an unhandled rejection killing
-      // the process.
-      void Promise.resolve(ctx.getPlatformSession?.(platform)).catch(() => {});
-    }
+    // One after another, in the order given: the builds share one JS thread,
+    // so running them together only delays the first. A device that asks for
+    // a later platform meanwhile still starts its build on demand.
+    void (async () => {
+      for (const platform of prewarmList) {
+        // getPlatformSession already swallows the rejection and records it; the
+        // catch here is belt-and-braces against an unhandled rejection killing
+        // the process.
+        await Promise.resolve(ctx.getPlatformSession?.(platform)).catch(() => {});
+      }
+    })();
   }
 
   const watcher = watchProject({

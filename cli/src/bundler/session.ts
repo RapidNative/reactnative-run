@@ -485,9 +485,15 @@ export class BundlerSession {
    *  cache -- callers use this when a live graph is required (a miss, or the
    *  first edit after a cache-hit serve). */
   private async realBuild(key: string): Promise<boolean> {
-    if (this.options.nativewind && this.nativewindCss.size === 0) {
-      await this.refreshNativewindCss();
-    }
+    // The CSS compile is a package-server round trip (~2s, more when cold) and
+    // only the module walk reads its result, so let it overlap the dependency
+    // prefetch instead of running ahead of it.
+    const nativewindReady =
+      this.options.nativewind && this.nativewindCss.size === 0
+        ? this.refreshNativewindCss().catch(() => {
+            this.nativewindFailed = true;
+          })
+        : undefined;
     const before = new Set(Object.keys(this.vfs.toFileMap()));
     const entry = ensureEntryFile(this.vfs);
     // Whatever ensureEntryFile wrote (expo-router's /index.tsx + /__expo_ctx.js)
@@ -499,7 +505,7 @@ export class BundlerSession {
       return false;
     }
     try {
-      const result = await this.bundler.build(this.nativeBuildEntry(entry));
+      const result = await this.bundler.build(this.nativeBuildEntry(entry), nativewindReady);
       this.bundle = result.bundle;
       this.bundleVersion++;
       this.buildError = null;

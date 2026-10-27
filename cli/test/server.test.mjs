@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as http from 'node:http';
+import * as zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { scanProject } from '../dist/project/scan.js';
@@ -311,4 +313,32 @@ test('manifest: a pending launch-asset key is stable between fetches, and unique
   assert.equal(await key(), first, 'stable between fetches, or expo-updates loops on "New update available"');
   ctx.nativeGeneration = 'gen-b'; // a re-init, or another project's server
   assert.notEqual(await key(), first);
+});
+
+// Raw GET (fetch would negotiate and decompress on its own).
+function rawGet(urlPath, headers) {
+  return new Promise((resolve, reject) => {
+    http.get(`${base}${urlPath}`, { headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+}
+
+test('a bundle request that accepts gzip gets the same bundle, gzipped', async () => {
+  const plain = await rawGet('/index.bundle?platform=ios&dev=true', { 'accept-encoding': 'identity' });
+  assert.equal(plain.status, 200);
+  assert.equal(plain.headers['content-encoding'], undefined);
+  const gz = await rawGet('/index.bundle?platform=ios&dev=true', { 'accept-encoding': 'gzip, deflate, br' });
+  assert.equal(gz.status, 200);
+  assert.equal(gz.headers['content-encoding'], 'gzip');
+  assert.equal(Number(gz.headers['content-length']), gz.body.length);
+  assert.ok(gz.body.length < plain.body.length, 'smaller on the wire');
+  assert.equal(zlib.gunzipSync(gz.body).toString('utf8'), plain.body.toString('utf8'));
+});
+
+test('gzip;q=0 is honoured as a refusal', async () => {
+  const res = await rawGet('/index.bundle?platform=ios&dev=true', { 'accept-encoding': 'gzip;q=0, identity' });
+  assert.equal(res.headers['content-encoding'], undefined);
 });
