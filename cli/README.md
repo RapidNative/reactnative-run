@@ -64,6 +64,26 @@ at it:
 RNRUN_WORKLETS_PLUGIN=/opt/rnrun/react-native-worklets/plugin rnrun start /app
 ```
 
+### Share one read-only cache across projects (optional)
+
+On a host running many projects, each new one downloads the same dependency
+bundles (~175MB for a typical Expo app) and worklets plugin onto its own
+volume. Fill one directory on the host and mount it read-only into every
+container instead:
+
+```sh
+# on the host, with the URLs many projects fetch (one per line) on stdin:
+rnrun cache-fill /srv/rnrun-shared --worklets 0.13.0 --max-new 4 --prune-days 7 < urls.txt
+# in each container (mounted read-only):
+RNRUN_SHARED_CACHE_DIR=/shared rnrun start /app
+```
+
+rnrun reads it before its own caches and never writes to it. Only immutable
+responses are taken from it (dependency bundles, preludes, exact-version
+packages), so it can't serve a stale tag. Fill it from the package server
+yourself, never by copying a project's cache: on a multi-tenant host that
+would let one project poison every other.
+
 ### `--prewarm` vs the bundle cache
 
 With a persistent `RNRUN_BUNDLE_CACHE_DIR`, a wake serves the cached bundle
@@ -84,6 +104,7 @@ bundles to a device never pays for it.
 | `RNRUN_WORKLETS_PLUGIN` | — | explicit path to the worklets babel plugin |
 | `RNRUN_PKG_CACHE_DIR` | `$HOME/.rnrun/pkg-cache` | package-response cache |
 | `RNRUN_NO_PKG_CACHE` | — | disable the package-response cache |
+| `RNRUN_SHARED_CACHE_DIR` | — | host-filled read-only cache (`rnrun cache-fill`), read first |
 
 ## Keeping devices in step with the server
 
