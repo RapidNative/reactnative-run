@@ -96,6 +96,13 @@ function keptHeaders(res: Response): Record<string, string> {
   return headers;
 }
 
+// A disk hit resolves without touching I/O, so a build fed entirely from this
+// cache (a woken project whose code changed, or every package already on disk)
+// ran start to finish without the event loop turning once: on the test pad the
+// Expo Go manifest request waited out both pre-warm builds, 27-32s. One
+// macrotask turn per hit lets pending requests in between build stages.
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 export interface CachedFetchStats {
   hits: number;
   misses: number;
@@ -119,6 +126,7 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
       const cached = readEntry(key);
       if (cached && cached.meta.status === 200) {
         if (stats) stats.hits++;
+        await turn();
         if (debug) console.warn(`[pkg-cache] HIT (nativewind) ${url}`);
         return new Response(cached.body, { status: 200, headers: cached.meta.headers });
       }
@@ -148,6 +156,7 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
         const cached = readEntry(key);
         if (cached && cached.meta.status === 200) {
           if (stats) stats.hits++;
+          await turn();
           if (debug) console.warn(`[pkg-cache] HIT (post) ${getUrl}`);
           return new Response(cached.body, { status: 200, headers: cached.meta.headers });
         }
@@ -174,6 +183,7 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
     const cached = readEntry(key);
     if (cached) {
       if (stats) stats.hits++;
+      await turn();
       if (debug) console.warn(`[pkg-cache] HIT (${cached.meta.status}) ${url}`);
       return new Response(cached.body, { status: cached.meta.status, headers: cached.meta.headers });
     }

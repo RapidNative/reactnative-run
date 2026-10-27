@@ -342,3 +342,14 @@ test('gzip;q=0 is honoured as a refusal', async () => {
   const res = await rawGet('/index.bundle?platform=ios&dev=true', { 'accept-encoding': 'gzip;q=0, identity' });
   assert.equal(res.headers['content-encoding'], undefined);
 });
+
+test('whenIdle waits out a quiet window after the last response, up to its cap', async () => {
+  await rawGet('/status');
+  let t = Date.now();
+  await ctx.whenIdle(400, 5000);
+  assert.ok(Date.now() - t >= 250, 'waited for the quiet window');
+  await rawGet('/status');
+  t = Date.now();
+  await ctx.whenIdle(5000, 300);
+  assert.ok(Date.now() - t < 1500, 'gave up at the cap');
+});

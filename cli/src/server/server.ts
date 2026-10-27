@@ -42,6 +42,13 @@ export interface ServerContext {
   clients?: ClientRegistry;
   /** Set by startServer once the ws hub exists. */
   hub?: HmrHub;
+  /**
+   * Set by startServer: resolves once no HTTP response has been in flight for
+   * `quietMs` (or after `maxWaitMs` regardless). Background work that holds the
+   * JS thread (a pre-warm build) waits on it so it doesn't stall a device that
+   * is downloading its bundle or the assets right after it.
+   */
+  whenIdle?: (quietMs: number, maxWaitMs: number) => Promise<void>;
 }
 
 export interface DevServer {
@@ -67,7 +74,14 @@ export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise
   hub.onDeviceLog = (line) => ctx.log(line);
   ctx.hub = hub;
 
+  let inFlight = 0;
+  let lastActive = 0;
   const server = http.createServer(async (req, res) => {
+    inFlight++;
+    res.once("close", () => {
+      inFlight--;
+      lastActive = Date.now();
+    });
     try {
       const handled = await router.dispatch(req, res);
       if (!handled) sendText(res, 404, "text/plain", "Not found: " + req.url);
@@ -79,6 +93,13 @@ export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise
   });
 
   server.on("upgrade", (req, socket, head) => hub.handleUpgrade(req, socket, head));
+
+  ctx.whenIdle = async (quietMs, maxWaitMs) => {
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline && (inFlight > 0 || Date.now() - lastActive < quietMs)) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
