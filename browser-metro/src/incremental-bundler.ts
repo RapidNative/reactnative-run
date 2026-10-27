@@ -36,6 +36,12 @@ export class IncrementalBundler {
   private packageVersions: Record<string, string> = {};
   private transitiveDepsVersions: Record<string, string> = {};
   private prefetchedPackages: Record<string, string> = {};
+  /** The prefetched bundle's `@dep-manifest`: its batch entries plus the
+   *  subpaths it combine-built with their base. */
+  private prefetchedManifest: Record<string, string> = {};
+  /** findRequires results per npm module, reused while its code is unchanged:
+   *  findTransitiveNpmDeps rescans the whole module map on every round. */
+  private npmRequiresMemo = new Map<string, { code: string; requires: string[] }>();
   /** Native: direct-dep internal subpaths folded into the combined prefetch
    *  on the second build pass (see the "NATIVE second pass" block in build). */
   private extraNativeSubpaths: string[] = [];
@@ -217,7 +223,12 @@ export class IncrementalBundler {
     const newDeps = new Set<string>();
     for (const [name, code] of Object.entries(this.moduleMap)) {
       if (!this.resolver.isNpmPackage(name)) continue;
-      for (const dep of findRequires(code)) {
+      let memo = this.npmRequiresMemo.get(name);
+      if (!memo || memo.code !== code) {
+        memo = { code, requires: findRequires(code) };
+        this.npmRequiresMemo.set(name, memo);
+      }
+      for (const dep of memo.requires) {
         if (this.resolver.isNpmPackage(dep) && !(dep in this.moduleMap) && !skipNames.has(dep)) {
           newDeps.add(dep);
         }
@@ -458,8 +469,9 @@ export class IncrementalBundler {
         try {
           const poll = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
           if (poll.ok) {
-            const { packages } = parseDepBundle(await poll.text());
+            const { manifest, packages } = parseDepBundle(await poll.text());
             this.prefetchedPackages = packages;
+            this.prefetchedManifest = manifest;
             log?.(`Dependency bundle ready (${Object.keys(packages).length} packages, ${secs()}s)`);
             return true;
           }
@@ -526,8 +538,9 @@ export class IncrementalBundler {
     try {
       const getRes = await doFetch(`${baseUrl}/bundle-deps/${hash}`);
       if (getRes.ok) {
-        const { packages } = parseDepBundle(await getRes.text());
+        const { manifest, packages } = parseDepBundle(await getRes.text());
         this.prefetchedPackages = packages;
+        this.prefetchedManifest = manifest;
         return;
       }
 
@@ -543,8 +556,9 @@ export class IncrementalBundler {
         }),
       });
       if (postRes.ok) {
-        const { packages } = parseDepBundle(await postRes.text());
+        const { manifest, packages } = parseDepBundle(await postRes.text());
         this.prefetchedPackages = packages;
+        this.prefetchedManifest = manifest;
         log?.(`Dependency bundle ready (${Object.keys(packages).length} packages, ${secs()}s)`);
         return;
       }
@@ -1018,7 +1032,12 @@ export class IncrementalBundler {
   }
 
   /** Initial full build */
-  async build(entryFile: string): Promise<IncrementalBuildResult> {
+  /**
+   * `beforeWalk` is awaited between the dependency prefetch and the module
+   * walk: the caller can run work the walk needs (e.g. compiling CSS that a
+   * virtualSource serves) concurrently with the prefetch round trip.
+   */
+  async build(entryFile: string, beforeWalk?: Promise<unknown>): Promise<IncrementalBuildResult> {
     const startTime = performance.now();
 
     this.entryFile = entryFile;
@@ -1028,6 +1047,7 @@ export class IncrementalBundler {
 
     // Prefetch all deps in a single batch request
     await this.prefetchDependencies();
+    if (beforeWalk) await beforeWalk;
 
     const npmPackagesNeeded = new Set<string>();
 
@@ -1096,12 +1116,17 @@ export class IncrementalBundler {
         const base = k.startsWith("@") ? k.split("/").slice(0, 2).join("/") : k.split("/")[0];
         return base !== k && this.packageVersions[base] !== undefined && !this.extraNativeSubpaths.includes(k);
       });
-      if (internalSubs.length > 0) {
+      // A subpath already in the bundle's manifest was combine-built with its
+      // base (or is its own batch entry), so re-requesting it changes nothing.
+      // Only a subpath the bundle lacks is worth a second package-server round
+      // trip and a whole second pass. When one is, the request still carries
+      // every internal subpath, as before, so its hash (and cache) is unchanged.
+      if (internalSubs.some((k) => !(k in this.prefetchedManifest))) {
         this.nativeSubpathsExpanded = true;
         this.extraNativeSubpaths = [...new Set([...this.extraNativeSubpaths, ...internalSubs])];
         this.prefetchedPackages = {};
         this.cache.invalidateNpmPackages();
-        return this.build(entryFile);
+        return this.build(entryFile, beforeWalk);
       }
     }
 
