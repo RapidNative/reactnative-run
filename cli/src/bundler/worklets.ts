@@ -116,7 +116,25 @@ export function resolveWorkletsPlugin(
     }
   }
 
-  // 2. Tool cache: fetch the plugin once per version, reuse forever.
+  const wanted = version ?? "latest";
+  const toolName = `worklets-${wanted.replace(/[^\w.-]/g, "_")}`;
+
+  // 2. The host's shared, read-only tool cache (RNRUN_SHARED_CACHE_DIR, filled
+  // by `rnrun cache-fill --worklets`): no fetch, nothing written to this
+  // project's disk. The fetch below runs `npm pack` synchronously, which held
+  // a new project's server unresponsive for ~4.4s on the test pad.
+  const sharedRoot = process.env.RNRUN_SHARED_CACHE_DIR;
+  if (sharedRoot) {
+    const sharedPlugin = path.join(sharedRoot, "tools", toolName, "react-native-worklets", "plugin");
+    try {
+      createRequire(import.meta.url)(sharedPlugin);
+      return sharedPlugin;
+    } catch {
+      /* not filled for this version, or links that don't resolve here */
+    }
+  }
+
+  // 3. Tool cache: fetch the plugin once per version, reuse forever.
   //
   // Deliberately NOT `npm install react-native-worklets`: that pulls 256
   // transitive packages (~140MB) plus ~200MB of npm HTTP cache, none of it
@@ -128,9 +146,8 @@ export function resolveWorkletsPlugin(
   //
   // RNRUN_TOOLS_DIR relocates the cache so a host can bake it into an image or
   // share one copy across containers instead of paying for it per container.
-  const wanted = version ?? "latest";
   const toolsRoot = process.env.RNRUN_TOOLS_DIR || path.join(os.homedir(), ".rnrun", "tools");
-  const toolDir = path.join(toolsRoot, `worklets-${wanted.replace(/[^\w.-]/g, "_")}`);
+  const toolDir = path.join(toolsRoot, toolName);
   const pluginDir = path.join(toolDir, "react-native-worklets", "plugin");
 
   /** Resolve AND load: a path that exists but throws inside babel is worse
@@ -269,4 +286,63 @@ function legacyInstall(toolDir: string, wanted: string, warn: (msg: string) => v
     );
     return null;
   }
+}
+
+/**
+ * Fill a shared tool cache (`<dir>/tools`, read through RNRUN_SHARED_CACHE_DIR)
+ * with the plugin for each exact version. Each one is fetched into a scratch
+ * directory and renamed into place, so a project never loads half of one. The
+ * plugin's node_modules links point into THIS rnrun's install, so run it from
+ * the image the projects run (a project whose links don't resolve just fetches
+ * its own copy, as before).
+ */
+export function fillSharedWorklets(
+  dir: string,
+  versions: string[],
+  warn: (msg: string) => void
+): { stored: string[]; present: string[]; failed: string[] } {
+  const result = { stored: [] as string[], present: [] as string[], failed: [] as string[] };
+  const toolsDir = path.join(dir, "tools");
+  fs.mkdirSync(toolsDir, { recursive: true });
+  const saved = { tools: process.env.RNRUN_TOOLS_DIR, shared: process.env.RNRUN_SHARED_CACHE_DIR, override: process.env.RNRUN_WORKLETS_PLUGIN };
+  try {
+    delete process.env.RNRUN_SHARED_CACHE_DIR;
+    delete process.env.RNRUN_WORKLETS_PLUGIN;
+    for (const version of versions) {
+      // Exact versions only: a range would be a different directory name per
+      // spelling, and what it resolves to changes over time.
+      if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        result.failed.push(version);
+        continue;
+      }
+      const target = path.join(toolsDir, `worklets-${version}`);
+      try {
+        createRequire(import.meta.url)(path.join(target, "react-native-worklets", "plugin"));
+        result.present.push(version);
+        continue;
+      } catch {
+        /* not there yet */
+      }
+      const scratch = fs.mkdtempSync(path.join(toolsDir, ".fill-"));
+      try {
+        process.env.RNRUN_TOOLS_DIR = scratch;
+        const built = path.join(scratch, `worklets-${version}`);
+        if (resolveWorkletsPlugin(scratch, { "react-native-worklets": version }, warn) !== path.join(built, "react-native-worklets", "plugin")) {
+          result.failed.push(version);
+          continue;
+        }
+        fs.rmSync(target, { recursive: true, force: true });
+        fs.renameSync(built, target);
+        result.stored.push(version);
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    for (const [name, value] of [["RNRUN_TOOLS_DIR", saved.tools], ["RNRUN_SHARED_CACHE_DIR", saved.shared], ["RNRUN_WORKLETS_PLUGIN", saved.override]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+  return result;
 }
