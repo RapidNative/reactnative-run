@@ -24,23 +24,41 @@ export function parseExternalsFromBody(code: string): Record<string, string> {
 export function findRequires(source: string): string[] {
   if (!source) return [];
   const requires: string[] = [];
-  const lines = source.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  // Line by line, as before, but only the lines that can match: neither regex
+  // matches without the literal "require" / "import", so jump between those.
+  // Splitting a 30 MB dependency bundle into lines and building two RegExps
+  // per line was seconds of a cold native build (and most of its GC).
+  let from = 0;
+  while (from < source.length) {
+    const r = source.indexOf("require", from);
+    const m = source.indexOf("import", from);
+    const hit = r === -1 ? m : m === -1 ? r : Math.min(r, m);
+    if (hit === -1) break;
+    const lineStart = source.lastIndexOf("\n", hit) + 1;
+    let lineEnd = source.indexOf("\n", hit);
+    if (lineEnd === -1) lineEnd = source.length;
+    from = lineEnd + 1;
+    const line = source.slice(lineStart, lineEnd);
     // Skip comment lines to avoid picking up require() in JSDoc examples
     if (COMMENT_LINE_RE.test(line)) continue;
-    const reqRe = new RegExp(REQUIRE_RE.source, REQUIRE_RE.flags);
     let match: RegExpExecArray | null;
-    while ((match = reqRe.exec(line)) !== null) {
+    LINE_REQUIRE_RE.lastIndex = 0;
+    while ((match = LINE_REQUIRE_RE.exec(line)) !== null) {
       requires.push(match[1]);
     }
-    const impRe = new RegExp(DYNAMIC_IMPORT_RE.source, DYNAMIC_IMPORT_RE.flags);
-    while ((match = impRe.exec(line)) !== null) {
+    LINE_IMPORT_RE.lastIndex = 0;
+    while ((match = LINE_IMPORT_RE.exec(line)) !== null) {
       requires.push(match[1]);
     }
   }
   return requires;
 }
+
+// Reused by findRequires (reset per line) instead of one RegExp per line.
+const LINE_REQUIRE_RE = new RegExp(REQUIRE_RE.source, REQUIRE_RE.flags);
+const LINE_IMPORT_RE = new RegExp(DYNAMIC_IMPORT_RE.source, DYNAMIC_IMPORT_RE.flags);
+/** Cheap gate for lowerDynamicImports: no possible `import(` means no parse. */
+const MAYBE_DYNAMIC_IMPORT_RE = /(?<![.$\w])import\s*\(/;
 
 /**
  * Rewrite require calls using a resolve callback.
@@ -74,6 +92,11 @@ export function rewriteRequires(
  * prebundled npm package code where specifiers are already registry keys.
  */
 export function lowerDynamicImports(source: string): string {
+  // A full acorn parse of every prebundled package was the single largest cost
+  // of a cold native build (~8s of 18s, while 3 of 90 packages have an
+  // `import(` at all). esbuild emits ImportExpressions as `import(`, so no
+  // match means nothing to lower.
+  if (!MAYBE_DYNAMIC_IMPORT_RE.test(source)) return source;
   return rewriteDynamicImports(source, (target) => target);
 }
 

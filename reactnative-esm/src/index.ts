@@ -28,6 +28,9 @@ const execFileAsync = promisify(execFile);
 // an honest install of the shared set is seconds — so 90s is a stall signal,
 // not a slow download, and we fail straight over to npm.
 const BUN_INSTALL_TIMEOUT_MS = 90_000;
+// Resolution only, no package files: ~0.1s warm, ~1.5s with cold manifests.
+// Past this an attempt has stalled (see resolveWithBunLockfile).
+const LOCKFILE_RESOLVE_TIMEOUT_MS = 6_000;
 import esbuild from "esbuild";
 // @ts-ignore - no type declarations
 import flowRemoveTypes from "flow-remove-types";
@@ -36,7 +39,8 @@ import { looseClassFields, normalizeBuildPaths, degradeIncompatibleAnimations } 
 import { isValidPackageName, isValidVersionRange } from "./validation";
 import { relevantExternals } from "./chunk-externals";
 import { CODEGEN_SPEC_FILE_RE, RN_CORE_RE, codegenViewConfig } from "./codegen";
-import { makeWorkletsPlugin, workletsRuntimeVersion, mayWorkletize } from "./worklets";
+import { makeWorkletsPlugin, mayWorkletize } from "./worklets";
+import { NeedsBuild, failureCache, nodeModulesMeta, resolveWithBunLockfile, workletsRuntimeVersionFrom, type MetaSource } from "./dep-meta";
 import {
 	BuildPlatform,
 	normalizePlatform,
@@ -1643,610 +1647,662 @@ app.post("/bundle-deps", async (req: Request, res: Response) => {
 			);
 		}
 		const droppedPackages = new Set<string>(preDropped);
-		let workingDeps: Record<string, string> = { ...installDeps };
-		const MAX_RETRIES = 3;
-		let installed = false;
-		for (let attempt = 0; attempt < MAX_RETRIES && !installed; attempt++) {
-			// argv array, not a shell string: each `name@ver` is one literal
-			// argument, so a metacharacter in a dependency name/version (POST body)
-			// cannot inject a command.
-			const specs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
-			try {
-				await execFileAsync("bun", ["install", "--no-progress", "--ignore-scripts", ...specs], {
-					cwd: tmpDir,
-					// The common dep set (expo/react-native/nativewind/supabase +
-					// the @expo-google-fonts family and other recurring extras) is
-					// pre-warmed into bun's global cache at deploy — see
-					// scripts/prewarm-bun-cache.mjs. With that warm, an honest
-					// install of the shared closure is seconds, so an install still
-					// running past this bound is a genuine stall (bun intermittently
-					// hangs under piped spawn), not honest downloading. Fail fast to
-					// the npm fallback rather than burning the old 300s here; a truly
-					// novel package outside the pre-warm set that needs longer is
-					// caught by npm's more generous timeout below.
-					killSignal: "SIGKILL",
-			timeout: BUN_INSTALL_TIMEOUT_MS,
-					maxBuffer: 16 * 1024 * 1024,
-				});
-				installed = true;
-				console.log(
-					`[bundle-deps] bun install completed in ${Date.now() - installStart}ms` +
-					(droppedPackages.size > 0 ? ` (dropped: ${[...droppedPackages].join(", ")})` : "")
-				);
-			} catch (installErr: unknown) {
-				const e = installErr as { stderr?: Buffer; stdout?: Buffer; message?: string };
-				const stderr = e.stderr?.toString() || "";
-				const stdout = e.stdout?.toString() || "";
+		const runInstall = async (): Promise<void> => {
+			let workingDeps: Record<string, string> = { ...installDeps };
+			const MAX_RETRIES = 3;
+			let installed = false;
+			for (let attempt = 0; attempt < MAX_RETRIES && !installed; attempt++) {
+				// argv array, not a shell string: each `name@ver` is one literal
+				// argument, so a metacharacter in a dependency name/version (POST body)
+				// cannot inject a command.
+				const specs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
+				try {
+					await execFileAsync("bun", ["install", "--no-progress", "--ignore-scripts", ...specs], {
+						cwd: tmpDir,
+						// The common dep set (expo/react-native/nativewind/supabase +
+						// the @expo-google-fonts family and other recurring extras) is
+						// pre-warmed into bun's global cache at deploy — see
+						// scripts/prewarm-bun-cache.mjs. With that warm, an honest
+						// install of the shared closure is seconds, so an install still
+						// running past this bound is a genuine stall (bun intermittently
+						// hangs under piped spawn), not honest downloading. Fail fast to
+						// the npm fallback rather than burning the old 300s here; a truly
+						// novel package outside the pre-warm set that needs longer is
+						// caught by npm's more generous timeout below.
+						killSignal: "SIGKILL",
+				timeout: BUN_INSTALL_TIMEOUT_MS,
+						maxBuffer: 16 * 1024 * 1024,
+					});
+					installed = true;
+					console.log(
+						`[bundle-deps] bun install completed in ${Date.now() - installStart}ms` +
+						(droppedPackages.size > 0 ? ` (dropped: ${[...droppedPackages].join(", ")})` : "")
+					);
+				} catch (installErr: unknown) {
+					const e = installErr as { stderr?: Buffer; stdout?: Buffer; message?: string };
+					const stderr = e.stderr?.toString() || "";
+					const stdout = e.stdout?.toString() || "";
 
-				// Parse bun's "No version matching ... found for specifier ..."
-				// lines and remove those packages, then retry.
-				const unsatisfiable = new Set<string>();
-				const re = /No version matching "[^"]+" found for specifier "([^"]+)"/g;
-				let m: RegExpExecArray | null;
-				while ((m = re.exec(stderr)) !== null) unsatisfiable.add(m[1]);
+					// Parse bun's "No version matching ... found for specifier ..."
+					// lines and remove those packages, then retry.
+					const unsatisfiable = new Set<string>();
+					const re = /No version matching "[^"]+" found for specifier "([^"]+)"/g;
+					let m: RegExpExecArray | null;
+					while ((m = re.exec(stderr)) !== null) unsatisfiable.add(m[1]);
 
-				const removed: string[] = [];
-				for (const name of unsatisfiable) {
-					if (name in workingDeps) {
-						removed.push(`${name}@${workingDeps[name]}`);
-						delete workingDeps[name];
-						droppedPackages.add(name);
+					const removed: string[] = [];
+					for (const name of unsatisfiable) {
+						if (name in workingDeps) {
+							removed.push(`${name}@${workingDeps[name]}`);
+							delete workingDeps[name];
+							droppedPackages.add(name);
+						}
 					}
-				}
 
-				// bun install intermittently hangs under piped spawn (observed on
-				// macOS with a large bun cache, and on the origin as multi-minute
-				// SIGKILL timeouts). A second bun attempt rarely un-hangs and just
-				// doubled the wait, so on the FIRST timeout we fall straight over to
-				// npm — slower but it has never hung in this server's /pkg path.
-				// exec's timeout surfaces as killed:true + SIGTERM rather than ETIMEDOUT.
-				const timedOut =
-					(e as { code?: string }).code === "ETIMEDOUT" ||
-					/ETIMEDOUT/.test(e.message || "") ||
-					(e as { killed?: boolean }).killed === true;
-				if (removed.length === 0 && timedOut && attempt < MAX_RETRIES - 1) {
-					console.warn(`[bundle-deps] bun install timed out (${BUN_INSTALL_TIMEOUT_MS}ms) — falling back to npm install`);
-					try {
-						const npmSpecs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
-						await execFileAsync("npm", ["install", "--ignore-scripts", ...npmSpecs, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
-							cwd: tmpDir,
-							killSignal: "SIGKILL",
-							timeout: 420000,
-							maxBuffer: 16 * 1024 * 1024,
-						});
-						installed = true;
-						console.log(`[bundle-deps] npm fallback completed in ${Date.now() - installStart}ms (total incl. bun attempts)`);
-						continue;
-					} catch (npmErr: unknown) {
-						const ne = npmErr as { message?: string };
-						console.error(`[bundle-deps] npm fallback also failed: ${ne.message?.slice(0, 200)}`);
-						// fall through to the hard-failure path below
+					// bun install intermittently hangs under piped spawn (observed on
+					// macOS with a large bun cache, and on the origin as multi-minute
+					// SIGKILL timeouts). A second bun attempt rarely un-hangs and just
+					// doubled the wait, so on the FIRST timeout we fall straight over to
+					// npm — slower but it has never hung in this server's /pkg path.
+					// exec's timeout surfaces as killed:true + SIGTERM rather than ETIMEDOUT.
+					const timedOut =
+						(e as { code?: string }).code === "ETIMEDOUT" ||
+						/ETIMEDOUT/.test(e.message || "") ||
+						(e as { killed?: boolean }).killed === true;
+					if (removed.length === 0 && timedOut && attempt < MAX_RETRIES - 1) {
+						console.warn(`[bundle-deps] bun install timed out (${BUN_INSTALL_TIMEOUT_MS}ms) — falling back to npm install`);
+						try {
+							const npmSpecs = Object.entries(workingDeps).map(([n, v]) => `${n}@${v}`);
+							await execFileAsync("npm", ["install", "--ignore-scripts", ...npmSpecs, "--legacy-peer-deps", "--no-audit", "--no-fund"], {
+								cwd: tmpDir,
+								killSignal: "SIGKILL",
+								timeout: 420000,
+								maxBuffer: 16 * 1024 * 1024,
+							});
+							installed = true;
+							console.log(`[bundle-deps] npm fallback completed in ${Date.now() - installStart}ms (total incl. bun attempts)`);
+							continue;
+						} catch (npmErr: unknown) {
+							const ne = npmErr as { message?: string };
+							console.error(`[bundle-deps] npm fallback also failed: ${ne.message?.slice(0, 200)}`);
+							// fall through to the hard-failure path below
+						}
 					}
-				}
 
-				if (removed.length === 0) {
-					// No recoverable cause — surface the original error
-					console.error(`[bundle-deps install FAILED in ${Date.now() - installStart}ms] tmpDir=${tmpDir}`);
-					console.error(`[bundle-deps install stderr]\n${stderr}`);
-					console.error(`[bundle-deps install stdout]\n${stdout}`);
-					throw new Error(
-						`bun install failed: ${e.message || "unknown"}\n---STDERR---\n${stderr.slice(-4000)}`
+					if (removed.length === 0) {
+						// No recoverable cause — surface the original error
+						console.error(`[bundle-deps install FAILED in ${Date.now() - installStart}ms] tmpDir=${tmpDir}`);
+						console.error(`[bundle-deps install stderr]\n${stderr}`);
+						console.error(`[bundle-deps install stdout]\n${stdout}`);
+						throw new Error(
+							`bun install failed: ${e.message || "unknown"}\n---STDERR---\n${stderr.slice(-4000)}`
+						);
+					}
+
+					console.warn(
+						`[bundle-deps] attempt ${attempt + 1}: bun rejected ${removed.length} unsatisfiable spec(s) — retrying without them: ${removed.join(", ")}`
 					);
 				}
-
-				console.warn(
-					`[bundle-deps] attempt ${attempt + 1}: bun rejected ${removed.length} unsatisfiable spec(s) — retrying without them: ${removed.join(", ")}`
-				);
 			}
-		}
-		if (!installed) {
-			throw new Error(`bun install failed after ${MAX_RETRIES} retries`);
-		}
-
-		// Discover all packages to bundle: direct deps + their transitive deps
-		const allPackages = new Map<string, { version: string; isRN: boolean }>();
-		const nodeModules = path.join(tmpDir, "node_modules");
-
-		function discoverPackages(pkgName: string, visited: Set<string>) {
-			if (visited.has(pkgName)) return;
-			visited.add(pkgName);
-
-			const pkgJsonPath = path.join(nodeModules, pkgName, "package.json");
-			if (!fs.existsSync(pkgJsonPath)) return;
-
-			const meta = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
-			const keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
-			const isRN = pkgName.startsWith("@expo/") ||
-				pkgName.startsWith("@expo-google-fonts/") ||
-				pkgName.includes("react-native") ||
-				keywords.some((k: string) => k === "react-native" || k === "expo");
-
-			allPackages.set(pkgName, { version: meta.version, isRN });
-
-			// Recurse into deps
-			const deps = Object.keys(meta.dependencies || {});
-			const peerDeps = Object.keys(meta.peerDependencies || {});
-			for (const dep of [...deps, ...peerDeps]) {
-				discoverPackages(dep, visited);
+			if (!installed) {
+				throw new Error(`bun install failed after ${MAX_RETRIES} retries`);
 			}
-		}
-
-		const visited = new Set<string>();
-		for (const name of Object.keys(dependencies)) {
-			discoverPackages(name, visited);
-		}
-
-		// Only bundle the user's direct dependencies as separate entries.
-		// Transitive deps get inlined into their consumers. This avoids
-		// CJS/ESM interop issues with small utility packages.
-		const directDeps = new Set(Object.keys(dependencies));
-		for (const name of allPackages.keys()) {
-			if (!directDeps.has(name)) {
-				allPackages.delete(name);
-			}
-		}
-
-		// Add known subpath entry points for direct deps that are commonly imported
-		const knownSubpaths: Record<string, string[]> = {
-			"react-dom": ["react-dom/client", "react-dom/server"],
-			"react": ["react/jsx-runtime", "react/jsx-dev-runtime"],
 		};
-		for (const [pkg, subpaths] of Object.entries(knownSubpaths)) {
-			if (directDeps.has(pkg)) {
-				for (const sub of subpaths) {
-					const subPkgPath = path.join(nodeModules, ...sub.split("/"));
-					// Check if the subpath actually exists
-					try {
-						require.resolve(sub, { paths: [tmpDir] });
-						allPackages.set(sub, { version: allPackages.get(pkg)?.version || "unknown", isRN: false });
-					} catch {}
+
+		// Everything from here to the assembled bundle reads package metadata
+		// through `meta`. cacheOnly: metadata comes from a lockfile and nothing
+		// may be built; the first chunk that would need esbuild throws NeedsBuild.
+		const assemble = async (meta: MetaSource, cacheOnly: boolean) => {
+			// A subpath that doesn't resolve was never built into a cached chunk under
+			// the key that includes it, so cache-only assumes it resolves and lets the
+			// chunk lookup decide.
+			const resolveSubpath = (sub: string): void => {
+				if (!cacheOnly) require.resolve(sub, { paths: [tmpDir] });
+			};
+			// Discover all packages to bundle: direct deps + their transitive deps
+			const allPackages = new Map<string, { version: string; isRN: boolean }>();
+
+			function discoverPackages(pkgName: string, visited: Set<string>) {
+				if (visited.has(pkgName)) return;
+				visited.add(pkgName);
+
+				const info = meta(pkgName);
+				if (!info) return;
+				const keywords = info.keywords;
+				const isRN = pkgName.startsWith("@expo/") ||
+					pkgName.startsWith("@expo-google-fonts/") ||
+					pkgName.includes("react-native") ||
+					keywords.some((k: string) => k === "react-native" || k === "expo");
+
+				allPackages.set(pkgName, { version: info.version, isRN });
+
+				// Recurse into deps
+				const deps = Object.keys(info.dependencies);
+				const peerDeps = Object.keys(info.peerDependencies);
+				for (const dep of [...deps, ...peerDeps]) {
+					discoverPackages(dep, visited);
 				}
 			}
-		}
 
-		// Also scan all bundled code for subpath requires of direct deps and add them
-		// This is done AFTER initial bundling in the subpath scanning section below
-
-		console.log(`[bundle-deps] Bundling ${allPackages.size} entries (direct deps + subpaths)...`);
-
-		// Only externalize other direct deps (they're separate entries in the batch)
-		// Plus known platform modules
-		const batchSet = new Set(allPackages.keys());
-		for (const implicit of ["react-native", "react", "react-dom", "expo", "expo-modules-core"]) {
-			batchSet.add(implicit);
-		}
-		// Native: the assets registry must be a shared singleton across the
-		// batch (app asset modules and RN's resolveAssetSource read the same
-		// instance), so externalize it everywhere; the client fetches it once.
-		if (platform !== "web") {
-			batchSet.add("@react-native/assets-registry");
-		}
-
-		// Build the manifest (name -> resolved version)
-		const manifest: Record<string, string> = {};
-		for (const [name, info] of allPackages) {
-			manifest[name] = info.version;
-		}
-
-		// Group user-imported subpaths by their base direct-dep package. A base
-		// with subpaths is built ONCE as a combined esbuild entry (base + its
-		// subpaths) so they share the base's private internal modules — fixing
-		// the duplicate-CurrentRouteContext "No filename found" bug for
-		// expo-router/drawer et al. Only subpaths whose base is a bundled direct
-		// dep and that aren't already their own batch entry qualify; the rest
-		// fall through to the standalone subpath pass / runtime /pkg fetch.
-		const sharedSubpathsByBase = new Map<string, string[]>();
-		for (const sub of requestedSubpaths) {
-			let base: string;
-			if (sub.startsWith("@")) {
-				const parts = sub.split("/");
-				if (parts.length < 3) continue;
-				base = parts.slice(0, 2).join("/");
-			} else {
-				const slash = sub.indexOf("/");
-				if (slash === -1) continue;
-				base = sub.slice(0, slash);
+			const visited = new Set<string>();
+			for (const name of Object.keys(dependencies)) {
+				discoverPackages(name, visited);
 			}
-			if (base === sub || !allPackages.has(base) || allPackages.has(sub)) continue;
-			try { require.resolve(sub, { paths: [tmpDir] }); } catch { continue; }
-			const list = sharedSubpathsByBase.get(base) ?? [];
-			if (!list.includes(sub)) list.push(sub);
-			sharedSubpathsByBase.set(base, list);
-		}
-		// Subpaths emitted as combined stubs — skip them in the standalone pass.
-		const emittedSubpaths = new Set<string>();
 
-		// Bundle each package
-		const chunks: string[] = [];
-		const errors: string[] = [];
-		const phase = { pkgLoop: 0, subpathLoop: 0, assemble: 0 };
-		const tPkgLoop = Date.now();
+			// Only bundle the user's direct dependencies as separate entries.
+			// Transitive deps get inlined into their consumers. This avoids
+			// CJS/ESM interop issues with small utility packages.
+			const directDeps = new Set(Object.keys(dependencies));
+			for (const name of allPackages.keys()) {
+				if (!directDeps.has(name)) {
+					allPackages.delete(name);
+				}
+			}
 
-		// Flow stripping / platform filtering / node stubs come from the hoisted
-		// platform-aware plugin stack (rnPluginStack).
-
-		// ── Per-package chunk cache ────────────────────────────────────────────
-		//
-		// A combined bundle is a concatenation of independently-built per-package
-		// chunks, and measurement on production showed 95% of those builds to be
-		// exact repeats (126 distinct package@version across 2,543 build slots in
-		// the 40 most recent dep sets; median 78% set overlap). Caching chunks
-		// turns "add one dependency" from a full rebuild into one chunk.
-		//
-		// The key must capture everything that changes a chunk's bytes. Measured
-		// (see chunk-experiment): that is package@version, platform, nv, the
-		// subpaths folded in, and the EXTERNALS DECISION -- a package inlines a
-		// dependency that isn't a direct dep of the requested set, and
-		// externalizes it when it is. Rather than change that rule (which would
-		// break nested version conflicts: P declaring lodash@3 while the app
-		// pins lodash@4 must keep inlining its own copy), the key includes the
-		// batch-set names this package could externalize. Adding a dependency
-		// nothing declares -- the common case -- leaves every key untouched.
-		const chunkCacheDir = path.join(CACHE_DIR, "chunks");
-		const chunkStats = { hit: 0, built: 0 };
-		const declaredCache = new Map<string, string[]>();
-		const declaredDepsOf = (pkgName: string): string[] => {
-			const cached = declaredCache.get(pkgName);
-			if (cached) return cached;
-			let deps: string[] = [];
-			try {
-				const pj = JSON.parse(
-					fs.readFileSync(path.join(tmpDir, "node_modules", pkgName, "package.json"), "utf8")
-				);
-				deps = Object.keys({ ...(pj.dependencies ?? {}), ...(pj.peerDependencies ?? {}) }).sort();
-			} catch {
-				/* no package.json at that path (a subpath, or not hoisted) */
-			}
-			declaredCache.set(pkgName, deps);
-			return deps;
-		};
-		// The worklets babel plugin generates factories the app's worklets RUNTIME
-		// evaluates and version-checks, so a chunk workletized against 0.10 is not
-		// reusable by an app on a different version. Only packages that can carry
-		// worklets take it into their key (everything else keeps sharing chunks
-		// across apps regardless of what reanimated version each pins), and only
-		// on native -- the pass does not run on web, so web keys stay as they are.
-		const workletsVersion = platform === "web" ? null : workletsRuntimeVersion(tmpDir);
-		const chunkKeyFor = (pkgName: string, version: string, subs: string[]): string => {
-			// Only batch members this package's code can reach affect its externals,
-			// so the key stays stable when unrelated deps come and go. That is the
-			// whole dependency closure (an inlined dependency's imports count too),
-			// and a subpath's base package (chunk-externals.ts).
-			const declared = declaredDepsOf(pkgName);
-			const relevant = relevantExternals(pkgName, batchSet, declaredDepsOf);
-			const input = JSON.stringify({
-				pkg: pkgName,
-				version,
-				platform,
-				nv: NATIVE_DEPS_VERSION,
-				subs: [...subs].sort(),
-				externals: relevant,
-				...(workletsVersion && mayWorkletize(pkgName, declared) ? { worklets: workletsVersion } : {}),
-			});
-			return crypto.createHash("sha256").update(input).digest("hex").slice(0, 24);
-		};
-		const readChunk = (key: string): string | null => {
-			if (process.env.ESM_NO_CHUNK_CACHE || bypassChunkCache) return null;
-			try {
-				return fs.readFileSync(path.join(chunkCacheDir, `${key}.js`), "utf8");
-			} catch {
-				return null;
-			}
-		};
-		const writeChunk = (key: string, body: string): void => {
-			if (process.env.ESM_NO_CHUNK_CACHE || bypassChunkCache) return;
-			try {
-				fs.mkdirSync(chunkCacheDir, { recursive: true });
-				fs.writeFileSync(path.join(chunkCacheDir, `${key}.js`), body);
-			} catch {
-				/* cache write failure is non-fatal */
-			}
-		};
-
-		for (const [pkgName, info] of allPackages) {
-			// Build-time-only tooling (tailwindcss/postcss/...) is never required
-			// at client runtime and cannot bundle for a browser/Hermes target;
-			// stub it directly instead of paying an esbuild attempt that is
-			// guaranteed to fail into the same stub below. Same end state, no spew.
-			if (CLIENT_EXCLUDED_BUILD_TOOLS.has(pkgName)) {
-				chunks.push(`// @dep-start ${pkgName}\n// build-time tooling, stubbed on client\nmodule.exports = {};\n// @dep-end ${pkgName}`);
-				continue;
-			}
-			const subs = sharedSubpathsByBase.get(pkgName) ?? [];
-			// Cached chunk for this exact (package, version, platform, nv, subpaths,
-			// externals) combination? Then skip esbuild entirely.
-			const chunkKey = chunkKeyFor(pkgName, info.version, subs);
-			const cachedChunk = readChunk(chunkKey);
-			if (cachedChunk !== null) {
-				chunks.push(cachedChunk);
-				chunkStats.hit++;
-				if (subs.length > 0) {
-					for (const sub of subs) {
-						const stub = `module.exports = (require(${JSON.stringify(pkgName)}), (globalThis.__rnSubpaths || {})[${JSON.stringify(sub)}]);`;
-						chunks.push(`// @dep-start ${sub}\n${stub}\n// @dep-end ${sub}`);
-						manifest[sub] = info.version;
-						emittedSubpaths.add(sub);
+			// Add known subpath entry points for direct deps that are commonly imported
+			const knownSubpaths: Record<string, string[]> = {
+				"react-dom": ["react-dom/client", "react-dom/server"],
+				"react": ["react/jsx-runtime", "react/jsx-dev-runtime"],
+			};
+			for (const [pkg, subpaths] of Object.entries(knownSubpaths)) {
+				if (directDeps.has(pkg)) {
+					for (const sub of subpaths) {
+						// Check if the subpath actually exists
+						try {
+							resolveSubpath(sub);
+							allPackages.set(sub, { version: allPackages.get(pkg)?.version || "unknown", isRN: false });
+						} catch {}
 					}
 				}
-				continue;
 			}
-			try {
-				const entryFile = path.join(tmpDir, `__entry_${pkgName.replace(/\//g, "__")}.js`);
-				const outFile = path.join(tmpDir, `__out_${pkgName.replace(/\//g, "__")}.js`);
-				// Combined entry stashes each subpath's exports on a global registry
-				// so the per-subpath stub (emitted below) reads the SAME instance
-				// the base built. The subpaths (pkgName + "/...") stay internal to
-				// this esbuild run via pkgExternalPlugin, so internals are shared.
-				const writeEntry = (withSubs: boolean) => {
-					if (withSubs && subs.length) {
-						const lines = [
-							`var __rn = (globalThis.__rnSubpaths = globalThis.__rnSubpaths || {});`,
-							...subs.map((s) => `__rn[${JSON.stringify(s)}] = require(${JSON.stringify(s)});`),
-							`module.exports = require(${JSON.stringify(pkgName)});`,
-						];
-						fs.writeFileSync(entryFile, lines.join("\n") + "\n");
-					} else {
-						fs.writeFileSync(entryFile, `module.exports = require("${pkgName}");\n`);
-					}
-				};
-				writeEntry(true);
 
-				// Create selective external plugin for this package
-				const pkgExternalPlugin: esbuild.Plugin = {
-					name: "batch-external",
-					setup(build) {
-						build.onResolve({ filter: /^[^./]/ }, async (args) => {
-							let dep: string;
-							if (args.path.startsWith("@")) {
-								const parts = args.path.split("/");
-								dep = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
-							} else {
-								dep = args.path.split("/")[0];
-							}
+			// Also scan all bundled code for subpath requires of direct deps and add them
+			// This is done AFTER initial bundling in the subpath scanning section below
 
-							// Don't externalize from self (handles both base package and subpath entries)
-							if (dep === pkgName) return null;
-							if (args.path === pkgName || args.path.startsWith(pkgName + "/")) return null;
+			console.log(`[bundle-deps] Bundling ${allPackages.size} entries (direct deps + subpaths)...`);
 
-							// Only externalize other direct deps in the batch.
-							// Transitive deps are inlined into their consumers.
-							if (batchSet.has(dep)) {
-								return { path: args.path, external: true };
-							}
+			// Only externalize other direct deps (they're separate entries in the batch)
+			// Plus known platform modules
+			const batchSet = new Set(allPackages.keys());
+			for (const implicit of ["react-native", "react", "react-dom", "expo", "expo-modules-core"]) {
+				batchSet.add(implicit);
+			}
+			// Native: the assets registry must be a shared singleton across the
+			// batch (app asset modules and RN's resolveAssetSource read the same
+			// instance), so externalize it everywhere; the client fetches it once.
+			if (platform !== "web") {
+				batchSet.add("@react-native/assets-registry");
+			}
 
-							// For RN packages, externalize @react-native/* and @expo/* if unresolvable
-							if (info.isRN && (dep.startsWith("@react-native/") || dep.startsWith("@expo/"))) {
-								try {
-									require.resolve(args.path, { paths: [args.resolveDir] });
-									return null;
-								} catch {
-									return { path: args.path, external: true };
-								}
-							}
+			// Build the manifest (name -> resolved version)
+			const manifest: Record<string, string> = {};
+			for (const [name, info] of allPackages) {
+				manifest[name] = info.version;
+			}
 
-							// NATIVE Metro leniency: an unresolvable bare import (usually an
-							// optional peer like react-native-screens when the app forgot to
-							// declare it) must not fail the WHOLE chunk. Externalize it -- the
-							// client fetches it as its own module at runtime.
-							if (platform !== "web") {
-								try {
-									require.resolve(args.path, { paths: [args.resolveDir] });
-									return null;
-								} catch {
-									console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (native leniency)`);
-									return { path: args.path, external: true };
-								}
-							}
+			// Group user-imported subpaths by their base direct-dep package. A base
+			// with subpaths is built ONCE as a combined esbuild entry (base + its
+			// subpaths) so they share the base's private internal modules — fixing
+			// the duplicate-CurrentRouteContext "No filename found" bug for
+			// expo-router/drawer et al. Only subpaths whose base is a bundled direct
+			// dep and that aren't already their own batch entry qualify; the rest
+			// fall through to the standalone subpath pass / runtime /pkg fetch.
+			const sharedSubpathsByBase = new Map<string, string[]>();
+			for (const sub of requestedSubpaths) {
+				let base: string;
+				if (sub.startsWith("@")) {
+					const parts = sub.split("/");
+					if (parts.length < 3) continue;
+					base = parts.slice(0, 2).join("/");
+				} else {
+					const slash = sub.indexOf("/");
+					if (slash === -1) continue;
+					base = sub.slice(0, slash);
+				}
+				if (base === sub || !allPackages.has(base) || allPackages.has(sub)) continue;
+				try { resolveSubpath(sub); } catch { continue; }
+				const list = sharedSubpathsByBase.get(base) ?? [];
+				if (!list.includes(sub)) list.push(sub);
+				sharedSubpathsByBase.set(base, list);
+			}
+			// Subpaths emitted as combined stubs — skip them in the standalone pass.
+			const emittedSubpaths = new Set<string>();
 
-							// Web: only an import that would fail the chunk (see web-leniency.ts).
-							if (await unresolvableOnWeb(build, args)) {
-								console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (web leniency)`);
-								return { path: args.path, external: true };
-							}
+			// Bundle each package
+			const chunks: string[] = [];
+			const errors: string[] = [];
+			const phase = { pkgLoop: 0, subpathLoop: 0, assemble: 0 };
+			const tPkgLoop = Date.now();
 
-							return null;
-						});
-					},
-				};
+			// Flow stripping / platform filtering / node stubs come from the hoisted
+			// platform-aware plugin stack (rnPluginStack).
 
-				const runBuild = () => buildTolerant({
-					entryPoints: [entryFile],
-					bundle: true,
-					format: "iife",
-					globalName: "__module",
-					outfile: outFile,
-					...esbuildPlatformSettings(platform),
-					...(info.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
-					plugins: [
-						makePackageMapsPlugin(platform),
-						...(info.isRN ? rnPluginStack(platform) : []),
-						pkgExternalPlugin,
-					],
-					logLevel: "silent",
+			// ── Per-package chunk cache ────────────────────────────────────────────
+			//
+			// A combined bundle is a concatenation of independently-built per-package
+			// chunks, and measurement on production showed 95% of those builds to be
+			// exact repeats (126 distinct package@version across 2,543 build slots in
+			// the 40 most recent dep sets; median 78% set overlap). Caching chunks
+			// turns "add one dependency" from a full rebuild into one chunk.
+			//
+			// The key must capture everything that changes a chunk's bytes. Measured
+			// (see chunk-experiment): that is package@version, platform, nv, the
+			// subpaths folded in, and the EXTERNALS DECISION -- a package inlines a
+			// dependency that isn't a direct dep of the requested set, and
+			// externalizes it when it is. Rather than change that rule (which would
+			// break nested version conflicts: P declaring lodash@3 while the app
+			// pins lodash@4 must keep inlining its own copy), the key includes the
+			// batch-set names this package could externalize. Adding a dependency
+			// nothing declares -- the common case -- leaves every key untouched.
+			const chunkCacheDir = path.join(CACHE_DIR, "chunks");
+			const chunkStats = { hit: 0, built: 0 };
+			const declaredCache = new Map<string, string[]>();
+			const declaredDepsOf = (pkgName: string): string[] => {
+				const cached = declaredCache.get(pkgName);
+				if (cached) return cached;
+				let deps: string[] = [];
+				const info = meta(pkgName);
+				// null: no package.json at that path (a subpath, or not hoisted)
+				if (info) deps = Object.keys({ ...info.dependencies, ...info.peerDependencies }).sort();
+				declaredCache.set(pkgName, deps);
+				return deps;
+			};
+			// The worklets babel plugin generates factories the app's worklets RUNTIME
+			// evaluates and version-checks, so a chunk workletized against 0.10 is not
+			// reusable by an app on a different version. Only packages that can carry
+			// worklets take it into their key (everything else keeps sharing chunks
+			// across apps regardless of what reanimated version each pins), and only
+			// on native -- the pass does not run on web, so web keys stay as they are.
+			const workletsVersion = platform === "web" ? null : workletsRuntimeVersionFrom(meta);
+			const chunkKeyFor = (pkgName: string, version: string, subs: string[]): string => {
+				// Only batch members this package's code can reach affect its externals,
+				// so the key stays stable when unrelated deps come and go. That is the
+				// whole dependency closure (an inlined dependency's imports count too),
+				// and a subpath's base package (chunk-externals.ts).
+				const declared = declaredDepsOf(pkgName);
+				const relevant = relevantExternals(pkgName, batchSet, declaredDepsOf);
+				const input = JSON.stringify({
+					pkg: pkgName,
+					version,
+					platform,
+					nv: NATIVE_DEPS_VERSION,
+					subs: [...subs].sort(),
+					externals: relevant,
+					...(workletsVersion && mayWorkletize(pkgName, declared) ? { worklets: workletsVersion } : {}),
 				});
-
-				// If the combined build fails, fall back to base-only so the base
-				// package still works (subpaths then resolve via /pkg fetches).
-				let emitStubs = subs.length > 0;
+				return crypto.createHash("sha256").update(input).digest("hex").slice(0, 24);
+			};
+			const readChunk = (key: string): string | null => {
+				if (process.env.ESM_NO_CHUNK_CACHE || bypassChunkCache) return null;
 				try {
-					await runBuild();
-				} catch (combinedErr: unknown) {
-					if (subs.length === 0) throw combinedErr;
-					const m = combinedErr instanceof Error ? combinedErr.message : String(combinedErr);
-					console.warn(`[bundle-deps] combined build for ${pkgName} (+${subs.length} subpath(s)) failed, retrying base-only: ${m.slice(0, 160)}`);
-					writeEntry(false);
-					emitStubs = false;
-					await runBuild();
+					return fs.readFileSync(path.join(chunkCacheDir, `${key}.js`), "utf8");
+				} catch {
+					return null;
 				}
+			};
+			const writeChunk = (key: string, body: string): void => {
+				if (process.env.ESM_NO_CHUNK_CACHE || bypassChunkCache) return;
+				try {
+					fs.mkdirSync(chunkCacheDir, { recursive: true });
+					fs.writeFileSync(path.join(chunkCacheDir, `${key}.js`), body);
+				} catch {
+					/* cache write failure is non-fatal */
+				}
+			};
+			const knownFailures = failureCache(chunkCacheDir, !process.env.ESM_NO_CHUNK_CACHE && !bypassChunkCache);
 
-				if (platform !== "web") harvestFontAssets(tmpDir);
-				const bundled = normalizeBuildPaths(
-					await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
-					tmpDir
-				);
-				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
-				const chunkBody = `// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`;
-				chunks.push(chunkBody);
-				chunkStats.built++;
-				// emitStubs false means the combined build fell back to base-only,
-				// whose bytes don't match what this key promises -- don't cache it.
-				if (emitStubs || subs.length === 0) writeChunk(chunkKey, chunkBody);
-
-				// Emit a tiny stub chunk per combined subpath. It forces the base
-				// chunk to evaluate (populating the registry) then returns the
-				// subpath's exports — backed by the base's shared internals.
-				if (emitStubs) {
-					for (const sub of subs) {
-						const stub = `module.exports = (require(${JSON.stringify(pkgName)}), (globalThis.__rnSubpaths || {})[${JSON.stringify(sub)}]);`;
-						chunks.push(`// @dep-start ${sub}\n${stub}\n// @dep-end ${sub}`);
-						manifest[sub] = info.version;
-						emittedSubpaths.add(sub);
+			for (const [pkgName, info] of allPackages) {
+				// Build-time-only tooling (tailwindcss/postcss/...) is never required
+				// at client runtime and cannot bundle for a browser/Hermes target;
+				// stub it directly instead of paying an esbuild attempt that is
+				// guaranteed to fail into the same stub below. Same end state, no spew.
+				if (CLIENT_EXCLUDED_BUILD_TOOLS.has(pkgName)) {
+					chunks.push(`// @dep-start ${pkgName}\n// build-time tooling, stubbed on client\nmodule.exports = {};\n// @dep-end ${pkgName}`);
+					continue;
+				}
+				const subs = sharedSubpathsByBase.get(pkgName) ?? [];
+				// Cached chunk for this exact (package, version, platform, nv, subpaths,
+				// externals) combination? Then skip esbuild entirely.
+				const chunkKey = chunkKeyFor(pkgName, info.version, subs);
+				const cachedChunk = readChunk(chunkKey);
+				if (cachedChunk !== null) {
+					chunks.push(cachedChunk);
+					chunkStats.hit++;
+					if (subs.length > 0) {
+						for (const sub of subs) {
+							const stub = `module.exports = (require(${JSON.stringify(pkgName)}), (globalThis.__rnSubpaths || {})[${JSON.stringify(sub)}]);`;
+							chunks.push(`// @dep-start ${sub}\n${stub}\n// @dep-end ${sub}`);
+							manifest[sub] = info.version;
+							emittedSubpaths.add(sub);
+						}
 					}
+					continue;
 				}
-			} catch (err: unknown) {
-				const msg = err instanceof Error ? err.message : String(err);
-				errors.push(`${pkgName}: ${msg}`);
-				console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 2000));
-				// Add a stub so require() doesn't fail; on native it names the cause when
-				// the app requires it (failed-chunk.ts).
-				chunks.push(failedChunk(pkgName, platform, msg));
-			}
-		}
+				const knownFailure = knownFailures.read(chunkKey);
+				if (knownFailure !== null) {
+					chunks.push(knownFailure);
+					chunkStats.hit++;
+					continue;
+				}
+				if (cacheOnly) throw new NeedsBuild(`${pkgName}@${info.version} is not cached`);
+				try {
+					const entryFile = path.join(tmpDir, `__entry_${pkgName.replace(/\//g, "__")}.js`);
+					const outFile = path.join(tmpDir, `__out_${pkgName.replace(/\//g, "__")}.js`);
+					// Combined entry stashes each subpath's exports on a global registry
+					// so the per-subpath stub (emitted below) reads the SAME instance
+					// the base built. The subpaths (pkgName + "/...") stay internal to
+					// this esbuild run via pkgExternalPlugin, so internals are shared.
+					const writeEntry = (withSubs: boolean) => {
+						if (withSubs && subs.length) {
+							const lines = [
+								`var __rn = (globalThis.__rnSubpaths = globalThis.__rnSubpaths || {});`,
+								...subs.map((s) => `__rn[${JSON.stringify(s)}] = require(${JSON.stringify(s)});`),
+								`module.exports = require(${JSON.stringify(pkgName)});`,
+							];
+							fs.writeFileSync(entryFile, lines.join("\n") + "\n");
+						} else {
+							fs.writeFileSync(entryFile, `module.exports = require("${pkgName}");\n`);
+						}
+					};
+					writeEntry(true);
 
-		phase.pkgLoop = Date.now() - tPkgLoop;
-		const tSubLoop = Date.now();
+					// Create selective external plugin for this package
+					const pkgExternalPlugin: esbuild.Plugin = {
+						name: "batch-external",
+						setup(build) {
+							build.onResolve({ filter: /^[^./]/ }, async (args) => {
+								let dep: string;
+								if (args.path.startsWith("@")) {
+									const parts = args.path.split("/");
+									dep = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
+								} else {
+									dep = args.path.split("/")[0];
+								}
 
-		// Now scan all chunks for subpath requires that need separate entries
-		const allCode = chunks.join("\n");
-		const subpathRequires = new Set<string>();
-		const requireRe = /require\s*\(\s*["']([^"']+\/[^"']+)["']\s*\)/g;
-		let m: RegExpExecArray | null;
-		while ((m = requireRe.exec(allCode)) !== null) {
-			const req = m[1];
-			// Only handle subpath of packages in our batch (e.g. react-dom/client)
-			let basePkg: string;
-			if (req.startsWith("@")) {
-				const parts = req.split("/");
-				basePkg = parts.slice(0, 2).join("/");
-			} else {
-				basePkg = req.split("/")[0];
-			}
-			if (batchSet.has(basePkg) && req !== basePkg && !allPackages.has(req) && !emittedSubpaths.has(req)) {
-				subpathRequires.add(req);
-			}
-		}
+								// Don't externalize from self (handles both base package and subpath entries)
+								if (dep === pkgName) return null;
+								if (args.path === pkgName || args.path.startsWith(pkgName + "/")) return null;
 
-		// Bundle subpath variants. Same caching as the package loop: these are
-		// independently-built chunks too, and they dominated warm requests
-		// (measured 38s of a 42s request once package chunks were cached).
-		for (const subpath of subpathRequires) {
-			const subBase = subpath.startsWith("@")
-				? subpath.split("/").slice(0, 2).join("/")
-				: subpath.split("/")[0];
-			const subVersion = allPackages.get(subBase)?.version ?? "unknown";
-			const subChunkKey = chunkKeyFor(subpath, subVersion, []);
-			const cachedSub = readChunk(subChunkKey);
-			if (cachedSub !== null) {
-				chunks.push(cachedSub);
-				chunkStats.hit++;
-				continue;
-			}
-			try {
-				const safeName = subpath.replace(/\//g, "__");
-				const entryFile = path.join(tmpDir, `__entry_${safeName}.js`);
-				const outFile = path.join(tmpDir, `__out_${safeName}.js`);
-				fs.writeFileSync(entryFile, `module.exports = require("${subpath}");\n`);
+								// Only externalize other direct deps in the batch.
+								// Transitive deps are inlined into their consumers.
+								if (batchSet.has(dep)) {
+									return { path: args.path, external: true };
+								}
 
+								// For RN packages, externalize @react-native/* and @expo/* if unresolvable
+								if (info.isRN && (dep.startsWith("@react-native/") || dep.startsWith("@expo/"))) {
+									try {
+										require.resolve(args.path, { paths: [args.resolveDir] });
+										return null;
+									} catch {
+										return { path: args.path, external: true };
+									}
+								}
+
+								// NATIVE Metro leniency: an unresolvable bare import (usually an
+								// optional peer like react-native-screens when the app forgot to
+								// declare it) must not fail the WHOLE chunk. Externalize it -- the
+								// client fetches it as its own module at runtime.
+								if (platform !== "web") {
+									try {
+										require.resolve(args.path, { paths: [args.resolveDir] });
+										return null;
+									} catch {
+										console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (native leniency)`);
+										return { path: args.path, external: true };
+									}
+								}
+
+								// Web: only an import that would fail the chunk (see web-leniency.ts).
+								if (await unresolvableOnWeb(build, args)) {
+									console.warn(`[bundle-deps] ${pkgName}: externalizing unresolvable "${args.path}" (web leniency)`);
+									return { path: args.path, external: true };
+								}
+
+								return null;
+							});
+						},
+					};
+
+					const runBuild = () => buildTolerant({
+						entryPoints: [entryFile],
+						bundle: true,
+						format: "iife",
+						globalName: "__module",
+						outfile: outFile,
+						...esbuildPlatformSettings(platform),
+						...(info.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
+						plugins: [
+							makePackageMapsPlugin(platform),
+							...(info.isRN ? rnPluginStack(platform) : []),
+							pkgExternalPlugin,
+						],
+						logLevel: "silent",
+					});
+
+					// If the combined build fails, fall back to base-only so the base
+					// package still works (subpaths then resolve via /pkg fetches).
+					let emitStubs = subs.length > 0;
+					try {
+						await runBuild();
+					} catch (combinedErr: unknown) {
+						if (subs.length === 0) throw combinedErr;
+						const m = combinedErr instanceof Error ? combinedErr.message : String(combinedErr);
+						console.warn(`[bundle-deps] combined build for ${pkgName} (+${subs.length} subpath(s)) failed, retrying base-only: ${m.slice(0, 160)}`);
+						writeEntry(false);
+						emitStubs = false;
+						await runBuild();
+					}
+
+					if (platform !== "web") harvestFontAssets(tmpDir);
+					const bundled = normalizeBuildPaths(
+						await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
+						tmpDir
+					);
+					const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
+					const chunkBody = `// @dep-start ${pkgName}\n${wrapped}\n// @dep-end ${pkgName}`;
+					chunks.push(chunkBody);
+					chunkStats.built++;
+					// emitStubs false means the combined build fell back to base-only,
+					// whose bytes don't match what this key promises -- don't cache it.
+					if (emitStubs || subs.length === 0) writeChunk(chunkKey, chunkBody);
+
+					// Emit a tiny stub chunk per combined subpath. It forces the base
+					// chunk to evaluate (populating the registry) then returns the
+					// subpath's exports — backed by the base's shared internals.
+					if (emitStubs) {
+						for (const sub of subs) {
+							const stub = `module.exports = (require(${JSON.stringify(pkgName)}), (globalThis.__rnSubpaths || {})[${JSON.stringify(sub)}]);`;
+							chunks.push(`// @dep-start ${sub}\n${stub}\n// @dep-end ${sub}`);
+							manifest[sub] = info.version;
+							emittedSubpaths.add(sub);
+						}
+					}
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					errors.push(`${pkgName}: ${msg}`);
+					console.error(`[bundle-deps] Error bundling ${pkgName}:`, msg.slice(0, 2000));
+					// Add a stub so require() doesn't fail; on native it names the cause when
+					// the app requires it (failed-chunk.ts).
+					const stub = failedChunk(pkgName, platform, msg);
+					chunks.push(stub);
+					knownFailures.write(chunkKey, stub, msg);
+				}
+			}
+
+			phase.pkgLoop = Date.now() - tPkgLoop;
+			const tSubLoop = Date.now();
+
+			// Now scan all chunks for subpath requires that need separate entries
+			const allCode = chunks.join("\n");
+			const subpathRequires = new Set<string>();
+			const requireRe = /require\s*\(\s*["']([^"']+\/[^"']+)["']\s*\)/g;
+			let m: RegExpExecArray | null;
+			while ((m = requireRe.exec(allCode)) !== null) {
+				const req = m[1];
+				// Only handle subpath of packages in our batch (e.g. react-dom/client)
 				let basePkg: string;
-				if (subpath.startsWith("@")) {
-					const parts = subpath.split("/");
+				if (req.startsWith("@")) {
+					const parts = req.split("/");
 					basePkg = parts.slice(0, 2).join("/");
 				} else {
-					basePkg = subpath.split("/")[0];
+					basePkg = req.split("/")[0];
 				}
-				const info = allPackages.get(basePkg);
+				if (batchSet.has(basePkg) && req !== basePkg && !allPackages.has(req) && !emittedSubpaths.has(req)) {
+					subpathRequires.add(req);
+				}
+			}
 
-				const subExternalPlugin: esbuild.Plugin = {
-					name: "batch-sub-external",
-					setup(build) {
-						build.onResolve({ filter: /^[^./]/ }, (args) => {
-							// Don't externalize the subpath we're bundling
-							if (args.path === subpath || args.path.startsWith(subpath + "/")) return null;
+			// Bundle subpath variants. Same caching as the package loop: these are
+			// independently-built chunks too, and they dominated warm requests
+			// (measured 38s of a 42s request once package chunks were cached).
+			for (const subpath of subpathRequires) {
+				const subBase = subpath.startsWith("@")
+					? subpath.split("/").slice(0, 2).join("/")
+					: subpath.split("/")[0];
+				const subVersion = allPackages.get(subBase)?.version ?? "unknown";
+				const subChunkKey = chunkKeyFor(subpath, subVersion, []);
+				const cachedSub = readChunk(subChunkKey);
+				if (cachedSub !== null) {
+					chunks.push(cachedSub);
+					chunkStats.hit++;
+					continue;
+				}
+				const knownSubFailure = knownFailures.read(subChunkKey);
+				if (knownSubFailure !== null) {
+					chunks.push(knownSubFailure);
+					chunkStats.hit++;
+					continue;
+				}
+				if (cacheOnly) throw new NeedsBuild(`${subpath}@${subVersion} is not cached`);
+				try {
+					const safeName = subpath.replace(/\//g, "__");
+					const entryFile = path.join(tmpDir, `__entry_${safeName}.js`);
+					const outFile = path.join(tmpDir, `__out_${safeName}.js`);
+					fs.writeFileSync(entryFile, `module.exports = require("${subpath}");\n`);
 
-							let dep: string;
-							if (args.path.startsWith("@")) {
-								const parts = args.path.split("/");
-								dep = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
-							} else {
-								dep = args.path.split("/")[0];
-							}
+					let basePkg: string;
+					if (subpath.startsWith("@")) {
+						const parts = subpath.split("/");
+						basePkg = parts.slice(0, 2).join("/");
+					} else {
+						basePkg = subpath.split("/")[0];
+					}
+					const info = allPackages.get(basePkg);
 
-							// Don't externalize the base package of this subpath
-							if (dep === basePkg) return null;
+					const subExternalPlugin: esbuild.Plugin = {
+						name: "batch-sub-external",
+						setup(build) {
+							build.onResolve({ filter: /^[^./]/ }, (args) => {
+								// Don't externalize the subpath we're bundling
+								if (args.path === subpath || args.path.startsWith(subpath + "/")) return null;
 
-							if (batchSet.has(dep)) {
-								return { path: args.path, external: true };
-							}
-							return null;
-						});
-					},
-				};
+								let dep: string;
+								if (args.path.startsWith("@")) {
+									const parts = args.path.split("/");
+									dep = parts.length >= 2 ? parts.slice(0, 2).join("/") : args.path;
+								} else {
+									dep = args.path.split("/")[0];
+								}
 
-				await buildTolerant({
-					entryPoints: [entryFile],
-					bundle: true,
-					format: "iife",
-					globalName: "__module",
-					outfile: outFile,
-					...esbuildPlatformSettings(platform),
-					...(info?.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
-					plugins: [
-						makePackageMapsPlugin(platform),
-						...(info?.isRN ? rnPluginStack(platform) : []),
-						subExternalPlugin,
-					],
-					logLevel: "silent",
-				});
+								// Don't externalize the base package of this subpath
+								if (dep === basePkg) return null;
 
-				if (platform !== "web") harvestFontAssets(tmpDir);
-				const bundled = normalizeBuildPaths(
-					await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
-					tmpDir
-				);
-				const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
-				const subChunkBody = `// @dep-start ${subpath}\n${wrapped}\n// @dep-end ${subpath}`;
-				chunks.push(subChunkBody);
-				chunkStats.built++;
-				writeChunk(subChunkKey, subChunkBody);
-			} catch (err: unknown) {
+								if (batchSet.has(dep)) {
+									return { path: args.path, external: true };
+								}
+								return null;
+							});
+						},
+					};
+
+					await buildTolerant({
+						entryPoints: [entryFile],
+						bundle: true,
+						format: "iife",
+						globalName: "__module",
+						outfile: outFile,
+						...esbuildPlatformSettings(platform),
+						...(info?.isRN && rnEsbuildSettings(platform, assetBaseUrl)),
+						plugins: [
+							makePackageMapsPlugin(platform),
+							...(info?.isRN ? rnPluginStack(platform) : []),
+							subExternalPlugin,
+						],
+						logLevel: "silent",
+					});
+
+					if (platform !== "web") harvestFontAssets(tmpDir);
+					const bundled = normalizeBuildPaths(
+						await lowerClassesForHermes(fs.readFileSync(outFile, "utf-8"), platform),
+						tmpDir
+					);
+					const wrapped = `${bundled}\nif (typeof __module !== "undefined") { module.exports = __module; }`;
+					const subChunkBody = `// @dep-start ${subpath}\n${wrapped}\n// @dep-end ${subpath}`;
+					chunks.push(subChunkBody);
+					chunkStats.built++;
+					writeChunk(subChunkKey, subChunkBody);
+				} catch (err: unknown) {
+					const msg = err instanceof Error ? err.message : String(err);
+					const stub =
+						platform === "web"
+							? `// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`
+							: failedChunk(subpath, platform, msg);
+					chunks.push(stub);
+					knownFailures.write(subChunkKey, stub, msg);
+				}
+			}
+
+			phase.subpathLoop = Date.now() - tSubLoop;
+			const tAssemble = Date.now();
+
+			// Emit stubs for packages dropped during install (unsatisfiable version
+			// ranges). Runtime `require("<name>")` returns {} instead of crashing.
+			for (const name of droppedPackages) {
 				chunks.push(
-					platform === "web"
-						? `// @dep-start ${subpath}\nmodule.exports = {};\n// @dep-end ${subpath}`
-						: failedChunk(subpath, platform, err instanceof Error ? err.message : String(err))
+					failedChunk(name, platform, "install spec unsatisfiable", "Dropped")
 				);
+				manifest[name] = "stub";
+			}
+
+			// Assemble final bundle
+			const header = `// @dep-bundle ${depHash}\n// @dep-manifest ${JSON.stringify(manifest)}\n// @dep-count ${chunks.length}\n`;
+			const bundle = header + chunks.join("\n") + "\n";
+			phase.assemble = Date.now() - tAssemble;
+			return { bundle, count: chunks.length, chunkStats, phase };
+		};
+
+		// When every chunk is already cached the install only produces the
+		// metadata their keys are computed from, and a lockfile resolution
+		// gives the same tree in ~100ms (dep-meta.ts). Anything that would
+		// need building falls through to the install, exactly as before.
+		let assembled: Awaited<ReturnType<typeof assemble>> | null = null;
+		let installNote = "";
+		if (!process.env.ESM_NO_CHUNK_CACHE && !bypassChunkCache) {
+			const lockMeta = await resolveWithBunLockfile(
+				tmpDir,
+				Object.entries(installDeps).map(([n, v]) => `${n}@${v}`),
+				LOCKFILE_RESOLVE_TIMEOUT_MS
+			);
+			if (lockMeta) {
+				try {
+					assembled = await assemble(lockMeta, true);
+					installNote = ", install skipped";
+				} catch (err) {
+					if (!(err instanceof NeedsBuild)) throw err;
+					console.log(`[bundle-deps] ${err.message}; installing (hash: ${depHash})`);
+				}
 			}
 		}
-
-		phase.subpathLoop = Date.now() - tSubLoop;
-		const tAssemble = Date.now();
-
-		// Emit stubs for packages dropped during install (unsatisfiable version
-		// ranges). Runtime `require("<name>")` returns {} instead of crashing.
-		for (const name of droppedPackages) {
-			chunks.push(
-				failedChunk(name, platform, "install spec unsatisfiable", "Dropped")
-			);
-			manifest[name] = "stub";
+		if (!assembled) {
+			await runInstall();
+			assembled = await assemble(nodeModulesMeta(tmpDir), false);
 		}
-
-		// Assemble final bundle
-		const header = `// @dep-bundle ${depHash}\n// @dep-manifest ${JSON.stringify(manifest)}\n// @dep-count ${chunks.length}\n`;
-		const bundle = header + chunks.join("\n") + "\n";
+		const { bundle, count, chunkStats, phase } = assembled;
 
 		// Cache
 		fs.writeFileSync(cacheFile, bundle);
-		phase.assemble = Date.now() - tAssemble;
-		console.log(`[bundle-deps] Cached ${chunks.length} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB, total: ${Date.now() - buildStart}ms, chunks: ${chunkStats.hit} reused / ${chunkStats.built} built, phases: pkg=${phase.pkgLoop}ms subpath=${phase.subpathLoop}ms assemble=${phase.assemble}ms)`);
+		console.log(`[bundle-deps] Cached ${count} packages (hash: ${depHash}, size: ${(bundle.length / 1024).toFixed(0)}KB, total: ${Date.now() - buildStart}ms, chunks: ${chunkStats.hit} reused / ${chunkStats.built} built, phases: pkg=${phase.pkgLoop}ms subpath=${phase.subpathLoop}ms assemble=${phase.assemble}ms${installNote})`);
 
 		res.header("Cache-Control", "public, max-age=31536000, immutable");
 		res.type("application/javascript").send(bundle);

@@ -45,6 +45,12 @@ export interface StartOptions {
   expoGoAnonymous?: boolean;
 }
 
+// A later pre-warm platform starts once no request has been in flight for this
+// long (the phone runs the bundle it just got, then asks for its assets), or
+// after the cap, so a busy server still gets every platform warmed.
+const PREWARM_QUIET_MS = 3_000;
+const PREWARM_MAX_WAIT_MS = 60_000;
+
 export const DEFAULT_PACKAGE_SERVER = "https://esm.reactnative.run";
 export const LOCAL_PACKAGE_SERVER = "http://localhost:5200";
 
@@ -258,12 +264,23 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // stop the server (the device request will retry the build).
   if (prewarmList.length > 0) {
     log.info(`Pre-warming ${prewarmList.join(", ")} bundle(s) ...`);
-    for (const platform of prewarmList) {
-      // getPlatformSession already swallows the rejection and records it; the
-      // catch here is belt-and-braces against an unhandled rejection killing
-      // the process.
-      void Promise.resolve(ctx.getPlatformSession?.(platform)).catch(() => {});
-    }
+    // One after another, in the order given: the builds share one JS thread,
+    // so running them together only delays the first. A device that asks for
+    // a later platform meanwhile still starts its build on demand.
+    void (async () => {
+      for (const [i, platform] of prewarmList.entries()) {
+        // A later platform waits for the server to go quiet: a build fed from
+        // the package cache holds the JS thread for seconds at a stretch, and
+        // the device that just scanned is still downloading the first bundle
+        // and then its assets. On the test pad the iOS bundle, ready at ~15s,
+        // reached the phone at ~28s, after the Android pre-warm build.
+        if (i > 0) await ctx.whenIdle?.(PREWARM_QUIET_MS, PREWARM_MAX_WAIT_MS);
+        // getPlatformSession already swallows the rejection and records it; the
+        // catch here is belt-and-braces against an unhandled rejection killing
+        // the process.
+        await Promise.resolve(ctx.getPlatformSession?.(platform)).catch(() => {});
+      }
+    })();
   }
 
   const watcher = watchProject({

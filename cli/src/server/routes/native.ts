@@ -8,6 +8,7 @@ import { sendText, sendJson } from "../router.js";
 import type { ServerContext } from "../server.js";
 import { CLIENT_TOKEN_PARAM, clientTokenFromUrl, newClientToken } from "../clients.js";
 import { acceptsMultipart, startMultipart, type MultipartResponse } from "../multipart.js";
+import { acceptsGzip, gzipCached } from "../compress.js";
 
 /** The pending launch-asset key's fallback when the context names no generation: one per process. */
 const PROCESS_GENERATION = randomUUID().slice(0, 8);
@@ -164,11 +165,31 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
     if (token) {
       ctx.clients?.record(token, { platform, epoch: session.epoch, version: session.bundleVersion });
     }
-    reply(200, {
+    const bundleHeaders = {
       "Content-Type": "application/javascript",
       "Cache-Control": "no-cache",
       "Access-Control-Allow-Origin": "*",
       "X-Metro-Files-Changed-Count": "0",
+    };
+    // Compressed when the client takes it. Not while streaming: the last
+    // multipart part can't carry its own encoding.
+    if (!streaming && acceptsGzip(req.headers["accept-encoding"])) {
+      const bundle = session.getBundle();
+      const gz = await gzipCached(platform, bundle).catch(() => null);
+      if (gz && !res.writableEnded) {
+        res.writeHead(200, {
+          ...bundleHeaders,
+          "Content-Encoding": "gzip",
+          Vary: "Accept-Encoding",
+          // The compressed length: what actually crosses the wire.
+          "Content-Length": gz.length,
+        });
+        res.end(gz);
+        return;
+      }
+    }
+    reply(200, {
+      ...bundleHeaders,
       // Content-Length (not chunked): Expo Go's loading screen computes its
       // download percentage from the total size, so without this the device
       // just says "Downloading..." with no progress. Metro sends it too.

@@ -28,6 +28,13 @@ import { createHash } from "node:crypto";
 const CACHE_DIR = process.env.RNRUN_PKG_CACHE_DIR || path.join(os.homedir(), ".rnrun", "pkg-cache");
 // x-build-status: the dependency-bundle poll keeps waiting while the server says "building"
 // (browser-metro incremental-bundler.ts); dropping it here cut native cold builds short.
+// RNRUN_SHARED_CACHE_DIR: a read-only cache one host fills for every project on
+// it (orchd mounts it into each container; `rnrun cache-fill` fills it). A new
+// project then reads the dependency bundles another project already fetched
+// instead of downloading ~175MB and writing it to its own disk -- on the test
+// pad that was ~3s per scan, and 10-45s whenever the host disk stalled. Only
+// immutable 200s are read from it, and nothing here ever writes to it.
+const SHARED_DIR = process.env.RNRUN_SHARED_CACHE_DIR ? path.join(process.env.RNRUN_SHARED_CACHE_DIR, "pkg") : null;
 const KEPT_HEADERS = ["content-type", "x-externals", "x-resolved-version", "x-build-status"];
 const TTL_VERSIONLESS_MS = 24 * 60 * 60 * 1000;
 const TTL_NEGATIVE_MS = 60 * 60 * 1000;
@@ -62,9 +69,9 @@ interface Meta {
   cacheClass: CacheClass;
 }
 
-function readEntry(key: string): { meta: Meta; body: Buffer } | null {
-  const bodyFile = path.join(CACHE_DIR, key + ".body");
-  const metaFile = path.join(CACHE_DIR, key + ".meta.json");
+function readEntry(key: string, dir = CACHE_DIR): { meta: Meta; body: Buffer } | null {
+  const bodyFile = path.join(dir, key + ".body");
+  const metaFile = path.join(dir, key + ".meta.json");
   try {
     if (!fs.existsSync(bodyFile) || !fs.existsSync(metaFile)) return null;
     const meta: Meta = JSON.parse(fs.readFileSync(metaFile, "utf8"));
@@ -75,6 +82,13 @@ function readEntry(key: string): { meta: Meta; body: Buffer } | null {
   } catch {
     return null;
   }
+}
+
+/** An immutable 200 from the host's shared cache, or null. */
+function readShared(key: string): { meta: Meta; body: Buffer } | null {
+  if (!SHARED_DIR) return null;
+  const entry = readEntry(key, SHARED_DIR);
+  return entry && entry.meta.status === 200 && entry.meta.cacheClass === "immutable" ? entry : null;
 }
 
 function writeEntry(key: string, meta: Meta, body: Buffer): void {
@@ -95,6 +109,13 @@ function keptHeaders(res: Response): Record<string, string> {
   }
   return headers;
 }
+
+// A disk hit resolves without touching I/O, so a build fed entirely from this
+// cache (a woken project whose code changed, or every package already on disk)
+// ran start to finish without the event loop turning once: on the test pad the
+// Expo Go manifest request waited out both pre-warm builds, 27-32s. One
+// macrotask turn per hit lets pending requests in between build stages.
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 export interface CachedFetchStats {
   hits: number;
@@ -119,6 +140,7 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
       const cached = readEntry(key);
       if (cached && cached.meta.status === 200) {
         if (stats) stats.hits++;
+        await turn();
         if (debug) console.warn(`[pkg-cache] HIT (nativewind) ${url}`);
         return new Response(cached.body, { status: 200, headers: cached.meta.headers });
       }
@@ -145,9 +167,10 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
       if (hash && !process.env.RNRUN_NO_PKG_CACHE) {
         const getUrl = url.replace(/\/bundle-deps$/, `/bundle-deps/${hash}`);
         const key = fileKey(getUrl);
-        const cached = readEntry(key);
+        const cached = readEntry(key) ?? readShared(key);
         if (cached && cached.meta.status === 200) {
           if (stats) stats.hits++;
+          await turn();
           if (debug) console.warn(`[pkg-cache] HIT (post) ${getUrl}`);
           return new Response(cached.body, { status: 200, headers: cached.meta.headers });
         }
@@ -171,9 +194,10 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
     }
 
     const key = fileKey(url);
-    const cached = readEntry(key);
+    const cached = readEntry(key) ?? (cacheClass === "immutable" ? readShared(key) : null);
     if (cached) {
       if (stats) stats.hits++;
+      await turn();
       if (debug) console.warn(`[pkg-cache] HIT (${cached.meta.status}) ${url}`);
       return new Response(cached.body, { status: cached.meta.status, headers: cached.meta.headers });
     }
@@ -189,4 +213,94 @@ export function createCachedFetch(stats?: CachedFetchStats): typeof fetch {
     if (stats) stats.misses++;
     return new Response(buf, { status: res.status, headers: keptHeaders(res) });
   }) as typeof fetch;
+}
+
+function readMeta(dir: string, key: string): Meta | null {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, key + ".meta.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export interface FillResult {
+  stored: number;
+  present: number;
+  skipped: number;
+  failed: number;
+  /** Not stored this run because `maxNew` was reached. */
+  deferred: number;
+  pruned: number;
+}
+
+/**
+ * Fill a shared cache directory (what RNRUN_SHARED_CACHE_DIR points at) with
+ * package-server responses, in the same layout every project's own cache uses.
+ * Run by the host, never by a project: tenants run untrusted code, so the
+ * shared cache only ever holds what this fetched from the package server
+ * itself. Only immutable URLs are accepted, each file lands by rename so a
+ * project reading it never sees half of one, and entries older than
+ * `pruneDays` that are no longer in `urls` are removed. `maxNew` caps how many
+ * entries one run stores (list the most wanted first): a dependency bundle is
+ * 30-60MB, and a burst of them stalls a host disk that is serving projects.
+ */
+export async function fillSharedCache(
+  dir: string,
+  urls: string[],
+  options: { pruneDays?: number; maxNew?: number; log?: (msg: string) => void } = {}
+): Promise<FillResult> {
+  const log = options.log ?? (() => {});
+  const pkgDir = path.join(dir, "pkg");
+  fs.mkdirSync(pkgDir, { recursive: true });
+  const result: FillResult = { stored: 0, present: 0, skipped: 0, failed: 0, deferred: 0, pruned: 0 };
+  const wanted = new Set<string>();
+  for (const url of urls) {
+    if (classify(url) !== "immutable") {
+      result.skipped++;
+      continue;
+    }
+    const key = fileKey(url);
+    wanted.add(key);
+    if (fs.existsSync(path.join(pkgDir, key + ".body")) && readMeta(pkgDir, key)?.status === 200) {
+      result.present++;
+      continue;
+    }
+    if (options.maxNew !== undefined && result.stored >= options.maxNew) {
+      result.deferred++;
+      continue;
+    }
+    try {
+      const res = await fetch(url);
+      const body = Buffer.from(await res.arrayBuffer());
+      if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+      const meta: Meta = { url, status: 200, headers: keptHeaders(res), savedAt: Date.now(), cacheClass: "immutable" };
+      // Body first: readEntry wants both files, so the entry appears only
+      // once the meta lands.
+      for (const [name, data] of [[key + ".body", body], [key + ".meta.json", JSON.stringify(meta)]] as const) {
+        const tmp = path.join(pkgDir, `.${name}.${process.pid}.tmp`);
+        fs.writeFileSync(tmp, data);
+        fs.renameSync(tmp, path.join(pkgDir, name));
+      }
+      result.stored++;
+      log(`stored ${url} (${body.length}B)`);
+    } catch (err) {
+      result.failed++;
+      log(`failed ${url}: ${(err as Error).message}`);
+    }
+  }
+  if (options.pruneDays !== undefined) {
+    const cutoff = Date.now() - options.pruneDays * 24 * 60 * 60 * 1000;
+    for (const file of fs.readdirSync(pkgDir)) {
+      if (!file.endsWith(".meta.json")) continue;
+      const key = file.slice(0, -".meta.json".length);
+      if (wanted.has(key)) continue;
+      const savedAt = readMeta(pkgDir, key)?.savedAt ?? 0;
+      if (savedAt > cutoff) continue;
+      // Meta first, so a reader never finds a meta without its body.
+      fs.rmSync(path.join(pkgDir, file), { force: true });
+      fs.rmSync(path.join(pkgDir, key + ".body"), { force: true });
+      result.pruned++;
+    }
+  }
+  return result;
 }
