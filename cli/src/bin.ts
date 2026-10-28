@@ -13,7 +13,7 @@ const START_FLAGS: FlagSpec[] = [
   {
     name: "--prewarm",
     type: "string",
-    description: 'Build native bundles at startup instead of on first device request, e.g. "ios" or "ios,android" (env: RNRUN_PREWARM)',
+    description: 'Build native bundles at startup instead of on first device request, e.g. "ios" or "ios,android"; "android:seen" only once a device has asked this project for Android (env: RNRUN_PREWARM)',
   },
   {
     name: "--expo-go-anonymous",

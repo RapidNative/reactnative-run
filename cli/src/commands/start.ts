@@ -14,6 +14,7 @@ import { printStartupBanner, attachInteractiveKeys } from "../ui/interactive.js"
 import { createCachedFetch } from "../project/pkg-cache.js";
 import { warnIfEphemeralCache, bundleCacheDir, BUNDLE_CACHE_ENV } from "../bundler/bundle-cache.js";
 import { toolVersions } from "../project/tool-versions.js";
+import { seenPlatforms, rememberPlatform, prewarmPlan } from "../project/platform-history.js";
 
 export interface StartOptions {
   dir: string;
@@ -174,6 +175,32 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // reason and let the route report it.
   const nativeSessionErrors = new Map<string, string>();
 
+  const platformSession = async (platform: string): Promise<BundlerSession | null> => {
+    if (platform !== "ios" && platform !== "android") return null;
+    if (!nativeSessions.has(platform)) {
+      nativeSessions.set(
+        platform,
+        makeNativeSession(platform).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          nativeSessionErrors.set(platform, msg);
+          // Drop the rejected promise so a retry after a fix can succeed
+          // without restarting the server.
+          nativeSessions.delete(platform);
+          readyNative.delete(platform);
+          throw err;
+        })
+      );
+    }
+    try {
+      return await nativeSessions.get(platform)!;
+    } catch {
+      return null;
+    }
+  };
+  // Platforms a device has asked for, for `--prewarm <platform>:seen`. Only
+  // requests count; the pre-warm itself goes through platformSession.
+  const platformsSeen = seenPlatforms(rootDir);
+
   const ctx: ServerContext = {
     session,
     nativeGeneration: randomUUID().slice(0, 8),
@@ -183,27 +210,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
     port: options.port,
     expoGoAnonymous: options.expoGoAnonymous ?? false,
     log: log.info,
-    getPlatformSession: async (platform: string) => {
-      if (platform !== "ios" && platform !== "android") return null;
-      if (!nativeSessions.has(platform)) {
-        nativeSessions.set(
-          platform,
-          makeNativeSession(platform).catch((err: unknown) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            nativeSessionErrors.set(platform, msg);
-            // Drop the rejected promise so a retry after a fix can succeed
-            // without restarting the server.
-            nativeSessions.delete(platform);
-            readyNative.delete(platform);
-            throw err;
-          })
-        );
-      }
-      try {
-        return await nativeSessions.get(platform)!;
-      } catch {
-        return null;
-      }
+    getPlatformSession: (platform: string) => {
+      if (platform === "ios" || platform === "android") rememberPlatform(rootDir, platformsSeen, platform);
+      return platformSession(platform);
     },
     getPlatformError: (platform: string) => nativeSessionErrors.get(platform) ?? null,
     peekPlatformSession: (platform: string) => readyNative.get(platform) ?? null,
@@ -226,12 +235,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // otherwise build a web bundle nobody asked for before starting the iOS one
   // (measured on the orchd fleet as a full web build ahead of every scan).
   // The web routes build on first browser request instead.
-  const prewarmRaw = (options.prewarm ?? "")
-    .split(",")
-    .map((p) => p.trim().toLowerCase())
-    .filter(Boolean);
-  const prewarmList = prewarmRaw.filter((p) => p === "ios" || p === "android");
-  const skipEagerWeb = prewarmList.length > 0 && !prewarmRaw.includes("web");
+  const prewarm = prewarmPlan(options.prewarm, platformsSeen);
+  const prewarmList = prewarm.build;
+  const skipEagerWeb = prewarm.named.length > 0 && !prewarm.web;
 
   if (skipEagerWeb) {
     log.info("Deferring the web bundle until a browser asks (--prewarm names native only)");
@@ -262,6 +268,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
   // cached bundle instead of waiting out a cold build. Fire-and-forget: build
   // errors are already logged by the session and a failed pre-warm must not
   // stop the server (the device request will retry the build).
+  if (prewarm.skipped.length > 0) {
+    log.info(`Not pre-warming ${prewarm.skipped.join(", ")}: no device has asked for it yet`);
+  }
   if (prewarmList.length > 0) {
     log.info(`Pre-warming ${prewarmList.join(", ")} bundle(s) ...`);
     // One after another, in the order given: the builds share one JS thread,
@@ -275,10 +284,10 @@ export async function startCommand(options: StartOptions): Promise<void> {
         // and then its assets. On the test pad the iOS bundle, ready at ~15s,
         // reached the phone at ~28s, after the Android pre-warm build.
         if (i > 0) await ctx.whenIdle?.(PREWARM_QUIET_MS, PREWARM_MAX_WAIT_MS);
-        // getPlatformSession already swallows the rejection and records it; the
+        // platformSession already swallows the rejection and records it; the
         // catch here is belt-and-braces against an unhandled rejection killing
         // the process.
-        await Promise.resolve(ctx.getPlatformSession?.(platform)).catch(() => {});
+        await platformSession(platform).catch(() => {});
       }
     })();
   }
