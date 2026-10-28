@@ -22,7 +22,7 @@ rnrun help
 ```
 
 `start` flags: `--port`, `--host lan|localhost`, `--package-server <url>`,
-`--local-packages`, `--prewarm ios[,android][,web]`, `--quiet`.
+`--local-packages`, `--prewarm ios[,android][,web]` (`android:seen` / `ios:seen` pre-warm a platform only once a device has asked this project for it), `--quiet`.
 
 ## Running in a container / hosted preview
 
@@ -92,6 +92,12 @@ cache is cold). Without a persistent cache, `--prewarm` still helps by building
 during idle rather than on the first scan. The module graph needed for Fast
 Refresh is built lazily on the first edit, so a cache-hit wake that only serves
 bundles to a device never pays for it.
+
+Each pre-warmed platform keeps its build session in memory (around 450MB for
+a typical app). `--prewarm ios,android:seen` pre-warms Android only for
+projects a device has already asked for Android: rnrun records the platforms
+devices request in `platforms-<id>.json` beside the bundle cache, so the
+history lasts as long as the cache does.
 
 ## Cache env reference
 
