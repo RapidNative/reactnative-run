@@ -354,6 +354,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     // sessions are dropped and rebuilt lazily on the next device request.
     // Devices learn from the hub that their bundle's session is gone and
     // reload (on top of the reloadAll below).
+    const livePlatforms = [...readyNative.keys()] as Array<"ios" | "android">;
     for (const off of nativeUnsubs.values()) off();
     nativeUnsubs.clear();
     readyNative.clear();
@@ -367,6 +368,13 @@ export async function startCommand(options: StartOptions): Promise<void> {
       if (e.type === "build-error") log.error(`Build error:\n${e.message}`);
     });
     await fresh.build();
+    // In anonymous mode a device can't fetch a new bundle by reloading, so it
+    // never makes the request that would rebuild its platform; rebuild now.
+    // When the bundle's inputs didn't change that is a cache hit under the
+    // same tag, and the device stays current.
+    if (options.expoGoAnonymous) {
+      for (const platform of livePlatforms) await platformSession(platform);
+    }
     dev.hub.reloadAll();
   }
 

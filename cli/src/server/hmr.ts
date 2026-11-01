@@ -34,9 +34,19 @@ const RELOAD_FLOOR_MS = 5_000;
 
 type Verdict =
   | { kind: "unknown" }
-  | { kind: "current" }
-  | { kind: "catch-up"; update: HmrUpdate; session: BundlerSession; behind: number }
+  | { kind: "current"; session: BundlerSession }
+  | { kind: "catch-up"; update: HmrUpdate; session: BundlerSession; from: number; behind: number }
   | { kind: "reload"; reason: string };
+
+/**
+ * The bundle a patch leaves a device on, and the one it applies to. The
+ * anonymous dev client keeps the first as its own tag and skips a broadcast
+ * patch whose base isn't that tag (it reconnects for a catch-up instead).
+ * Expo Go's HMR client ignores both.
+ */
+function bundleTags(session: BundlerSession, from: number): { rnrunBundle: string; rnrunBase: string | null } {
+  return { rnrunBundle: session.bundleTag, rnrunBase: session.tagFor(from) };
+}
 
 /**
  * WebSocket hub. Four channels:
@@ -53,6 +63,16 @@ type Verdict =
  *                which RN's HMRClient never does, so a stale device can be
  *                told -- individually -- to reload. Broadcast reloads stay on
  *                /message; this channel only ever addresses one device.
+ *
+ * Anonymous mode (the iOS manifest without expoGo.developer, so Expo Go skips
+ * its sign-in gate) changes who applies patches. Expo Go then runs the bundle
+ * as an update: its HMR client still connects to /hot but applies nothing, and
+ * a reload replays the bundle the phone first downloaded rather than fetching
+ * a new one. The dev client does Fast Refresh itself instead: it registers on
+ * /hot with the tag of the bundle it runs (`rnrunBundle`, kept current as
+ * patches land) and opens /__rnrun with `anonymous=1`. Such a device is never
+ * told to reload, which could not bring it up to date; when it can't be
+ * patched it is told it is stale (`rnrun-stale`) and asks the user to reopen.
  * Unknown upgrade paths are accepted and ignored so Hermes-debugger connection
  * attempts don't error-loop.
  */
@@ -69,6 +89,8 @@ export class HmrHub {
   private pendingReload = new Map<string, NodeJS.Timeout>();
   /** When each device was last told to reload (RELOAD_FLOOR_MS). */
   private lastReload = new Map<string, number>();
+  /** Tokens of devices whose dev client applies patches itself (anonymous mode). */
+  private anonymous = new Set<string>();
 
   private unbind: () => void;
   /** Sink for device console logs arriving on /hot (set by the server). */
@@ -89,14 +111,18 @@ export class HmrHub {
 
     this.hot.on("connection", (ws) => {
       ws.on("message", (raw) => {
-        let msg: { type?: string; level?: string; data?: unknown[]; entryPoints?: unknown } = {};
+        let msg: { type?: string; level?: string; data?: unknown[]; entryPoints?: unknown; rnrunBundle?: unknown } = {};
         try {
           msg = JSON.parse(String(raw));
         } catch {
           return;
         }
         if (msg.type === "register-entrypoints") {
-          this.registerHotClient(ws, Array.isArray(msg.entryPoints) ? (msg.entryPoints as unknown[]) : []);
+          this.registerHotClient(
+            ws,
+            Array.isArray(msg.entryPoints) ? (msg.entryPoints as unknown[]) : [],
+            typeof msg.rnrunBundle === "string" ? msg.rnrunBundle : null
+          );
         } else if (msg.type === "log") {
           // RN's HMRClient forwards console.* here in dev.
           this.onDeviceLog?.(formatDeviceLog(msg.level, msg.data));
@@ -120,21 +146,39 @@ export class HmrHub {
 
   /**
    * Where a device stands relative to the session it will be patched from.
-   * `unknown` = no token (a pre-token URL): nothing to compare, assume fine.
+   * What it runs is the tag its dev client reports (which follows the patches
+   * it applied, and survives a restart when the session restored that bundle
+   * from the cache), else what its token was served.
+   * `unknown` = neither (a pre-token URL): nothing to compare, assume fine.
    */
-  private assess(token: string | null, platform: string | null): Verdict {
-    if (!token) return { kind: "unknown" };
-    const served = this.opts.clients?.get(token) ?? null;
-    if (!served) return { kind: "reload", reason: "its bundle came from a previous dev server" };
-    const session = this.opts.peekPlatformSession?.(platform ?? served.platform) ?? null;
-    if (!session || session.epoch !== served.epoch) {
-      return { kind: "reload", reason: "its bundle came from a previous bundler session" };
+  private assess(token: string | null, platform: string | null, reported: string | null = null): Verdict {
+    if (!token && !reported) return { kind: "unknown" };
+    const served = token ? (this.opts.clients?.get(token) ?? null) : null;
+    const session = this.opts.peekPlatformSession?.(platform ?? served?.platform ?? "") ?? null;
+    let from = reported && session ? session.versionForTag(reported) : null;
+    if (from === null && served && session) {
+      if (served.tag) from = session.versionForTag(served.tag);
+      else if (served.epoch === session.epoch) from = served.version;
     }
-    if (served.version === session.bundleVersion) return { kind: "current" };
-    const update = session.catchUp(served.version);
-    const behind = session.bundleVersion - served.version;
+    if (!session || from === null) {
+      return {
+        kind: "reload",
+        reason: served || !token ? "its bundle came from a previous bundler session" : "its bundle came from a previous dev server",
+      };
+    }
+    if (from === session.bundleVersion) return { kind: "current", session };
+    const update = session.catchUp(from);
+    const behind = session.bundleVersion - from;
     if (!update) return { kind: "reload", reason: `it is ${behind} rebuild(s) behind and can't be patched` };
-    return { kind: "catch-up", update, session, behind };
+    return { kind: "catch-up", update, session, from, behind };
+  }
+
+  private markAnonymous(token: string): void {
+    this.anonymous.add(token);
+    if (this.anonymous.size > 512) {
+      const oldest = this.anonymous.values().next().value;
+      if (oldest !== undefined) this.anonymous.delete(oldest);
+    }
   }
 
   /**
@@ -143,23 +187,34 @@ export class HmrHub {
    * bundle and connecting here (Metro does exactly this from its revision
    * map). RN applies an isInitialUpdate silently -- no "Refreshing…" toast.
    */
-  private registerHotClient(ws: WebSocket, entryPoints: unknown[]): void {
+  private registerHotClient(ws: WebSocket, entryPoints: unknown[], reported: string | null): void {
     ws.send(JSON.stringify({ type: "bundle-registered" }));
     const entry = typeof entryPoints[0] === "string" ? (entryPoints[0] as string) : null;
     const token = clientTokenFromUrl(entry);
     const platform = platformFromUrl(entry);
+    if (reported && token) this.markAnonymous(token);
     const revisionId = `rev-init-${this.revision}`;
     let body: object = { revisionId, isInitialUpdate: true, added: [], modified: [], deleted: [] };
 
-    const verdict = this.assess(token, platform);
+    // On an anonymous device Expo Go's own HMR client registers too, but
+    // applies nothing, so what it was served says nothing about the device.
+    const verdict: Verdict =
+      !reported && token && this.anonymous.has(token) ? { kind: "unknown" } : this.assess(token, platform, reported);
+    let stale: string | null = null;
     if (verdict.kind === "catch-up") {
       body = {
         ...buildMetroHmrBody(verdict.update, verdict.session.getModuleIds(), revisionId),
         isInitialUpdate: true,
+        ...bundleTags(verdict.session, verdict.from),
       };
       this.opts.log?.(
         `[${platform ?? "native"}] device ${token} was ${verdict.behind} rebuild(s) behind -- sent the catch-up patch`
       );
+    } else if (verdict.kind === "current") {
+      body = { ...body, ...bundleTags(verdict.session, verdict.session.bundleVersion) };
+    } else if (verdict.kind === "reload" && reported) {
+      stale = verdict.reason;
+      this.opts.log?.(`[${platform ?? "native"}] device ${token} can't be patched (${verdict.reason}) -- asked it to reopen the preview`);
     } else if (verdict.kind === "reload" && token) {
       this.reloadDevice(token, platform, verdict.reason);
     }
@@ -167,6 +222,7 @@ export class HmrHub {
     ws.send(JSON.stringify({ type: "update-start", body: { isInitialUpdate: true } }));
     ws.send(JSON.stringify({ type: "update", body }));
     ws.send(JSON.stringify({ type: "update-done" }));
+    if (stale) ws.send(JSON.stringify({ type: "rnrun-stale", reason: stale }));
   }
 
   /** A native bundle's dev client connected (see native-dev-client.ts). */
@@ -193,6 +249,12 @@ export class HmrHub {
     if (pending) {
       clearTimeout(pending);
       this.pendingReload.delete(token);
+    }
+    // Anonymous: /hot decides (registerHotClient); a reload can't help.
+    if (url.searchParams.get("anonymous") === "1") {
+      this.markAnonymous(token);
+      ws.send(JSON.stringify({ type: "hello" }));
+      return;
     }
     const verdict = this.assess(token, platform);
     if (pending || verdict.kind === "reload") {
@@ -227,6 +289,7 @@ export class HmrHub {
    * back to a /message broadcast, which every device honours.
    */
   private reloadDevice(token: string, platform: string | null, reason: string): void {
+    if (this.anonymous.has(token)) return;
     const sockets = this.devClients.get(token);
     if (sockets && sockets.size > 0) {
       if (!this.mayReload(token, platform, reason)) return;
@@ -240,6 +303,7 @@ export class HmrHub {
       token,
       setTimeout(() => {
         this.pendingReload.delete(token);
+        if (this.anonymous.has(token)) return;
         this.opts.log?.(
           `[${platform ?? "native"}] reloading every device (no dev client for ${token}): ${reason}`
         );
@@ -287,7 +351,10 @@ export class HmrHub {
   attachNativeSession(session: BundlerSession): () => void {
     return session.onEvent((e) => {
       if (e.type === "hmr") {
-        const body = buildMetroHmrBody(e.update, session.getModuleIds(), `rev-${++this.revision}`);
+        const body = {
+          ...buildMetroHmrBody(e.update, session.getModuleIds(), `rev-${++this.revision}`),
+          ...bundleTags(session, e.bundleVersion - 1),
+        };
         this.broadcast(this.hot, { type: "update-start", body: { isInitialUpdate: false } });
         this.broadcast(this.hot, { type: "update", body });
         this.broadcast(this.hot, { type: "update-done" });

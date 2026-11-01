@@ -5,6 +5,8 @@ import type { HmrUpdate } from "browser-metro";
 export interface HistoryEntry {
   version: number;
   update: HmrUpdate | null;
+  /** BundlerSession.bundleTag of `version`: how a device names what it runs. */
+  tag?: string;
 }
 
 /** Updates kept per session. Generously above any realistic gap between a
