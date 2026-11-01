@@ -225,8 +225,15 @@ test('/__rnrun: a device from a previous bundler session (re-init) is told to re
   await fetch(url);
   const token = clientTokenFromUrl(url);
   // Re-init: the platform is now served from a fresh session (new epoch).
+  // Without the bundle cache: a hit would restore the served bundle's
+  // identity, and the device would rightly count as current.
   const fresh = makeNative('ios');
-  await fresh.build();
+  process.env.RNRUN_NO_BUNDLE_CACHE = '1';
+  try {
+    await fresh.build();
+  } finally {
+    delete process.env.RNRUN_NO_BUNDLE_CACHE;
+  }
   const ws = new WebSocket(base.replace('http', 'ws') + `/__rnrun?token=${token}&platform=ios`);
   const firstFirst = frames(ws, 1);
   await open(ws);

@@ -29,6 +29,8 @@ export interface ServedBundle {
   epoch: string;
   /** BundlerSession.bundleVersion at serve time. */
   version: number;
+  /** BundlerSession.bundleTag at serve time. */
+  tag?: string;
   at: number;
 }
 

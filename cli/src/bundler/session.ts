@@ -19,7 +19,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { createHermesLoweringPlugin } from "./hermes-lowering.js";
 import { compileNativewindCss } from "../project/nativewind.js";
-import { bundleCacheKey, readCachedBundle, writeCachedBundle } from "./bundle-cache.js";
+import { bundleCacheKey, readCachedBundle, readCachedBundleMeta, writeCachedBundle } from "./bundle-cache.js";
 import { HISTORY_LIMIT, mergeHistory, type HistoryEntry } from "./catch-up.js";
 import {
   NATIVE_DEV_CLIENT_PATH,
@@ -155,9 +155,24 @@ export class BundlerSession {
    * the epoch it served to each device (server/clients.ts) and reloads the
    * device when the session it is patching from is not that one. Stable
    * across builds within the session: the IncrementalBundler (and its id
-   * registry) is created once, in the constructor.
+   * registry) is created once, in the constructor. A session that serves a
+   * cached bundle takes over the epoch and ids that bundle was made with
+   * (build), so devices running it stay patchable across a restart.
    */
-  readonly epoch = randomUUID().slice(0, 8);
+  epoch = randomUUID().slice(0, 8);
+  /**
+   * Names the bundle a device runs: epoch, version, and this process's run id,
+   * so a version number reused after a restart never names other bytes. It is
+   * the manifest's launch-asset key, and the anonymous dev client reports it
+   * (updated as patches land) instead of relying on its URL token.
+   */
+  bundleTag: string;
+  private readonly run = randomUUID().slice(0, 6);
+  /** Ids restored with a cached bundle (0 when none were). */
+  private restoredIds = 0;
+  /** The graph built for a cached bundle didn't match it: the next rebuild
+   *  must reload devices rather than patch them. */
+  private reloadOnNextRebuild = false;
   /** Applied rebuilds, newest last, so a client that missed patches between
    *  fetching its bundle and registering on /hot can be caught up (catchUp). */
   private history: HistoryEntry[] = [];
@@ -194,6 +209,11 @@ export class BundlerSession {
     this.platform = options.platform ?? "web";
     this.vfs = new VirtualFS(files);
     this.bundler = new IncrementalBundler(this.vfs, this.buildConfig());
+    this.bundleTag = this.makeTag();
+  }
+
+  private makeTag(): string {
+    return `${this.epoch}-${this.bundleVersion}-${this.run}`;
   }
 
   private projectDeps(): Record<string, string> {
@@ -323,9 +343,55 @@ export class BundlerSession {
     return mergeHistory(this.history, from, this.bundleVersion);
   }
 
+  /** The version a device reporting `tag` runs, if it is one of this session's. */
+  versionForTag(tag: string): number | null {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i].tag === tag) return this.history[i].version;
+    }
+    return null;
+  }
+
+  /** The tag of an earlier `version`, if the history still holds it. */
+  tagFor(version: number): string | null {
+    return this.history.find((e) => e.version === version)?.tag ?? null;
+  }
+
   private recordHistory(update: HmrUpdate | null): void {
-    this.history.push({ version: this.bundleVersion, update });
+    this.history.push({ version: this.bundleVersion, update, tag: this.bundleTag });
     if (this.history.length > HISTORY_LIMIT) this.history.splice(0, this.history.length - HISTORY_LIMIT);
+  }
+
+  /** A new bundle: next version, its tag, and how a client gets to it. */
+  private advance(update: HmrUpdate | null): void {
+    this.bundleVersion++;
+    this.bundleTag = this.makeTag();
+    this.recordHistory(update);
+  }
+
+  private writeCache(key: string): void {
+    if (this.nativewindFailed) return;
+    writeCachedBundle(key, this.bundle, {
+      epoch: this.epoch,
+      version: this.bundleVersion,
+      tag: this.bundleTag,
+      moduleIds: this.bundler.moduleIds.entries(),
+    });
+  }
+
+  /**
+   * Number the module ids as `ids` did, so a graph built from the same files
+   * re-mints exactly the ids a cached bundle was emitted with. The registry
+   * hands out 0, 1, 2... in order, so replaying the keys in id order restores
+   * it; anything else (gaps, a registry already in use) is refused.
+   */
+  private seedModuleIds(ids: Array<[string, number]>): boolean {
+    const registry = this.bundler.moduleIds;
+    if (registry.entries().length > 0) return false;
+    const sorted = [...ids].sort((a, b) => a[1] - b[1]);
+    if (sorted.some(([key, id], i) => typeof key !== "string" || id !== i)) return false;
+    for (const [key] of sorted) registry.idFor(key);
+    this.restoredIds = sorted.length;
+    return true;
   }
 
   /**
@@ -443,6 +509,9 @@ export class BundlerSession {
         worklets: !!this.options.workletsPluginPath,
         assetPublicPath: this.options.assetPublicPath,
         packageServerUrl: this.options.packageServerUrl,
+        // Synthetic, so not in `files`; a change to it between releases must
+        // still miss the cache, or a restart serves the old client.
+        devClient: this.platform === "web" ? null : NATIVE_DEV_CLIENT_SOURCE,
       },
     });
   }
@@ -467,12 +536,22 @@ export class BundlerSession {
       // cache). The cache key already covers every input, so a hit means the
       // bytes are current.
       this.bundle = cached;
-      this.bundleVersion++;
       this.buildError = null;
       this.everBuilt = true;
       this.graphBuilt = false;
       this.restoredFromCache = true;
-      this.recordHistory(null);
+      // Take over the identity and module ids the bundle was made with, so a
+      // device still running it (a phone left open across a sleep/wake) is
+      // current here, and the first edit can be patched (adoptCachedBundle).
+      const meta = readCachedBundleMeta(key, cached);
+      if (meta && this.seedModuleIds(meta.moduleIds)) {
+        this.epoch = meta.epoch;
+        this.bundleVersion = meta.version;
+        this.bundleTag = meta.tag;
+        this.recordHistory(null);
+      } else {
+        this.advance(null);
+      }
       this.options.warn?.(
         `[${this.platform}] served a cached bundle (${(cached.length / 1024).toFixed(0)} KB); module graph builds lazily on first edit`
       );
@@ -481,10 +560,11 @@ export class BundlerSession {
     return this.realBuild(key);
   }
 
-  /** Build from the current VFS, populating the module graph. Never serves the
-   *  cache -- callers use this when a live graph is required (a miss, or the
-   *  first edit after a cache-hit serve). */
-  private async realBuild(key: string): Promise<boolean> {
+  /**
+   * Assemble a bundle from the current VFS, populating the module graph.
+   * Null when there is no entry file; throws on a build error.
+   */
+  private async assemble(): Promise<string | null> {
     // The CSS compile is a package-server round trip (~2s, more when cold) and
     // only the module walk reads its result, so let it overlap the dependency
     // prefetch instead of running ahead of it.
@@ -499,23 +579,31 @@ export class BundlerSession {
     // Whatever ensureEntryFile wrote (expo-router's /index.tsx + /__expo_ctx.js)
     // is derived from the project files, not one of them.
     for (const p of Object.keys(this.vfs.toFileMap())) if (!before.has(p)) this.syntheticPaths.add(p);
-    if (!entry) {
-      this.buildError = "No entry file found (looked for /index.*, /App.*, package.json main).";
-      this.emit({ type: "build-error", message: this.buildError });
-      return false;
-    }
+    if (!entry) return null;
+    const result = await this.bundler.build(this.nativeBuildEntry(entry), nativewindReady);
+    return result.bundle;
+  }
+
+  /** Build from the current VFS, populating the module graph. Never serves the
+   *  cache -- callers use this when a live graph is required (a miss, or the
+   *  first edit after a cache-hit serve that adoptCachedBundle couldn't take). */
+  private async realBuild(key: string): Promise<boolean> {
     try {
-      const result = await this.bundler.build(this.nativeBuildEntry(entry), nativewindReady);
-      this.bundle = result.bundle;
-      this.bundleVersion++;
+      const bundle = await this.assemble();
+      if (bundle === null) {
+        this.buildError = "No entry file found (looked for /index.*, /App.*, package.json main).";
+        this.emit({ type: "build-error", message: this.buildError });
+        return false;
+      }
+      this.bundle = bundle;
       this.buildError = null;
       this.everBuilt = true;
       this.graphBuilt = true;
       this.restoredFromCache = false;
       // A fresh graph: nothing a client on an earlier version can be patched
       // up to (ids may have been re-minted), hence the null entry.
-      this.recordHistory(null);
-      if (!this.nativewindFailed) writeCachedBundle(key, result.bundle);
+      this.advance(null);
+      this.writeCache(key);
       return true;
     } catch (err) {
       this.buildError = errText(err);
@@ -525,11 +613,52 @@ export class BundlerSession {
   }
 
   /**
+   * The first edit after serving a cached bundle. Build the module graph for
+   * the files that bundle was made from, BEFORE the edit lands, so the edit
+   * becomes an ordinary patch. Building it from the edited files instead (the
+   * old way) meant a full rebuild and a reload, and in Expo Go's anonymous
+   * mode a reload replays the bundle the phone first downloaded: every preview
+   * woke stale on iPhones.
+   *
+   * The new graph matches the served bundle when it emits the same bytes, or
+   * when it numbered every module with the restored ids (same inputs, same
+   * ids: the same modules; only their order in the file can differ). False if
+   * the build failed; the caller then falls back to a full build.
+   */
+  private async adoptCachedBundle(): Promise<boolean> {
+    const started = performance.now();
+    let bundle: string | null;
+    try {
+      bundle = await this.assemble();
+    } catch {
+      return false;
+    }
+    if (bundle === null) return false;
+    this.graphBuilt = true;
+    this.restoredFromCache = false;
+    const ms = Math.round(performance.now() - started);
+    const sameIds = this.restoredIds > 0 && this.bundler.moduleIds.entries().length === this.restoredIds;
+    if (bundle === this.bundle || sameIds) {
+      this.options.warn?.(`[${this.platform}] built the module graph for the cached bundle in ${ms}ms; edits are patches from here`);
+      return true;
+    }
+    // Numbered differently from what devices run: patches would name the
+    // wrong modules. Serve the new bytes and reload on this edit.
+    this.bundle = bundle;
+    this.advance(null);
+    this.reloadOnNextRebuild = true;
+    this.options.warn?.(`[${this.platform}] the module graph didn't match the cached bundle (${ms}ms); devices reload on this edit`);
+    return true;
+  }
+
+  /**
    * Apply file changes and rebuild. Content changes are applied to the VFS
    * here; the route context is regenerated when route files appear/disappear.
    */
   async applyChanges(changes: ContentChange[]): Promise<void> {
     if (changes.length === 0) return;
+
+    if (this.everBuilt && !this.graphBuilt) await this.adoptCachedBundle();
 
     for (const change of changes) {
       if (change.type === "delete") this.vfs.delete(change.path);
@@ -543,11 +672,11 @@ export class BundlerSession {
     const all = ctxChange ? [...clientChanges, ctxChange] : clientChanges;
     if (all.length === 0) return;
 
-    // No live module graph yet -- never built, or served from cache and this is
-    // the first edit. A full build establishes the graph AND applies these
-    // changes (already written to the VFS above); only the first edit pays it,
-    // and subsequent edits are incremental. realBuild bypasses the cache serve
-    // so we get a real graph rather than the cached bytes again.
+    // No live module graph yet -- never built, or served from cache and
+    // adoptCachedBundle failed. A full build establishes the graph AND applies
+    // these changes (already written to the VFS above); subsequent edits are
+    // incremental. realBuild bypasses the cache serve so we get a real graph
+    // rather than the cached bytes again.
     if (!this.everBuilt || !this.graphBuilt) {
       const ok = await this.realBuild(this.cacheKey());
       if (ok) this.emit({ type: "reload", bundleVersion: this.bundleVersion, reason: "initial build" });
@@ -558,22 +687,25 @@ export class BundlerSession {
       this.bundler.updateFS(this.vfs);
       const result = await this.bundler.rebuild(all.map((c) => ({ path: c.path, type: c.type })));
       this.bundle = result.bundle;
-      this.bundleVersion++;
       this.buildError = null;
+      const patch =
+        this.reloadOnNextRebuild || result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload
+          ? null
+          : result.hmrUpdate;
+      this.reloadOnNextRebuild = false;
+      this.advance(patch);
       // Persist after edits too, so the next wake starts warm at the CURRENT
       // state rather than the state the process started from.
-      if (!this.nativewindFailed) writeCachedBundle(this.cacheKey(), result.bundle);
+      this.writeCache(this.cacheKey());
 
-      if (result.type === "full" || !result.hmrUpdate || result.hmrUpdate.requiresReload) {
-        this.recordHistory(null);
+      if (!patch) {
         this.emit({
           type: "reload",
           bundleVersion: this.bundleVersion,
           reason: result.hmrUpdate?.reloadReason,
         });
       } else {
-        this.recordHistory(result.hmrUpdate);
-        this.emit({ type: "hmr", update: result.hmrUpdate, bundleVersion: this.bundleVersion });
+        this.emit({ type: "hmr", update: patch, bundleVersion: this.bundleVersion });
       }
       // Source/css edits may change tailwind's output; recompile without
       // blocking this rebuild (self-applies as a follow-up change if so).

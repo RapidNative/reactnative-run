@@ -163,7 +163,7 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
     // the dev client can tell later whether it is still in step (clients.ts).
     const token = platform !== "web" ? clientTokenFromUrl(url.href) : null;
     if (token) {
-      ctx.clients?.record(token, { platform, epoch: session.epoch, version: session.bundleVersion });
+      ctx.clients?.record(token, { platform, epoch: session.epoch, version: session.bundleVersion, tag: session.bundleTag });
     }
     const bundleHeaders = {
       "Content-Type": "application/javascript",
@@ -365,9 +365,12 @@ function buildManifest(ctx: ServerContext, platform: string, host: string, schem
   // A CONSTANT key makes a device that already downloaded once REUSE that cached
   // bundle forever and never re-fetch -- so an edit never shows in anonymous mode
   // (a first-load device is fine because it has no cached "bundle" asset yet).
-  // Key it to the native session's epoch+bundleVersion, which bumps on every
-  // rebuild: an edit yields a new key -> Expo Go re-downloads; unchanged code
-  // keeps the key stable so a plain reload still serves from the device cache.
+  // Key it to the native session's bundleTag (epoch, version, run), which
+  // changes on every rebuild: an edit yields a new key -> Expo Go re-downloads;
+  // unchanged code keeps the key stable so a plain reload still serves from
+  // the device cache. A wake that serves the cached bundle keeps its tag, so a
+  // phone that already has those bytes doesn't download them again. The dev
+  // client reports this key to say which bundle it runs (hmr.ts).
   // (Dev mode loads JS via the RN dev-server path, not expo-updates, so this
   // only matters for anonymous mode -- but it's correct and cheap either way.)
   // The fallback (no native session yet) MUST be stable across manifest fetches.
@@ -389,7 +392,7 @@ function buildManifest(ctx: ServerContext, platform: string, host: string, schem
   // between fetches (no loop) and new at boot and on every re-init.
   const nativeSession = ctx.peekPlatformSession?.(platform);
   const bundleKey = nativeSession
-    ? `bundle-${nativeSession.epoch}-${nativeSession.bundleVersion}`
+    ? `bundle-${nativeSession.bundleTag}`
     : `bundle-${platform}-pending-${ctx.nativeGeneration ?? PROCESS_GENERATION}`;
 
   return {
