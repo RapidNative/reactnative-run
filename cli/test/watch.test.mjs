@@ -87,3 +87,38 @@ test('watchProject delivers a debounced flush for a real disk write', async () =
   assert.equal(change.type, 'update');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// A Max project (2026-11-03): the agent wrote src/i18n/LanguageProvider.tsx into a NEW folder and
+// _layout.tsx importing it. The watcher reported the layout first (a new folder is seen late, and
+// under gVisor sometimes never), so the build stubbed the import and the phone showed "does not
+// exist on the project filesystem" for 30 minutes. The flush now reads the import from disk.
+test('diffPending pulls in a file the batch imports that is on disk but not yet in the VFS', () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, 'app'));
+  fs.mkdirSync(path.join(dir, 'src', 'i18n'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'app', '_layout.tsx'), "import { LanguageProvider } from '@/src/i18n/LanguageProvider';\nimport { t } from '../lib/strings';\nexport default () => null;\n");
+  fs.writeFileSync(path.join(dir, 'src', 'i18n', 'LanguageProvider.tsx'), "import dict from './dict';\nexport const LanguageProvider = () => dict;\n");
+  fs.writeFileSync(path.join(dir, 'src', 'i18n', 'dict.ts'), "export default {};\n");
+  fs.mkdirSync(path.join(dir, 'lib'));
+  fs.writeFileSync(path.join(dir, 'lib', 'strings.ts'), "export const t = 1;\n");
+
+  const vfs = new Set(['/app/_layout.tsx', '/lib/strings.ts']);
+  const result = diffPending(dir, new Set(['/app/_layout.tsx']), (p) => vfs.has(p));
+  const byPath = Object.fromEntries(result.changes.map((c) => [c.path, c.type]));
+  assert.deepEqual(byPath, {
+    '/app/_layout.tsx': 'update',
+    '/src/i18n/LanguageProvider.tsx': 'create',
+    '/src/i18n/dict.ts': 'create',
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('diffPending pulls nothing for imports that resolve, packages, or files missing on disk too', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'a.tsx'), "import React from 'react';\nimport b from './b';\nimport c from './nowhere';\nexport default b;\n");
+  fs.writeFileSync(path.join(dir, 'b.ts'), "export default 1;\n");
+  const vfs = new Set(['/a.tsx', '/b.ts']);
+  const result = diffPending(dir, new Set(['/a.tsx']), (p) => vfs.has(p));
+  assert.deepEqual(result.changes.map((c) => c.path), ['/a.tsx']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
