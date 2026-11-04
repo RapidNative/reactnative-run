@@ -20,6 +20,16 @@ export function parseExternalsFromBody(code: string): Record<string, string> {
   try { return JSON.parse(match[1]); } catch { return {}; }
 }
 
+/**
+ * A call target that can name a module. The line scan also matches code written inside a string:
+ * pdfjs-dist 6 builds its worker wrapper as `await import("${url}");` in a template literal, and the
+ * bundle then failed fetching the package "${url}" (HTTP 400, Invalid package specifier). No module
+ * specifier contains a template interpolation.
+ */
+function isSpecifier(target: string): boolean {
+  return !target.includes("${");
+}
+
 /** Extract all require('...') and dynamic import('...') call targets from source */
 export function findRequires(source: string): string[] {
   if (!source) return [];
@@ -44,11 +54,11 @@ export function findRequires(source: string): string[] {
     let match: RegExpExecArray | null;
     LINE_REQUIRE_RE.lastIndex = 0;
     while ((match = LINE_REQUIRE_RE.exec(line)) !== null) {
-      requires.push(match[1]);
+      if (isSpecifier(match[1])) requires.push(match[1]);
     }
     LINE_IMPORT_RE.lastIndex = 0;
     while ((match = LINE_IMPORT_RE.exec(line)) !== null) {
-      requires.push(match[1]);
+      if (isSpecifier(match[1])) requires.push(match[1]);
     }
   }
   return requires;
