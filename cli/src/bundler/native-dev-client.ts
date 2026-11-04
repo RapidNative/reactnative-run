@@ -122,6 +122,48 @@ export const NATIVE_DEV_CLIENT_SOURCE = `/* rnrun native dev client */
   function inject(mod) {
     if (mod && mod.module) evalGlobal(mod.module[1]);
   }
+  function stop(reason) {
+    stale = true;
+    console.log("rnrun: this bundle can't be updated in place (" + reason + ")");
+    try {
+      RN.Alert.alert("Preview updated", "This change can't be applied while the app is open. Close the project in Expo Go and open it again to see it.");
+    } catch (e) {}
+  }
+  // Metro sends what a device lacks as "added" and defines it before hot-swapping anything:
+  // swapping a module walks up to its parents, and a parent this device doesn't have yet throws
+  // "[Refresh] Expected to find the updated module". A catch-up patch can only mark what the
+  // server lacked, so modules the agent added after this bundle arrive as "modified". Sort by
+  // what this device actually has (metro-runtime's module map, exposed in dev).
+  // A catch-up can also need a full refresh: metro-runtime asks for one when a swapped module
+  // has no React Refresh boundary above it, e.g. when its only new parent hasn't run yet. In
+  // anonymous mode that reload replays this same bundle and this same patch, so while a catch-up
+  // applies, a full refresh is caught and reported instead of performed.
+  function apply(body) {
+    var R = g[(g.__METRO_GLOBAL_PREFIX__ || "") + "__ReactRefresh"];
+    var full = null;
+    var orig = body.isInitialUpdate && R && typeof R.performFullRefresh === "function" ? R.performFullRefresh : null;
+    if (orig) R.performFullRefresh = function (reason) { full = reason || "a full reload"; };
+    try {
+      applyModules(body);
+    } finally {
+      if (orig) R.performFullRefresh = orig;
+    }
+    return full;
+  }
+  function applyModules(body) {
+    var have = null;
+    try { have = g.__r && typeof g.__r.getModules === "function" ? g.__r.getModules() : null; } catch (e) {}
+    var all = (body.added || []).concat(body.modified || []);
+    var fresh = [];
+    var known = [];
+    for (var i = 0; i < all.length; i++) {
+      var id = all[i] && all[i].module ? all[i].module[0] : null;
+      var isNew = have && typeof have.has === "function" ? !have.has(id) : i < (body.added || []).length;
+      (isNew ? fresh : known).push(all[i]);
+    }
+    fresh.forEach(inject);
+    known.forEach(inject);
+  }
   connect(wsOrigin + "/hot", function (d, ws) {
     if (stale) return;
     if (d.type === "update" && d.body) {
@@ -131,19 +173,27 @@ export const NATIVE_DEV_CLIENT_SOURCE = `/* rnrun native dev client */
         return;
       }
       try {
-        (body.added || []).forEach(inject);
-        (body.modified || []).forEach(inject);
+        var full = apply(body);
+        if (full) {
+          stop("the catch-up patch needs a full reload: " + full);
+          return;
+        }
         if (body.rnrunBundle) tag = body.rnrunBundle;
       } catch (e) {
-        console.error("rnrun: could not apply an update, reloading. " + (e && e.message));
-        reload();
+        if (body.isInitialUpdate) {
+          // The catch-up patch on (re)connect. Reloading replays the bundle this device first
+          // downloaded, which is sent this same patch: it would loop (a Max project, 2026-11-04: 62
+          // reloads in a minute). Ask for a reopen, the one thing that fetches a new bundle.
+          console.error("rnrun: could not apply an update, asking to reopen. " + (e && e.message));
+          stop("the catch-up patch failed: " + (e && e.message));
+        } else {
+          // A live patch: one reload, which comes back through the catch-up path above.
+          console.error("rnrun: could not apply an update, reloading. " + (e && e.message));
+          reload();
+        }
       }
     } else if (d.type === "rnrun-stale") {
-      stale = true;
-      console.log("rnrun: this bundle can't be updated in place (" + d.reason + ")");
-      try {
-        RN.Alert.alert("Preview updated", "This change can't be applied while the app is open. Close the project in Expo Go and open it again to see it.");
-      } catch (e) {}
+      stop(d.reason);
     } else if (d.type === "error" && d.body) {
       console.error(d.body.message || "rnrun: the last edit failed to build");
     }
