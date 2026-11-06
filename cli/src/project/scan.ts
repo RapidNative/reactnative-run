@@ -44,10 +44,19 @@ const SKIP_FILES = new Set([".DS_Store"]);
  *  the transformer -- a pathological generated file shouldn't OOM a rebuild. */
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Log files: never source, and often written by the very process watching
+ * them (`rnrun start . > rnrun.log` from the project root). Watched, every log
+ * line was a "change" that rebuilt the bundles and logged again -- a rebuild
+ * (and, before the session ignored no-op rebuilds, a device reload) every
+ * second.
+ */
+const SKIP_FILE_RE = /\.log$/i;
+
 export function shouldSkip(relPath: string): boolean {
   const segments = relPath.split("/");
   const base = segments[segments.length - 1];
-  if (SKIP_FILES.has(base)) return true;
+  if (SKIP_FILES.has(base) || SKIP_FILE_RE.test(base)) return true;
   return segments.some((s) => SKIP_DIRS.has(s));
 }
 

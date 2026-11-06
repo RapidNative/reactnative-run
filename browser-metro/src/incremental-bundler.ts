@@ -1201,9 +1201,15 @@ export class IncrementalBundler {
     const filesToReprocess = new Set<string>();
     const npmPackagesNeeded = new Set<string>();
 
-    // Collect all npm packages already in the module map
+    // Collect all npm packages already in the module map -- except the
+    // originals kept for overrides ("<name>__original", see
+    // applyOverrideModules). Those aren't packages: re-fetching one asks the
+    // package server for e.g. "expo-sensors__original", which 404s and fails
+    // every rebuild of an app that uses the package. applyOverrideModules
+    // below keeps the original it already holds.
+    const overridden = new Set(Object.keys(this.getOverrideModules()).map((n) => n + "__original"));
     for (const id of Object.keys(this.moduleMap)) {
-      if (this.resolver.isNpmPackage(id)) {
+      if (this.resolver.isNpmPackage(id) && !overridden.has(id)) {
         npmPackagesNeeded.add(id);
       }
     }

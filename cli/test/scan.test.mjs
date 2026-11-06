@@ -52,6 +52,14 @@ test('shouldSkip handles nested skip dirs anywhere in the path', () => {
   assert.equal(shouldSkip('/androidish/file.ts'), false);
 });
 
+test('shouldSkip: log files are never scanned or watched (rnrun start > rnrun.log in the project)', () => {
+  assert.equal(shouldSkip('/rnrun.log'), true);
+  assert.equal(shouldSkip('/logs/metro.LOG'), true);
+  assert.equal(shouldSkip('/npm-debug.log'), true);
+  assert.equal(shouldSkip('/lib/log.ts'), false);
+  assert.equal(shouldSkip('/catalog.json'), false);
+});
+
 test('vfsToDisk blocks path traversal', () => {
   assert.throws(() => vfsToDisk('/tmp/project', '/../../etc/passwd'), /escapes/);
   assert.equal(vfsToDisk('/tmp/project', '/app/a.ts'), path.resolve('/tmp/project/app/a.ts'));

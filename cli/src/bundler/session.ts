@@ -707,6 +707,13 @@ export class BundlerSession {
     try {
       this.bundler.updateFS(this.vfs);
       const result = await this.bundler.rebuild(all.map((c) => ({ path: c.path, type: c.type })));
+      // Nothing the bundle contains changed (a file no module imports: notes,
+      // eas.json, a log written into the project): no new version, and above
+      // all no reload. A rebuild without an HMR update otherwise reads as
+      // "reload every device" -- writing a log file into the project reloaded
+      // phones every second, mid-boot ("Cannot read property 'EventEmitter'
+      // of undefined", then "main has not been registered").
+      if (result.bundle === this.bundle && !this.buildError) return;
       this.bundle = result.bundle;
       this.buildError = null;
       const patch =
