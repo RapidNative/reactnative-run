@@ -70,6 +70,36 @@ export const NATIVE_DEV_CLIENT_SOURCE = `/* rnrun native dev client */
   if (!m) return;
   var origin = src.replace(/^(https?:\\/\\/[^\\/?#]+).*$/, "$1");
   if (origin === src) return;
+
+  // Bundled images in anonymous mode. expo-asset turns a dev-server asset (httpServerLocation
+  // "/assets/...") into a URL on this server only when the manifest carries expoGo.developer,
+  // which anonymous mode drops. Without it the image goes to Expo's CDN
+  // (classic-assets.eascdn.net/~assets/<hash>), where our files don't exist, so every require()d
+  // image rendered blank on iOS (a hosted preview's logo, 2026-11-06). An absolute
+  // httpServerLocation is used as-is, so asset modules registered from here on get this
+  // server's origin. Android never goes anonymous and is untouched. The patch goes on
+  // react-native's AssetRegistry (the app may not declare @react-native/assets-registry, and
+  // that module reads registerAsset from here when the first asset module loads, after us).
+  if (anonymous) {
+    try {
+      var registry = RN.AssetRegistry;
+      var register = registry && registry.registerAsset;
+      if (typeof register === "function" && !registry.__rnrunAbsoluteAssets) {
+        registry.__rnrunAbsoluteAssets = true;
+        registry.registerAsset = function (asset) {
+          var loc = asset && asset.httpServerLocation;
+          if (typeof loc === "string" && loc.charAt(0) === "/") {
+            var copy = {};
+            for (var key in asset) copy[key] = asset[key];
+            copy.httpServerLocation = origin + loc;
+            asset = copy;
+          }
+          return register.call(this, asset);
+        };
+      }
+    } catch (e) {}
+  }
+
   var wsOrigin = origin.replace(/^http/, "ws");
   var platform = RN.Platform && RN.Platform.OS ? RN.Platform.OS : "";
   var tag = typeof launch.key === "string" ? launch.key.replace(/^bundle-/, "") : "unknown";
