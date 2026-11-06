@@ -91,3 +91,42 @@ test("JSON files the tailwind config can require are sent; lockfiles are not", a
   assert.strictEqual(body.content["/text-scale.json"], withJson["/text-scale.json"]);
   assert.ok(!("/package-lock.json" in body.content), "lockfile stays out of the request");
 });
+
+// One css file the server can't compile must not take the others' styles with
+// it. Full Swing KIT (Nov 2026): css-interop threw in parseAspectRatio on a
+// web-only stylesheet (src/lib/rn/source.css, imported only by .web.tsx and
+// "use dom" files, which Metro never compiles for native). rnrun dropped
+// global.css with it and Expo Go rendered a black screen: every className
+// unstyled, flex-1 / min-h layouts collapsed to zero size.
+test("a css file that fails to compile becomes an empty module; the others keep their styles", async () => {
+  const twoCss = { ...files, "/src/lib/rn/source.css": ".fs-num { font-weight: 800; }" };
+  const warnings = [];
+  const failed = [];
+  const fetch = async (_url, init) => {
+    const body = JSON.parse(gunzipSync(init.body).toString("utf8"));
+    if (body.css.includes(".fs-num")) {
+      return new Response(
+        JSON.stringify({ error: "Command failed: node runner.cjs /work android\nTypeError: Cannot read properties of undefined (reading '0')\n    at parseAspectRatio" }),
+        { status: 500 }
+      );
+    }
+    return new Response(JSON.stringify({ data: { $compiled: true, flags: { darkMode: "class dark" } } }), { status: 200 });
+  };
+  const out = await compileNativewindCss({ vfs: fakeVfs(twoCss), platform: "android", packageServerUrl: "https://esm.example", fetch, warn: (m) => warnings.push(m), failed });
+  assert.ok(out, "partial success is a result, not null");
+  assert.match(out.get("/global.css"), /injectData\(.*"darkMode":"class dark"/);
+  assert.match(out.get("/src/lib/rn/source.css"), /module\.exports = \{\};/);
+  assert.doesNotMatch(out.get("/src/lib/rn/source.css"), /injectData/);
+  assert.deepStrictEqual(failed, ["/src/lib/rn/source.css"]);
+  assert.strictEqual(warnings.length, 1);
+  assert.match(warnings[0], /\[android\] compile failed for \/src\/lib\/rn\/source\.css \(HTTP 500\): TypeError: Cannot read properties of undefined/);
+});
+
+test("when every css file fails, the result is null (previous modules kept)", async () => {
+  const twoCss = { ...files, "/b.css": ".x { color: red; }" };
+  const failed = [];
+  const fetch = async () => new Response("boom", { status: 502 });
+  const out = await compileNativewindCss({ vfs: fakeVfs(twoCss), platform: "ios", packageServerUrl: "https://esm.example", fetch, warn: () => {}, failed });
+  assert.strictEqual(out, null);
+  assert.deepStrictEqual(failed.sort(), ["/b.css", "/global.css"]);
+});
