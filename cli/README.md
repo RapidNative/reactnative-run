@@ -24,6 +24,26 @@ rnrun help
 `start` flags: `--port`, `--host lan|localhost`, `--package-server <url>`,
 `--local-packages`, `--prewarm ios[,android][,web]` (`android:seen` / `ios:seen` pre-warm a platform only once a device has asked this project for it), `--quiet`.
 
+## Expo DOM components (`"use dom"`)
+
+Served the way `expo start` serves them, so `expo/dom`'s runtime in Expo Go works unchanged:
+
+- In iOS/Android bundles a `"use dom"` module is replaced by babel-preset-expo's proxy: a
+  component rendering `expo/dom/internal`'s WebView with
+  `filePath = "<name>?file=file:///<project path>"` (`src/bundler/dom-components.ts`).
+  The proxy also sets `dom.overrideUri` to the page on the server the bundle came from
+  (recorded by rnrun's dev client), because in Expo Go's anonymous mode the bundle runs
+  from a cached file and `expo/dom` would fall back to `http://localhost:8081`.
+- `GET /_expo/@dom/<name>?file=<file URL>` is the page: @expo/cli's HTML (reads the
+  WebView's injected props, then loads the bundle).
+- `GET /__rnrun/dom-bundle/<name>.js?file=…` is a **web** bundle whose entry is
+  `require("expo/dom/internal").registerDOMComponent(require(<file>).default)`; one web
+  session per component, built on first request (`src/bundler/dom-sessions.ts`).
+- `WS /__rnrun/dom-events?file=…` tells an open page to reload when its bundle changed
+  (Metro would hot-update it; a reload is enough here).
+
+On web the module is left alone and renders inline, as under Expo.
+
 ## Running in a container / hosted preview
 
 rnrun is designed to run one project per container that scales to zero. Two

@@ -3,6 +3,8 @@ import * as os from "node:os";
 import { Router, sendText } from "./router.js";
 import { registerNativeRoutes } from "./routes/native.js";
 import { registerWebRoutes } from "./routes/web.js";
+import { registerDomRoutes } from "./routes/dom.js";
+import type { DomComponentSessions } from "../bundler/dom-sessions.js";
 import { HmrHub } from "./hmr.js";
 import { ClientRegistry } from "./clients.js";
 import type { BundlerSession } from "../bundler/session.js";
@@ -38,6 +40,11 @@ export interface ServerContext {
    * The manifest's launchAsset.key falls back to it while a platform has no session yet.
    */
   nativeGeneration?: string;
+  /**
+   * Web sessions for the project's Expo DOM components ("use dom"), served to
+   * the WebViews the native bundle renders for them. Absent: those pages 501.
+   */
+  domComponents?: DomComponentSessions;
   /** What each device was served (created by startServer when absent). */
   clients?: ClientRegistry;
   /** Set by startServer once the ws hub exists. */
@@ -61,7 +68,9 @@ export interface DevServer {
 export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise<DevServer> {
   const router = new Router();
   // Order matters: the manifest route claims "/" for Expo Go requests before
-  // the web shell claims it for browsers.
+  // the web shell claims it for browsers. DOM component routes go first: the
+  // native bundle route claims every path ending in .bundle.
+  const domRoutes = registerDomRoutes(router, ctx);
   registerNativeRoutes(router, ctx);
   registerWebRoutes(router, ctx);
 
@@ -92,7 +101,10 @@ export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise
     }
   });
 
-  server.on("upgrade", (req, socket, head) => hub.handleUpgrade(req, socket, head));
+  server.on("upgrade", (req, socket, head) => {
+    if (domRoutes.handleUpgrade(req, socket, head)) return;
+    hub.handleUpgrade(req, socket, head);
+  });
 
   ctx.whenIdle = async (quietMs, maxWaitMs) => {
     const deadline = Date.now() + maxWaitMs;
@@ -114,6 +126,7 @@ export async function startServer(ctx: ServerContext, host = "0.0.0.0"): Promise
     port: actualPort,
     close: async () => {
       hub.close();
+      domRoutes.close();
       // Browsers hold keep-alive sockets open; without this, close() waits
       // for them indefinitely and Ctrl+C appears to hang.
       server.closeAllConnections();

@@ -70,6 +70,10 @@ export const NATIVE_DEV_CLIENT_SOURCE = `/* rnrun native dev client */
   if (!m) return;
   var origin = src.replace(/^(https?:\\/\\/[^\\/?#]+).*$/, "$1");
   if (origin === src) return;
+  // The server this bundle came from, for Expo DOM components (dom-components.ts):
+  // expo/dom finds its pages from SourceCode.scriptURL, which in anonymous mode is a
+  // file in Expo Go's cache, so it would fall back to localhost:8081.
+  g.__rnrunDevServerOrigin = origin;
 
   // Bundled images in anonymous mode. expo-asset turns a dev-server asset (httpServerLocation
   // "/assets/...") into a URL on this server only when the manifest carries expoGo.developer,

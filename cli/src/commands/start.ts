@@ -5,6 +5,8 @@ import { scanProject } from "../project/scan.js";
 import { watchProject } from "../project/watch.js";
 import { loadProjectConfig } from "../project/config.js";
 import { BundlerSession } from "../bundler/session.js";
+import { DomComponentSessions } from "../bundler/dom-sessions.js";
+import type { FileMap } from "browser-metro";
 import { VirtualFS, NATIVE_DEPS_VERSION } from "browser-metro";
 import { detectNativewind } from "../project/nativewind.js";
 import { resolveWorkletsPlugin } from "../bundler/worklets.js";
@@ -96,6 +98,26 @@ export async function startCommand(options: StartOptions): Promise<void> {
     toolVersions: tools,
     assetMeta,
   });
+
+  // Expo DOM components ("use dom"): one web session each, built when a
+  // WebView in the app first opens its page (server/routes/dom.ts).
+  const domComponents = new DomComponentSessions(
+    files,
+    (domEntry: string, domFiles: FileMap) =>
+      new BundlerSession(domFiles, {
+        packageServerUrl,
+        env: config.env,
+        platform: "web",
+        assetPublicPath: "/__bm_assets",
+        fetch: cachedFetch,
+        nativewind: detectNativewind(new VirtualFS(domFiles)).enabled,
+        warn: log.warn,
+        toolVersions: tools,
+        assetMeta,
+        domEntry,
+      }),
+    log.info
+  );
 
   // Native sessions (ios/android) are created lazily on the first bundle
   // request for that platform -- an Expo Go scan shouldn't cost anything until
@@ -216,6 +238,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     },
     getPlatformError: (platform: string) => nativeSessionErrors.get(platform) ?? null,
     peekPlatformSession: (platform: string) => readyNative.get(platform) ?? null,
+    domComponents,
   };
 
   // Bind the server BEFORE the first build: build errors are served/pushed
@@ -321,6 +344,9 @@ export async function startCommand(options: StartOptions): Promise<void> {
         }
       }
       if (changes.length > 0) {
+        // Not awaited here: DOM pages wait for it themselves, and the app's
+        // own Fast Refresh shouldn't queue behind a DOM component's rebuild.
+        const domDone = domComponents.applyChanges(changes);
         const t = performance.now();
         await session.applyChanges(changes);
         if (!session.buildError) {
@@ -332,6 +358,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
           const native = await pending;
           await native.applyChanges(changes);
         }
+        await domDone;
       }
     },
   });
@@ -359,6 +386,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     nativeUnsubs.clear();
     readyNative.clear();
     nativeSessions.clear();
+    domComponents.reset(rescan.files);
     ctx.nativeGeneration = randomUUID().slice(0, 8);
     session = fresh;
     ctx.session = fresh;

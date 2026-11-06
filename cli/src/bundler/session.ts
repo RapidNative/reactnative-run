@@ -21,6 +21,7 @@ import { createHermesLoweringPlugin } from "./hermes-lowering.js";
 import { compileNativewindCss } from "../project/nativewind.js";
 import { bundleCacheKey, readCachedBundle, readCachedBundleMeta, writeCachedBundle } from "./bundle-cache.js";
 import { HISTORY_LIMIT, mergeHistory, type HistoryEntry } from "./catch-up.js";
+import { DOM_ENTRY_PATH, DOM_PROXY_VERSION, createUseDomNativePlugin, domEntrySource } from "./dom-components.js";
 import {
   NATIVE_DEV_CLIENT_PATH,
   NATIVE_DEV_CLIENT_SOURCE,
@@ -128,6 +129,12 @@ export interface SessionOptions {
   workletsPluginPath?: string | null;
   /** rnrun + browser-metro versions; part of the bundle-cache key. */
   toolVersions?: string;
+  /**
+   * Web sessions only: build the web bundle of this Expo DOM component (a
+   * "use dom" file's VFS path) instead of the app -- what the WebView in the
+   * native app loads (dom-components.ts).
+   */
+  domEntry?: string;
 }
 
 /**
@@ -275,6 +282,8 @@ export class BundlerSession {
         plugins: [
           ...(hasReact ? [injectReactPlugin] : []),
           ...(this.options.nativewind ? [nativewindGlobalJsxPlugin] : []),
+          // "use dom" modules become WebView proxies (before sucrase sees them).
+          createUseDomNativePlugin(),
           createHermesLoweringPlugin({ workletsPluginPath: this.options.workletsPluginPath }),
         ],
         env: this.options.env,
@@ -512,6 +521,10 @@ export class BundlerSession {
         // Synthetic, so not in `files`; a change to it between releases must
         // still miss the cache, or a restart serves the old client.
         devClient: this.platform === "web" ? null : NATIVE_DEV_CLIENT_SOURCE,
+        // Native output of "use dom" modules; and which DOM component a web
+        // session bundles (same files as the app's web bundle otherwise).
+        domProxy: this.platform === "web" ? null : DOM_PROXY_VERSION,
+        domEntry: this.options.domEntry ?? null,
       },
     });
   }
@@ -574,6 +587,13 @@ export class BundlerSession {
             this.nativewindFailed = true;
           })
         : undefined;
+    if (this.options.domEntry) {
+      if (!this.vfs.exists(this.options.domEntry)) return null;
+      this.vfs.write(DOM_ENTRY_PATH, domEntrySource(this.options.domEntry));
+      this.syntheticPaths.add(DOM_ENTRY_PATH);
+      const result = await this.bundler.build(DOM_ENTRY_PATH, nativewindReady);
+      return result.bundle;
+    }
     const before = new Set(Object.keys(this.vfs.toFileMap()));
     const entry = ensureEntryFile(this.vfs);
     // Whatever ensureEntryFile wrote (expo-router's /index.tsx + /__expo_ctx.js)
@@ -665,7 +685,8 @@ export class BundlerSession {
       else this.vfs.write(change.path, change.content ?? "");
     }
 
-    const ctxChange = applyRouteStructureChanges(this.vfs, changes);
+    // A DOM component's bundle has no route context.
+    const ctxChange = this.options.domEntry ? null : applyRouteStructureChanges(this.vfs, changes);
     // +api handlers are excluded from the client bundle (they may import
     // Node-side modules); rebuilding them here would fail the client rebuild.
     const clientChanges = changes.filter((c) => !isApiRouteFile(c.path));
