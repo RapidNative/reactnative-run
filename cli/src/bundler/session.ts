@@ -210,6 +210,10 @@ export class BundlerSession {
    *  never persist it: a cached degraded bundle would keep being served on
    *  every wake with the same inputs, long after the server recovered. */
   private nativewindFailed = false;
+  /** css files the last nativewind compile couldn't compile (empty modules).
+   *  A bundle that imports one is degraded and not persisted, like above; one
+   *  that doesn't (a web-only stylesheet in a native bundle) is fine. */
+  private nativewindFailedFiles: string[] = [];
 
   constructor(files: FileMap, options: SessionOptions) {
     this.options = options;
@@ -379,6 +383,8 @@ export class BundlerSession {
 
   private writeCache(key: string): void {
     if (this.nativewindFailed) return;
+    // A module of the bundle is a css file that didn't compile: degraded.
+    if (this.nativewindFailedFiles.some((p) => this.bundle.includes(JSON.stringify(p)))) return;
     writeCachedBundle(key, this.bundle, {
       epoch: this.epoch,
       version: this.bundleVersion,
@@ -432,18 +438,21 @@ export class BundlerSession {
    */
   private async refreshNativewindCss(): Promise<string[]> {
     if (!this.options.nativewind) return [];
+    const failed: string[] = [];
     const compiled = await compileNativewindCss({
       vfs: this.vfs,
       platform: this.platform,
       packageServerUrl: this.options.packageServerUrl,
       fetch: this.options.fetch,
       warn: this.options.warn ?? ((msg) => console.warn(msg)),
+      failed,
     });
     if (compiled === null) {
       this.nativewindFailed = true;
       return [];
     }
     this.nativewindFailed = false;
+    this.nativewindFailedFiles = failed;
     const changed: string[] = [];
     for (const [p, code] of compiled) {
       if (this.nativewindCss.get(p) !== code) {

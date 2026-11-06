@@ -68,10 +68,24 @@ export function detectNativewind(vfs: VirtualFS): NativewindDetection {
   return { enabled: true };
 }
 
+/** What a css file whose compile failed becomes: no styles, but the import still resolves. */
+export function failedCssModule(cssPath: string): string {
+  return `// rnrun: nativewind could not compile ${cssPath}; its styles are missing on this platform\nmodule.exports = {};`;
+}
+
 /**
  * Compile every project `.css` file to an injectData module.
- * Returns a map of css path → module source, or null on failure (callers keep
- * the previous modules).
+ *
+ * Returns a map of css path → module source, or null when nothing compiled
+ * (callers keep the previous modules). Files compile independently: one the
+ * server can't compile becomes an empty module (failedCssModule) and is listed
+ * in `opts.failed`, and the rest keep their styles. Metro only compiles the css
+ * a platform's graph imports, so a file that fails here is often one native
+ * never loads -- a converted app's web-only stylesheet, imported by .web.tsx
+ * and "use dom" files. When any failure used to drop every file's styles, the
+ * app's global.css went with it and Expo Go showed a black screen: every
+ * className unstyled, so flex-1 / min-h layouts collapsed to nothing (Full
+ * Swing KIT, Nov 2026: css-interop's parseAspectRatio threw on src/lib/rn/source.css).
  */
 export async function compileNativewindCss(opts: {
   vfs: VirtualFS;
@@ -79,6 +93,8 @@ export async function compileNativewindCss(opts: {
   packageServerUrl: string;
   fetch?: typeof fetch;
   warn: (msg: string) => void;
+  /** Filled with the css paths that failed to compile (when some did). */
+  failed?: string[];
 }): Promise<Map<string, string> | null> {
   const { vfs, platform, warn } = opts;
   const doFetch = opts.fetch ?? fetch;
@@ -112,6 +128,12 @@ export async function compileNativewindCss(opts: {
   }
 
   const result = new Map<string, string>();
+  const failed: string[] = [];
+  const fail = (cssPath: string, msg: string) => {
+    warn(msg);
+    failed.push(cssPath);
+    result.set(cssPath, failedCssModule(cssPath));
+  };
   for (const cssPath of cssPaths) {
     const css = vfs.read(cssPath);
     if (!css) {
@@ -128,8 +150,13 @@ export async function compileNativewindCss(opts: {
       });
       if (!res.ok) {
         const size = res.status === 413 ? ` -- request body ${Math.round(bytes.length / 1024)}KB gzipped (${Math.round(rawBytes / 1024)}KB raw) rejected by the server` : "";
-        warn(`[nativewind] compile failed for ${cssPath} (HTTP ${res.status}${size}); styles unchanged -- className styles and darkMode flags will be missing on this platform`);
-        return null;
+        const detail = await serverError(res);
+        fail(
+          cssPath,
+          `[nativewind] [${platform}] compile failed for ${cssPath} (HTTP ${res.status}${size})${detail ? `: ${detail}` : ""}; ` +
+            `className styles and darkMode flags will be missing on this platform wherever this file supplies them`
+        );
+        continue;
       }
       const { data } = (await res.json()) as { data: { web?: boolean; css?: string } };
       if (data?.web) {
@@ -159,9 +186,31 @@ export async function compileNativewindCss(opts: {
         );
       }
     } catch (err) {
-      warn(`[nativewind] compile failed for ${cssPath} (${(err as Error).message}); styles unchanged`);
-      return null;
+      fail(cssPath, `[nativewind] [${platform}] compile failed for ${cssPath} (${(err as Error).message}); its styles are missing on this platform`);
     }
   }
+  opts.failed?.push(...failed);
+  // Nothing compiled (server down, request too large): keep the previous modules.
+  if (failed.length === cssPaths.length && failed.length > 0) return null;
   return result;
+}
+
+/** The first line of the server's error, for the warning. */
+async function serverError(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    let msg = text;
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown };
+      if (typeof parsed.error === "string") msg = parsed.error;
+    } catch {
+      /* plain text */
+    }
+    const lines = msg.split("\n").map((l) => l.trim()).filter(Boolean);
+    // "Command failed: node runner.cjs ..." is noise; the error is the next line.
+    const line = lines.find((l) => !/^Command failed:/.test(l)) ?? lines[0] ?? "";
+    return line.slice(0, 200);
+  } catch {
+    return "";
+  }
 }
