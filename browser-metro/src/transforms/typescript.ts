@@ -1,6 +1,7 @@
 import { transform } from "sucrase";
 import type { RawSourceMap } from "../source-map.js";
 import { Transformer } from "../types.js";
+import { splitMultiDeclaratorExports } from "./split-exports.js";
 
 export interface TypescriptTransformerOptions {
   /**
@@ -22,7 +23,8 @@ export function createTypescriptTransformer(
       const transforms: ("typescript" | "imports" | "jsx")[] = ["imports"];
       if (ext === ".ts" || ext === ".tsx") transforms.unshift("typescript");
       if (ext === ".tsx" || ext === ".jsx") transforms.push("jsx");
-      const result = transform(src, {
+      // sucrase exports only the first name of `export const A = 1, B = 2` (split-exports.ts)
+      const result = transform(splitMultiDeclaratorExports(src), {
         transforms,
         filePath: filename,
         ...(options.jsxRuntime === "automatic"
