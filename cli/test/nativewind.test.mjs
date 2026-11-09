@@ -172,3 +172,19 @@ test("the compile request keeps a small app's sources as they are, and reduces a
   assert.ok(large["/app/big.tsx"].length < 1000, "deduplicated to a few tokens");
   assert.ok(large["/app/big.tsx"].split("\n").some((t) => t.includes("text-primary")));
 });
+
+test("the reduced content keeps tailwind.config.js, root files and what the config requires as code (RingCode: HTTP 500)", () => {
+  const content = {
+    "/tailwind.config.js": `const tokens = require("./src/theme/tokens");\nmodule.exports = { content: ["./src/**/*.tsx"], theme: { extend: tokens } };`,
+    "/src/theme/tokens.js": `module.exports = { colors: { brand: "#123456" } };`,
+    "/src/theme/colors.ts": `export const c = "text-brand";`,
+    "/App.tsx": `export default () => <View className="p-4" />;`,
+    "/src/app.tsx": `export default () => <View className="p-4" />;`,
+  };
+  const out = reduceTailwindContent(content, content["/tailwind.config.js"]);
+  assert.strictEqual(out["/tailwind.config.js"], content["/tailwind.config.js"]);
+  assert.strictEqual(out["/src/theme/tokens.js"], content["/src/theme/tokens.js"]);
+  assert.strictEqual(out["/App.tsx"], content["/App.tsx"]);
+  assert.notStrictEqual(out["/src/app.tsx"], content["/src/app.tsx"], "a source file in a folder is reduced");
+  assert.ok(out["/src/app.tsx"].split("\n").some((t) => t.includes("p-4")));
+});
