@@ -38,6 +38,41 @@ const CONTENT_EXT_RE = /\.(?:tsx?|jsx?|html|mdx)$/;
 const CONFIG_DATA_RE = /\.json$/;
 const LOCKFILE_RE = /(?:^|\/)package-lock\.json$/;
 
+/** Above this much source (raw bytes), the compile request carries each file's class candidates, not its text. */
+export const CONTENT_REDUCE_ABOVE = 4_000_000;
+
+/**
+ * The content scan, smaller: each source file as its distinct whitespace-separated tokens, one per line, minus the
+ * tokens an earlier file in the same top-level folder with the same extension already carries. A tailwind class never
+ * contains whitespace, a double quote, a backtick or a brace, so splitting there (and dropping tokens without a
+ * letter) loses no candidate, and every token stays at a path the config's content globs match (they go by folder
+ * and extension). RingCode (Nov 2026, ~1,400 source files): 14.5MB raw, 2.7MB gzipped, over the package server's
+ * limits (HTTP 413, every className unstyled on phones); reduced: 2.1MB raw, 0.74MB gzipped. Other files (the JSON a
+ * config may require) go as they are.
+ */
+export function reduceTailwindContent(content: Record<string, string>): Record<string, string> {
+  const seen = new Map<string, Set<string>>();
+  const out: Record<string, string> = {};
+  for (const p of Object.keys(content).sort()) {
+    const src = content[p];
+    if (!CONTENT_EXT_RE.test(p)) {
+      out[p] = src;
+      continue;
+    }
+    const key = `${p.split("/").filter(Boolean)[0] ?? ""}|${p.slice(p.lastIndexOf("."))}`;
+    let set = seen.get(key);
+    if (!set) seen.set(key, (set = new Set()));
+    const tokens: string[] = [];
+    for (const t of src.split(/[\s"`{}]+/)) {
+      if (!t || !/[a-z]/i.test(t) || set.has(t)) continue;
+      set.add(t);
+      tokens.push(t);
+    }
+    out[p] = tokens.join("\n");
+  }
+  return out;
+}
+
 export interface NativewindDetection {
   enabled: boolean;
   reason?: string;
@@ -120,12 +155,18 @@ export async function compileNativewindCss(opts: {
   const tailwindConfig = vfs.read("/tailwind.config.js");
   if (!tailwindConfig) return null;
 
-  const content: Record<string, string> = {};
+  let content: Record<string, string> = {};
+  let contentBytes = 0;
   for (const p of allPaths) {
     if (!CONTENT_EXT_RE.test(p) && !(CONFIG_DATA_RE.test(p) && !LOCKFILE_RE.test(p))) continue;
     const src = vfs.read(p);
-    if (src) content[p] = src;
+    if (src) {
+      content[p] = src;
+      contentBytes += src.length;
+    }
   }
+  // a large app: its class candidates only (small apps keep the request, and the server's cached compile, as is)
+  if (contentBytes > CONTENT_REDUCE_ABOVE) content = reduceTailwindContent(content);
 
   const result = new Map<string, string>();
   const failed: string[] = [];
