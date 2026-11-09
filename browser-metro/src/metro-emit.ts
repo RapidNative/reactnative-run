@@ -46,6 +46,30 @@ export interface MetroEmitOptions {
   prelude?: string;
 }
 
+/** A `console` for the moments before @react-native/js-polyfills/console runs.
+ *
+ *  Every package chunk opens with `var React = require('react')` (the
+ *  reactnative-esm banner), the console polyfill's included, so React's
+ *  development build evaluates first and reads `console.createTask` at the top
+ *  level. React Native installs its own console from a task on the runtime
+ *  scheduler, which is not ordered against the bundle's evaluation: when the
+ *  bundle wins, the app dies at launch with "[runtime not ready]: ReferenceError:
+ *  Property 'console' doesn't exist" (most Expo Go 58 Android opens on a busy
+ *  emulator, Nov 2026). Metro never hits this because its polyfill is a plain
+ *  prelude script with no imports.
+ *
+ *  Only defined when there is no console yet. It writes through
+ *  nativeLoggingHook, and the real polyfill replaces it moments later
+ *  (it does so whenever nativeLoggingHook exists). */
+const PRELUDE_CONSOLE =
+  "if (typeof global.console === 'undefined') {\n" +
+  "  (function () {\n" +
+  "    var write = function (level) { return function () { if (typeof global.nativeLoggingHook === 'function') { try { global.nativeLoggingHook(Array.prototype.map.call(arguments, String).join(' '), level); } catch (e) {} } }; };\n" +
+  "    var noop = function () {};\n" +
+  "    global.console = { log: write(1), info: write(1), debug: write(0), trace: write(0), warn: write(2), error: write(3), group: write(1), groupCollapsed: write(1), groupEnd: noop, table: write(1), dir: write(1), assert: function (ok) { if (!ok) write(3).apply(null, Array.prototype.slice.call(arguments, 1)); }, time: noop, timeEnd: noop, timeLog: noop, count: noop, countReset: noop };\n" +
+  "  })();\n" +
+  "}\n";
+
 /** Metro-style var prelude. `__DEV__` is a real var here -- native package
  *  builds deliberately do NOT define __DEV__ so it binds to this one. */
 export function buildMetroPrelude(opts: MetroEmitOptions): string {
@@ -60,7 +84,8 @@ export function buildMetroPrelude(opts: MetroEmitOptions): string {
     "var __METRO_GLOBAL_PREFIX__ = '';\n" +
     "var process = globalThis.process || {};\n" +
     "process.env = process.env || {};\n" +
-    `process.env.NODE_ENV = process.env.NODE_ENV || ${JSON.stringify(dev ? "development" : "production")};\n`;
+    `process.env.NODE_ENV = process.env.NODE_ENV || ${JSON.stringify(dev ? "development" : "production")};\n` +
+    PRELUDE_CONSOLE;
   if (opts.platform) {
     prelude += `process.env.EXPO_OS = process.env.EXPO_OS || ${JSON.stringify(opts.platform)};\n`;
   }
