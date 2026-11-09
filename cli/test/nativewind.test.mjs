@@ -130,3 +130,45 @@ test("when every css file fails, the result is null (previous modules kept)", as
   assert.strictEqual(out, null);
   assert.deepStrictEqual(failed.sort(), ["/b.css", "/global.css"]);
 });
+
+import { reduceTailwindContent, CONTENT_REDUCE_ABOVE } from "../dist/project/nativewind.js";
+
+test("a large app's content is sent as its class candidates, deduplicated per folder and extension (RingCode: HTTP 413)", () => {
+  const content = {
+    "/app/index.tsx": `export default function A() { return <View className="flex-1 bg-[url('/a.png')] grid-cols-[repeat(2,1fr)]">{x}</View>; }`,
+    "/app/other.tsx": `export default function B() { return <View className={\`flex-1 \${on ? "md:hover:bg-black/70" : ""}\`} />; }`,
+    "/src/lib/x.ts": `const c = "flex-1 [&>svg]:size-4";`,
+    "/theme.json": `{ "a": 1 }`,
+  };
+  const out = reduceTailwindContent(content);
+  const toks = (p) => out[p].split("\n");
+  // every candidate survives, at a path in its own folder
+  assert.ok(toks("/app/index.tsx").some((t) => t.includes("bg-[url('/a.png')]")));
+  assert.ok(toks("/app/index.tsx").some((t) => t.includes("grid-cols-[repeat(2,1fr)]")));
+  assert.ok(toks("/app/other.tsx").some((t) => t.includes("md:hover:bg-black/70")));
+  assert.ok(toks("/src/lib/x.ts").includes("flex-1"), "another folder keeps its own copy");
+  assert.ok(toks("/src/lib/x.ts").includes("[&>svg]:size-4"));
+  // the same folder and extension doesn't repeat it
+  assert.ok(!toks("/app/other.tsx").includes("flex-1"));
+  // config data goes as it is
+  assert.equal(out["/theme.json"], content["/theme.json"]);
+  assert.ok(CONTENT_REDUCE_ABOVE >= 1_000_000);
+});
+
+test("the compile request keeps a small app's sources as they are, and reduces a large app's", async () => {
+  const sent = async (vfsFiles) => {
+    let body;
+    const fetch = async (_url, init) => {
+      body = JSON.parse(gunzipSync(init.body).toString("utf8"));
+      return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    };
+    await compileNativewindCss({ vfs: fakeVfs(vfsFiles), platform: "ios", packageServerUrl: "https://esm.example", fetch, warn: () => {} });
+    return body.content;
+  };
+  const small = await sent(files);
+  assert.strictEqual(small["/app/index.tsx"], files["/app/index.tsx"]);
+  const big = { ...files, "/app/big.tsx": `const s = "${"word ".repeat(1_000_000)}";\nexport default () => <View className="p-4 text-primary" />;` };
+  const large = await sent(big);
+  assert.ok(large["/app/big.tsx"].length < 1000, "deduplicated to a few tokens");
+  assert.ok(large["/app/big.tsx"].split("\n").some((t) => t.includes("text-primary")));
+});
