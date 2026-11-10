@@ -56,6 +56,7 @@ import { makePackageMapsPlugin } from "./package-maps";
 import { failedChunk } from "./failed-chunk";
 import { unresolvableOnWeb } from "./web-leniency";
 import { makeNativePatchesPlugin } from "./native-patches";
+import { originalPackageName } from "./original-key";
 
 /**
  * esbuild.build wrapper that tolerates missing re-export bindings, mirroring
@@ -854,10 +855,18 @@ async function handlePkgRequest(res: Response, pkgName: string, version: string,
 	// The client's intent is unambiguous -- it wants the original module -- so
 	// serve it. This repairs already-deployed clients that cannot be rolled
 	// forward, and stays harmless once they stop asking.
+	//
+	// The key is usually the package name itself ("expo-sensors__original", from
+	// browser-metro's expo-sensors web shim), and only sometimes a subpath
+	// ("pkg/sub__original"): both map back to the real module.
 	if (subpath.endsWith("__original")) {
 		const real = subpath.slice(0, -"__original".length);
 		console.log(`[pkg] serving ${pkgName}${real} for synthetic ${pkgName}${subpath}${platform === "web" ? "" : ` [${platform}]`}`);
 		subpath = real;
+	} else if (!subpath && pkgName.endsWith("__original")) {
+		const real = originalPackageName(pkgName);
+		console.log(`[pkg] serving ${real} for synthetic ${pkgName}${platform === "web" ? "" : ` [${platform}]`}`);
+		pkgName = real;
 	}
 	const requireSpecifier = pkgName + subpath;
 	const platLabel = platform === "web" ? "" : ` [${platform}]`;
