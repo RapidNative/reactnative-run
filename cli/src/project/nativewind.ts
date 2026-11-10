@@ -50,12 +50,15 @@ export const CONTENT_REDUCE_ABOVE = 4_000_000;
  * limits (HTTP 413, every className unstyled on phones); reduced: 2.1MB raw, 0.74MB gzipped. Other files (the JSON a
  * config may require) go as they are.
  */
-export function reduceTailwindContent(content: Record<string, string>): Record<string, string> {
+export function reduceTailwindContent(content: Record<string, string>, tailwindConfig = ""): Record<string, string> {
   const seen = new Map<string, Set<string>>();
   const out: Record<string, string> = {};
+  const keep = configFiles(content, tailwindConfig);
   for (const p of Object.keys(content).sort()) {
     const src = content[p];
-    if (!CONTENT_EXT_RE.test(p)) {
+    // the server materializes these and runs the config with Node: a file at the root (tailwind.config.js itself)
+    // or one the config requires has to stay code (RingCode, Nov 2026: "tailwind.config.js:1", HTTP 500)
+    if (!CONTENT_EXT_RE.test(p) || keep.has(p) || p.split("/").filter(Boolean).length < 2) {
       out[p] = src;
       continue;
     }
@@ -71,6 +74,31 @@ export function reduceTailwindContent(content: Record<string, string>): Record<s
     out[p] = tokens.join("\n");
   }
   return out;
+}
+
+/** The files tailwind.config.js requires or imports (`require("./src/theme/tokens")`), as content paths. */
+function configFiles(content: Record<string, string>, tailwindConfig: string): Set<string> {
+  const keep = new Set<string>();
+  const queue = [{ from: "/tailwind.config.js", src: tailwindConfig }];
+  while (queue.length) {
+    const { from, src } = queue.shift()!;
+    for (const m of src.matchAll(/(?:require\(\s*|from\s+|import\s+)["'](\.{1,2}\/[^"']+)["']/g)) {
+      const base = from.slice(0, from.lastIndexOf("/") + 1);
+      const parts: string[] = [];
+      for (const seg of (base + m[1]).split("/")) {
+        if (seg === "..") parts.pop();
+        else if (seg && seg !== ".") parts.push(seg);
+      }
+      const target = "/" + parts.join("/");
+      for (const cand of [target, ...[".js", ".cjs", ".mjs", ".ts", ".json"].map((e) => target + e), ...["/index.js", "/index.ts"].map((e) => target + e)]) {
+        if (cand in content && !keep.has(cand)) {
+          keep.add(cand);
+          queue.push({ from: cand, src: content[cand] });
+        }
+      }
+    }
+  }
+  return keep;
 }
 
 export interface NativewindDetection {
@@ -166,7 +194,7 @@ export async function compileNativewindCss(opts: {
     }
   }
   // a large app: its class candidates only (small apps keep the request, and the server's cached compile, as is)
-  if (contentBytes > CONTENT_REDUCE_ABOVE) content = reduceTailwindContent(content);
+  if (contentBytes > CONTENT_REDUCE_ABOVE) content = reduceTailwindContent(content, tailwindConfig);
 
   const result = new Map<string, string>();
   const failed: string[] = [];
