@@ -14,7 +14,7 @@
  * map.
  */
 
-import { findRequires } from "./utils.js";
+import { findRequires, PRELUDE_PROCESS_STUBS } from "./utils.js";
 import { ModuleIdRegistry } from "./module-ids.js";
 
 const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
@@ -84,6 +84,7 @@ export function buildMetroPrelude(opts: MetroEmitOptions): string {
     "var __METRO_GLOBAL_PREFIX__ = '';\n" +
     "var process = globalThis.process || {};\n" +
     "process.env = process.env || {};\n" +
+    PRELUDE_PROCESS_STUBS +
     `process.env.NODE_ENV = process.env.NODE_ENV || ${JSON.stringify(dev ? "development" : "production")};\n` +
     PRELUDE_CONSOLE;
   if (opts.platform) {

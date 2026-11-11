@@ -194,6 +194,16 @@ interface AcornNode {
 const PUBLIC_ENV_PREFIXES = ["EXPO_PUBLIC_", "NEXT_PUBLIC_"];
 
 /**
+ * Node `process` methods that npm packages call at load time, defined only when missing.
+ * Silent, like Metro: there these packages resolve to their ESM builds and never call them.
+ * three 0.187's CommonJS build runs `process.emitWarning("require(\"three\") is deprecated")`
+ * as it loads, so every app using three / @react-three/* died with
+ * "process.emitWarning is not a function" (CoachLife, Nov 2026).
+ */
+export const PRELUDE_PROCESS_STUBS =
+  'if (typeof process.emitWarning !== "function") process.emitWarning = function () {};\n';
+
+/**
  * Build the bundle preamble (Metro-style). Defines `process` global so npm
  * packages that check `process.env.NODE_ENV` work in the browser.
  * Optionally injects public env vars (EXPO_PUBLIC_*, NEXT_PUBLIC_*).
@@ -208,6 +218,7 @@ export function buildBundlePreamble(
   let preamble =
     "var process = globalThis.process || {};\n" +
     "process.env = process.env || {};\n" +
+    PRELUDE_PROCESS_STUBS +
     'process.env.NODE_ENV = process.env.NODE_ENV || "development";\n' +
     // babel-preset-expo inlines this under Metro; expo / expo-router /
     // expo-modules-core branch on it at runtime.
