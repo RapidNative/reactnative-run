@@ -98,6 +98,10 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
       await session.ensureBuilt();
     }
     if (platform !== "web") {
+      // Whether an earlier request already started this platform's session:
+      // only that session's failed build is worth retrying below (a build this
+      // request just ran and saw fail would fail again).
+      const existed = !!ctx.peekPlatformSession?.(platform);
       // A device that scans before the session is ready would otherwise wait in
       // silence for the whole build (minutes when the dependency bundle is
       // cold) and give up. Answer now, and tell it what we are doing.
@@ -141,6 +145,14 @@ export function registerNativeRoutes(router: Router, ctx: ServerContext): void {
         return;
       }
       session = native;
+      // A native session whose first build failed (the package server was
+      // unreachable, say) keeps its error and no bundle. Without this every
+      // later request got that stale error until a file changed or the
+      // container restarted, long after the cause was gone (2026-11-15: an
+      // expired package-proxy cert left phones on "fetch failed" after it was
+      // renewed). Retry it, as web already does through ensureBuilt above;
+      // concurrent retries share one build.
+      if (existed && !session.getBundle() && session.buildError) await session.ensureBuilt();
     }
     if (!session.getBundle()) {
       // Metro parity: a JSON error body makes the RN bundle loader surface a
