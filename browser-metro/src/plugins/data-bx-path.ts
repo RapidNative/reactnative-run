@@ -38,6 +38,77 @@ const JSX_KEYWORDS = new Set([
   "await",
 ]);
 
+const REGEX_KEYWORDS = new Set([
+  "return",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "case",
+  "do",
+  "else",
+  "yield",
+  "await",
+]);
+
+/**
+ * Check if `/` at position `pos` starts a regular expression literal (not division).
+ * Looks backwards to the preceding non-whitespace token:
+ * - start of file, an operator or an opening bracket (`( , = : [ ! & | ? ; + - * % ~ ^ {`) -> regex
+ * - a keyword such as `return` or `typeof` -> regex
+ * - anything else (identifier, number, `)`, `]`, `}`, `>`, `<`, quotes) -> division, JSX or a
+ *   closing tag; `}` and `>` stay "not regex" so `{x}/>` and `<Text>/a</Text>` are left alone
+ */
+function isRegexStart(src: string, pos: number): boolean {
+  let j = pos - 1;
+  while (j >= 0) {
+    const c = src.charCodeAt(j);
+    if (c !== 32 && c !== 9 && c !== 10 && c !== 13) break;
+    j--;
+  }
+  if (j < 0) return true;
+  const c = src.charCodeAt(j);
+  if (isWordChar(c)) {
+    const end = j + 1;
+    while (j >= 0 && isWordChar(src.charCodeAt(j))) j--;
+    return REGEX_KEYWORDS.has(src.slice(j + 1, end));
+  }
+  // ( , = : [ ! & | ? ; + - * % ~ ^ {
+  return "(,=:[!&|?;+-*%~^{".includes(src[j]);
+}
+
+/**
+ * The end (exclusive) of the regex literal starting at `pos`, or -1 when there is none on this line
+ * (then the `/` is treated as ordinary code). Skips escapes and `[...]` classes, where `/` doesn't close.
+ */
+function regexEnd(src: string, pos: number): number {
+  let k = pos + 1;
+  let inClass = false;
+  while (k < src.length) {
+    const c = src.charCodeAt(k);
+    if (c === 10 || c === 13) return -1;
+    if (c === 92) {
+      k += 2;
+      continue;
+    }
+    if (inClass) {
+      if (c === 93) inClass = false;
+    } else if (c === 91) {
+      inClass = true;
+    } else if (c === 47) {
+      k++;
+      while (k < src.length && isWordChar(src.charCodeAt(k))) k++; // flags
+      return k;
+    }
+    k++;
+  }
+  return -1;
+}
+
 /**
  * Check if `<` at position `pos` is in a JSX context (not a comparison operator).
  * Looks backwards to find the preceding non-whitespace token and decides:
@@ -191,6 +262,17 @@ function injectDataBxPath(src: string, filename: string): string {
           state = 4; // //
         } else if (next === 42) {
           state = 5; // /*
+        } else if (isRegexStart(src, i)) {
+          // a regex literal: copy it whole, so a quote inside it (`/"/g`) doesn't open a string
+          // and a `<` inside it isn't read as a tag (Knotsy, Nov 2026: `.replace(/"/g, "&quot;")`
+          // flipped every string after it, and `"<h2>"` got a data-bx-path)
+          const end = regexEnd(src, i);
+          if (end > 0) {
+            result += src.slice(i, end);
+            col += end - i;
+            i = end;
+            continue;
+          }
         }
       } else if (
         cc === 60 &&
@@ -251,9 +333,10 @@ function injectDataBxPath(src: string, filename: string): string {
         }
       }
     } else if (state === 1) {
-      if (cc === 39) state = 0;
+      // a quoted string never spans a line: a stray quote (JSX text such as `Don't`) stops at the line end
+      if (cc === 39 || cc === 10) state = 0;
     } else if (state === 2) {
-      if (cc === 34) state = 0;
+      if (cc === 34 || cc === 10) state = 0;
     } else if (state === 3) {
       if (cc === 96) state = 0;
     } else if (state === 4) {
