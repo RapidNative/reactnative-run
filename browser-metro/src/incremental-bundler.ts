@@ -1260,6 +1260,20 @@ export class IncrementalBundler {
         ) {
           continue;
         }
+        // The same goes for a source file nothing imports: a Node
+        // script the agent wrote next to the app (scripts/check.mjs with
+        // `import { readFileSync } from "node:fs"`) failed the whole rebuild
+        // with 'Unable to resolve "node:fs"' (Rip Yours, 2026-11-18), though
+        // Metro never bundles it. A file that does belong still gets in: a new
+        // route through the regenerated /__expo_ctx.js (applyRouteStructureChanges),
+        // a new import through its importer (Phase 2 walks new local deps, and
+        // Phase 1b re-processes importers of a stub). A file already in the
+        // module map -- a module, or the stub of one that was missing -- is
+        // reprocessed as before. (Created or updated alike: a script saved
+        // twice is still not part of the app.)
+        if (this.moduleMap[change.path] === undefined) {
+          continue;
+        }
         // Create or update: only reprocess the changed file itself.
         // Dependents don't need re-transformation -- the HMR runtime
         // handles re-execution by walking accept boundaries.
