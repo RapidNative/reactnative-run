@@ -1219,6 +1219,8 @@ export class IncrementalBundler {
     // so the running iframe's `modules` closure has them before re-execution —
     // otherwise require('new-package') throws "Module not found".
     const preRebuildNpmIds = new Set<string>(npmPackagesNeeded);
+    // Every module the client has now, so the HMR update can say which ones are new (addedModules).
+    const preRebuildIds = new Set<string>(Object.keys(this.moduleMap));
 
     // Phase 1: Classify changes and collect files to reprocess
     for (const change of changes) {
@@ -1476,6 +1478,7 @@ export class IncrementalBundler {
           removedModules,
           requiresReload: false,
           reverseDepsMap: this.graph.getReverseDepsMap(),
+          addedModules: Object.keys(updatedModules).filter((id) => !preRebuildIds.has(id)),
         };
       }
     }

@@ -28,6 +28,8 @@ export function mergeHistory(history: HistoryEntry[], from: number, current: num
   if (from > current) return null;
 
   const removed = new Set<string>();
+  // New to a device at `from`: added by any rebuild since. Unknown if one rebuild didn't record it.
+  let added: Set<string> | null = new Set<string>();
   let expected = from + 1;
   for (const entry of history) {
     if (entry.version <= from) continue;
@@ -43,8 +45,11 @@ export function mergeHistory(history: HistoryEntry[], from: number, current: num
       removed.add(key);
     }
     Object.assign(merged.reverseDepsMap!, entry.update.reverseDepsMap ?? {});
+    if (added && entry.update.addedModules) for (const key of entry.update.addedModules) added.add(key);
+    else added = null;
   }
   if (expected !== current + 1) return null; // history doesn't reach `current`
   merged.removedModules = [...removed];
+  if (added) merged.addedModules = Object.keys(merged.updatedModules).filter((k) => added!.has(k));
   return merged;
 }
