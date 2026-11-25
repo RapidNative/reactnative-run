@@ -222,10 +222,19 @@ export function buildMetroHmrBody(
     updatedModules: Record<string, string>;
     removedModules: string[];
     reverseDepsMap?: Record<string, string[]>;
+    addedModules?: string[];
   },
   registry: ModuleIdRegistry,
   revisionId: string
 ): MetroHmrBody {
+  // New = the device never had it. Not `!registry.has(key)`: the rebuild emits its bundle, and so
+  // gives every module an id, before this runs, so that was always false and new modules went out
+  // as `modified`. In a cycle (a barrel and a new file importing each other) one could then be
+  // hot-swapped before the other was defined: "Requiring unknown module" on the phone. `added` is
+  // defined first and runs nothing, so it is always safe. Fall back to the registry when the
+  // update doesn't say (an update recorded before addedModules existed).
+  const added = update.addedModules ? new Set(update.addedModules) : null;
+  const isNewKey = (key: string) => (added ? added.has(key) : !registry.has(key));
   // Numeric transitive ancestor map for one module: {id: parentIds[]} for
   // every ancestor on the path(s) up to the roots. metro-runtime walks this
   // to find the nearest React Refresh boundary.
@@ -251,7 +260,7 @@ export function buildMetroHmrBody(
   }
   const pending: Pending[] = [];
   for (const [key, code] of Object.entries(update.updatedModules)) {
-    const isNew = !registry.has(key);
+    const isNew = isNewKey(key);
     const { text, depKeys } = emitMetroModule(code, key, registry, {
       inverseDependencies: ancestorsFor(key),
     });
@@ -286,10 +295,10 @@ export function buildMetroHmrBody(
     remaining = remaining.filter((p) => !emittedIds.has(p.module[0]));
   }
 
-  const added = ordered.filter((p) => p.isNew).map(({ isNew, depIds, ...e }) => e);
+  const addedEntries = ordered.filter((p) => p.isNew).map(({ isNew, depIds, ...e }) => e);
   const modified = ordered.filter((p) => !p.isNew).map(({ isNew, depIds, ...e }) => e);
   const deleted = update.removedModules.filter((k) => registry.has(k)).map((k) => registry.idFor(k));
-  return { revisionId, isInitialUpdate: false, added, modified, deleted };
+  return { revisionId, isInitialUpdate: false, added: addedEntries, modified, deleted };
 }
 
 /**

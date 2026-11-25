@@ -167,6 +167,13 @@ export interface HmrUpdate {
   requiresReload: boolean;
   reloadReason?: string;
   reverseDepsMap?: Record<string, string[]>;
+  /**
+   * Keys of updatedModules the client has never had (not in the bundle before this rebuild).
+   * Metro-format patches send these as `added`, which RN's HMRClient defines before it hot-swaps
+   * anything. Recorded here because the rebuild has already given every module an id by the time
+   * the patch is built, so the id registry can't tell new from changed.
+   */
+  addedModules?: string[];
 }
 
 export interface IncrementalBuildResult {

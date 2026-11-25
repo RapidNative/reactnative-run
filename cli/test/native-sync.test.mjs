@@ -48,6 +48,19 @@ test('mergeHistory: removed-then-added lands as updated; added-then-removed as r
   assert.deepEqual(m.removedModules, ['/x']);
 });
 
+test('mergeHistory: a module added by any rebuild the device missed is new to it (addedModules)', () => {
+  const history = [
+    { version: 2, update: { ...upd({ '/card': 'c2', '/barrel': 'b2' }), addedModules: ['/card'] } },
+    { version: 3, update: { ...upd({ '/card': 'c3', '/new2': 'n3' }), addedModules: ['/new2'] } },
+  ];
+  // At 1 the device has neither: both are added. At 2 it has /card: only /new2 is.
+  assert.deepEqual(mergeHistory(history, 1, 3).addedModules.sort(), ['/card', '/new2']);
+  assert.deepEqual(mergeHistory(history, 2, 3).addedModules, ['/new2']);
+  // An update recorded without addedModules: unknown, so the patch builder falls back.
+  const old = [{ version: 2, update: upd({ '/a': 'a2' }) }, history[1]];
+  assert.equal(mergeHistory(old, 1, 3).addedModules, undefined);
+});
+
 test('mergeHistory: a full rebuild in between, a trimmed history, or a client ahead → null', () => {
   assert.equal(mergeHistory([{ version: 2, update: upd({ '/a': 'a' }) }, { version: 3, update: null }], 1, 3), null);
   // history starts at 5; a client at 2 can't be reached
