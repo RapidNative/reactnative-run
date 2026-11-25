@@ -165,9 +165,10 @@ export const NATIVE_DEV_CLIENT_SOURCE = `/* rnrun native dev client */
   }
   // Metro sends what a device lacks as "added" and defines it before hot-swapping anything:
   // swapping a module walks up to its parents, and a parent this device doesn't have yet throws
-  // "[Refresh] Expected to find the updated module". A catch-up patch can only mark what the
-  // server lacked, so modules the agent added after this bundle arrive as "modified". Sort by
-  // what this device actually has (metro-runtime's module map, exposed in dev).
+  // "[Refresh] Expected to find the updated module". The server marks what each rebuild added
+  // (HmrUpdate.addedModules), but an update recorded without it falls back to the server's id
+  // registry, which marks nothing. Sort by what this device actually has (metro-runtime's module
+  // map, exposed in dev), whatever the patch says.
   // A catch-up can also need a full refresh: metro-runtime asks for one when a swapped module
   // has no React Refresh boundary above it, e.g. when its only new parent hasn't run yet. In
   // anonymous mode that reload replays this same bundle and this same patch, so while a catch-up
