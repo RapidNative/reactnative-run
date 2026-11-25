@@ -1334,14 +1334,18 @@ export class IncrementalBundler {
       // so transitive deps (e.g. barrel re-exports) were missing from HMR.
       for (const dep of localDeps) {
         if (!this.fs.exists(dep)) {
-          // A dep deleted in THIS batch is already in removedModules; don't
-          // also ship a stub for it in the same update. Anything else missing
-          // gets the throwing stub so the HMR payload defines the id the
-          // edited module now references (see stubMissingModule).
-          if (!removedModules.includes(dep)) {
-            this.stubMissingModule(dep, filePath);
-            rebuiltModules.push(dep);
-          }
+          // Missing, so it gets the throwing stub and the HMR payload defines
+          // the id the module references (see stubMissingModule). That holds
+          // for a file deleted in THIS batch too: the importer still requires
+          // it (its source didn't change, so processFile served the cached
+          // code), and skipping the stub left the bundle referencing an id it
+          // never defines. The device threw 'Requiring unknown module "107"'
+          // (a paid project, 2026-11-19: the owner deleted a hook's import target). The
+          // stub replaces the delete, so the payload doesn't carry both.
+          const deleted = removedModules.indexOf(dep);
+          if (deleted !== -1) removedModules.splice(deleted, 1);
+          this.stubMissingModule(dep, filePath);
+          if (!rebuiltModules.includes(dep)) rebuiltModules.push(dep);
         } else if (!this.graph.hasModule(dep)) {
           const walked = this.walkDeps(dep, npmPackagesNeeded);
           for (const w of walked) {

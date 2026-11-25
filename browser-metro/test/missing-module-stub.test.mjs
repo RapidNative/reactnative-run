@@ -144,3 +144,75 @@ test('an importer whose extensionless import was stubbed re-resolves when the fi
   assert.ok(!/Unable to resolve/.test(result.bundle), 'no module may still require the stub');
   assertNoDanglingIds(result.bundle);
 });
+
+// A paid project (2026-11-19): the owner deleted src/lib/incomingLikes.ts while
+// useIncomingLikes.ts still imported it. The importer was reprocessed from its
+// cached code (its source didn't change), which still requires the deleted
+// path, but the stub was skipped for files deleted in the same batch. The
+// bundle kept the old id in the importer's dependency map with no module
+// behind it, and the phone threw 'Requiring unknown module "107"'.
+test('deleting a file that is still imported stubs it instead of leaving a dangling id', async () => {
+  const fs = makeFs({
+    '/index.js': 'module.exports = require("./hook.ts").useLikes;',
+    '/hook.ts': 'import { likes } from "./lib/likes";\nexport const useLikes = () => likes;',
+    '/lib/likes.ts': 'export const likes = [1, 2];',
+  });
+  const bundler = new IncrementalBundler(fs, CONFIG);
+  await bundler.build('/index.js');
+
+  fs.delete('/lib/likes.ts');
+  const result = await bundler.rebuild([{ path: '/lib/likes.ts', type: 'delete' }]);
+
+  assertNoDanglingIds(result.bundle);
+  assert.match(result.bundle, /Unable to resolve \\?"\/lib\/likes\.ts\\?" from \\?"\/hook\.ts\\?"/);
+  assert.ok(result.hmrUpdate, 'expected an HMR update');
+  assert.match(result.hmrUpdate.updatedModules['/lib/likes.ts'] ?? '', /Unable to resolve/, 'the patch must define the stub');
+  assert.ok(!result.hmrUpdate.removedModules.includes('/lib/likes.ts'), 'a stubbed path must not also be deleted');
+
+  // Restoring the file replaces the stub.
+  fs.write('/lib/likes.ts', 'export const likes = [3];');
+  const back = await bundler.rebuild([{ path: '/lib/likes.ts', type: 'create' }]);
+  assert.ok(!/Unable to resolve/.test(back.bundle), 'the restored file must replace the stub');
+  assertNoDanglingIds(back.bundle);
+});
+
+test('renaming a file that is still imported under its old name stubs the old name', async () => {
+  const fs = makeFs({
+    '/index.js': 'module.exports = require("./hook.ts").useLikes;',
+    '/hook.ts': 'import { likes } from "./lib/likes";\nexport const useLikes = () => likes;',
+    '/lib/likes.ts': 'export const likes = [1, 2];',
+  });
+  const bundler = new IncrementalBundler(fs, CONFIG);
+  await bundler.build('/index.js');
+
+  fs.delete('/lib/likes.ts');
+  fs.write('/lib/incoming-likes.ts', 'export const likes = [1, 2];');
+  const result = await bundler.rebuild([
+    { path: '/lib/likes.ts', type: 'delete' },
+    { path: '/lib/incoming-likes.ts', type: 'create' },
+  ]);
+
+  assertNoDanglingIds(result.bundle);
+  assert.match(result.bundle, /Unable to resolve \\?"\/lib\/likes\.ts\\?"/);
+});
+
+test('a file deleted together with its last import is deleted, not stubbed', async () => {
+  const fs = makeFs({
+    '/index.js': 'module.exports = require("./hook.ts").useLikes;',
+    '/hook.ts': 'import { likes } from "./lib/likes";\nexport const useLikes = () => likes;',
+    '/lib/likes.ts': 'export const likes = [1, 2];',
+  });
+  const bundler = new IncrementalBundler(fs, CONFIG);
+  await bundler.build('/index.js');
+
+  fs.delete('/lib/likes.ts');
+  fs.write('/hook.ts', 'export const useLikes = () => [];');
+  const result = await bundler.rebuild([
+    { path: '/lib/likes.ts', type: 'delete' },
+    { path: '/hook.ts', type: 'update' },
+  ]);
+
+  assertNoDanglingIds(result.bundle);
+  assert.ok(!/Unable to resolve/.test(result.bundle), 'nothing requires it any more, so no stub');
+  assert.ok(result.hmrUpdate.removedModules.includes('/lib/likes.ts'), 'the patch deletes it');
+});
